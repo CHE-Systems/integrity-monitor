@@ -9,8 +9,10 @@ export function formatRuleId(ruleId: string): string {
   if (ruleId.startsWith("dup.")) {
     const parts = ruleId.split(".");
     if (parts.length >= 3) {
-      const entity = parts[1]; // student, parent, contractor
-      const rulePart = parts[2]; // email_dob, phone_name, etc.
+      let rulePart = parts[2]; // email_dob, phone_name, etc.
+      
+      // Remove timestamp if present (format: rulePart_YYYYMMDDHHMMSS)
+      rulePart = rulePart.replace(/_20\d{6,14}$/, "");
 
       // Map rule parts to human-readable descriptions
       const ruleMap: Record<string, string> = {
@@ -36,7 +38,6 @@ export function formatRuleId(ruleId: string): string {
         campus_name: "campus and name",
       };
 
-      const entityName = entity.charAt(0).toUpperCase() + entity.slice(1);
       const ruleDescription = ruleMap[rulePart] || rulePart.replace(/_/g, " ");
 
       return `Duplicate: ${ruleDescription}`;
@@ -67,17 +68,51 @@ export function formatRuleId(ruleId: string): string {
     }
   }
 
-  // Handle required field rules
+  // Handle required field rules - new format: required_field_rule.{entity}.{field_name}
+  if (ruleId.startsWith("required_field_rule.")) {
+    const parts = ruleId.split(".");
+    if (parts.length >= 3) {
+      let field = parts.slice(2).join("."); // Handle field names with dots
+
+      // Remove timestamp if present (format: field_name_YYYYMMDDHHMMSS or field_name_YYYYMMDD)
+      field = field.replace(/_20\d{6,14}$/, ""); // Remove trailing timestamp pattern
+
+      const fieldName = field.replace(/_/g, " ").replace(/\b\w/g, (l) => l.toUpperCase());
+
+      return `Required Field: ${fieldName}`;
+    }
+  }
+
+  // Handle old format: required.{entity}.{field} or {entity}_{field}_{timestamp}
   if (ruleId.startsWith("required.")) {
     const parts = ruleId.split(".");
     if (parts.length >= 3) {
-      const entity = parts[1];
-      const field = parts[2];
+      let field = parts[2];
 
-      const entityName = entity.charAt(0).toUpperCase() + entity.slice(1);
+      // Remove timestamp if present
+      field = field.replace(/_20\d{6,14}$/, "");
+
       const fieldName = field.replace(/_/g, " ");
 
       return `Missing required field: ${fieldName}`;
+    }
+  }
+
+  // Handle old format: {entity}_{field}_{timestamp} (e.g., contractors_field_name_20250127123456)
+  const timestampPattern = /^(.+)_20\d{6,14}$/;
+  if (timestampPattern.test(ruleId)) {
+    const match = ruleId.match(timestampPattern);
+    if (match) {
+      const baseName = match[1];
+      // Check if it matches entity_field pattern
+      const entityFieldMatch = baseName.match(/^(\w+)_(.+)$/);
+      if (entityFieldMatch) {
+        const [, , field] = entityFieldMatch;
+        const fieldName = field.replace(/_/g, " ").replace(/\b\w/g, (l) => l.toUpperCase());
+        return `Required Field: ${fieldName}`;
+      }
+      // Otherwise just format the base name
+      return baseName.replace(/_/g, " ").replace(/\b\w/g, (l) => l.toUpperCase());
     }
   }
 
@@ -102,8 +137,11 @@ export function formatRuleId(ruleId: string): string {
   }
 
   // Default: return as-is or format with underscores replaced
+  // Remove timestamp if present before formatting
+  let cleanedRuleId = ruleId.replace(/_20\d{6,14}$/, ""); // Remove trailing timestamp
+  
   // Capitalize first letter of each word for better readability
-  const formatted = ruleId.replace(/_/g, " ").replace(/\./g, ": ");
+  const formatted = cleanedRuleId.replace(/_/g, " ").replace(/\./g, ": ");
   return formatted
     .split(" ")
     .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())

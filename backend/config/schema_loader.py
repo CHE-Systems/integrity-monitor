@@ -210,9 +210,12 @@ def _convert_firestore_rules_to_schema_config(rules_data: Dict[str, Any]) -> Sch
         missing_key_data: List[FieldRequirement] = []
         if "required_fields" in rules_data and entity in rules_data["required_fields"]:
             for req_data in rules_data["required_fields"][entity]:
+                # Prefer field_id over field when both are present (field_id is more reliable)
+                field_reference = req_data.get("field_id") or req_data.get("field", "")
+                
                 # Include rule_id in FieldRequirement
                 missing_key_data.append(FieldRequirement(
-                    field=req_data.get("field", ""),
+                    field=field_reference,
                     message=req_data.get("message", ""),
                     severity=req_data.get("severity", "warning"),
                     alternate_fields=req_data.get("alternate_fields"),

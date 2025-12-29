@@ -312,7 +312,7 @@ export function RuleSelectionPanel({
               />
               <div className="flex-1 min-w-0">
                 <div className="text-xs font-medium text-[var(--text-main)]">
-                  {field.field || ruleId}
+                  {field.field_name || field.field || ruleId}
                 </div>
                 <div className="text-xs text-[var(--text-muted)] truncate">
                   {field.message || ""}

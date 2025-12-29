@@ -324,6 +324,10 @@ export function RuleEditor({
     const handleFieldSelect = (fieldId: string, fieldName: string) => {
       updateField("field", fieldName);
       updateField("field_id", fieldId);
+      // Auto-populate field_name for rule label, but allow editing
+      if (!ruleData.field_name) {
+        updateField("field_name", fieldName);
+      }
       setFieldSearchTerm("");
       setFieldOptions([]);
     };
@@ -386,6 +390,21 @@ export function RuleEditor({
           />
           <p className="text-xs text-[var(--text-muted)] mt-1">
             Airtable field ID (starts with "fld"). More reliable than field name. Auto-filled when selecting a field above.
+          </p>
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-[var(--text-main)] mb-2">
+            Rule Label Name (for display)
+          </label>
+          <input
+            type="text"
+            value={ruleData.field_name || ruleData.field || ""}
+            onChange={(e) => updateField("field_name", e.target.value)}
+            placeholder="e.g., Background Check, Certification, etc."
+            className="w-full p-2 border border-[var(--border)] rounded-lg"
+          />
+          <p className="text-xs text-[var(--text-muted)] mt-1">
+            Customizable name for the rule label. This will appear in the rule list. Auto-filled from field name when selecting a field.
           </p>
         </div>
         <div>

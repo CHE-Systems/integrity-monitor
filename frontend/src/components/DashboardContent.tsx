@@ -371,16 +371,16 @@ export function DashboardContent({
 
     return [
       {
-        label: "Data Completeness",
-        value: `${baseHealth.toFixed(0)}%`,
-        badge: `${baseHealth.toFixed(0)}% overall health`,
-        context: "Combined metric: fields, links, duplicates, attendance",
-      },
-      {
         label: "Last run",
         value: lastRunTime,
         badge: lastRunBadge,
         context: lastRunContext,
+      },
+      {
+        label: "Critical records",
+        value: criticalCount.toString(),
+        badge: criticalCount > 0 ? "Needs outreach" : "None",
+        context: "Attendance + billing gaps",
       },
       {
         label: "New Issues",
@@ -396,12 +396,6 @@ export function DashboardContent({
             ? `${criticalCount} critical`
             : "All clear",
         context: "Duplicates, broken links, attendance",
-      },
-      {
-        label: "Critical records",
-        value: criticalCount.toString(),
-        badge: criticalCount > 0 ? "Needs outreach" : "None",
-        context: "Attendance + billing gaps",
       },
     ];
   }, [summary, derived, newIssuesCount, newIssuesLoading, issueCounts, issueCountsLoading]);

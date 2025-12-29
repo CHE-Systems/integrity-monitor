@@ -85,8 +85,20 @@ def is_record_active(record: dict, status_fields: Optional[List[str]] = None) ->
 
 
 def _normalize_name(value: str) -> str:
-    """Normalize field name for matching: case-insensitive, underscores->spaces, collapse whitespace."""
-    return " ".join(value.replace("_", " ").strip().lower().split())
+    """Normalize field name for matching: case-insensitive, underscores->spaces, remove punctuation, collapse whitespace.
+
+    This normalization allows flexible field name matching:
+    - "Driver's License" matches "Drivers License"
+    - "Email_Address" matches "Email Address"
+    - "Cell phone" matches "cell_phone"
+    """
+    import re
+    # Remove apostrophes and other punctuation (except underscores which are replaced below)
+    value = re.sub(r"['\"`!@#$%^&*()+=\[\]{}|\\:;<>,.?/~-]", "", value)
+    # Replace underscores with spaces
+    value = value.replace("_", " ")
+    # Lowercase, strip, and collapse whitespace
+    return " ".join(value.strip().lower().split())
 
 
 @lru_cache(maxsize=1)

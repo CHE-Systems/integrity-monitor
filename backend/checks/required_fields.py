@@ -152,20 +152,37 @@ def _violates(fields: Dict[str, Any], req: FieldRequirement) -> bool:
     
     Returns True if the field is missing/invalid, False otherwise.
     """
-    primary_value = get_field(fields, req.field)
+    # Use the field reference (should be field ID if available, otherwise field name)
+    field_ref = req.field
+    
+    # Try to get the field value
+    primary_value = get_field(fields, field_ref)
     
     # Enhanced logging for debugging field resolution issues
+    is_field_id = field_ref.startswith("fld") and len(field_ref) >= 14
     logger.debug(
         f"Checking required field violation",
         extra={
-            "field_reference": req.field,
-            "field_type": "field_id" if req.field.startswith("fld") and len(req.field) >= 14 else "field_name",
+            "field_reference": field_ref,
+            "field_type": "field_id" if is_field_id else "field_name",
             "value_retrieved": primary_value,
             "value_type": type(primary_value).__name__ if primary_value is not None else "None",
             "is_valid": _is_valid_value(primary_value),
             "available_field_keys": list(fields.keys())[:10],  # First 10 keys for debugging
+            "field_keys_sample": [k[:20] + "..." if len(k) > 20 else k for k in list(fields.keys())[:10]],
         }
     )
+    
+    # If field not found and we're using a field ID, log a warning
+    if primary_value is None and is_field_id:
+        logger.warning(
+            f"Field ID {field_ref} not found in record. This may indicate a schema mismatch.",
+            extra={
+                "field_id": field_ref,
+                "available_keys_count": len(fields),
+                "rule_id": req.rule_id,
+            }
+        )
     
     if _is_valid_value(primary_value):
         return False

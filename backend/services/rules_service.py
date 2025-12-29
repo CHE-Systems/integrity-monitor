@@ -455,16 +455,63 @@ class RulesService:
             
             # If both field and field_id are provided, prefer field_id
             if field_id_override:
+                # Use field_id as the primary field reference (more reliable)
                 rule_data["field"] = field_id_override
-                logger.info(f"Using provided field_id: {field_id_override}")
+                # Keep field_id for reference, but field is now the primary
+                rule_data["field_id"] = field_id_override
+                
+                # Try to resolve field name from field_id for display purposes
+                validation = self._validate_and_normalize_field_reference(field_id_override, entity)
+                if validation.get("field_name"):
+                    rule_data["field_name"] = validation["field_name"]
+                elif field_ref and not field_ref.startswith("fld"):
+                    # Use original field_ref as field_name if it was a name
+                    rule_data["field_name"] = field_ref
+                
+                logger.info(
+                    f"Using provided field_id as primary field reference: {field_id_override}",
+                    extra={
+                        "entity": entity,
+                        "original_field": field_ref,
+                        "field_id": field_id_override,
+                        "field_name": rule_data.get("field_name"),
+                    }
+                )
             else:
                 # Validate and normalize the field reference
                 validation = self._validate_and_normalize_field_reference(field_ref, entity)
-                rule_data["field"] = validation["field"]
                 
-                # Store field_id if found
+                # Prefer field_id if found, otherwise use normalized field name
                 if validation["field_id"]:
+                    rule_data["field"] = validation["field_id"]
                     rule_data["field_id"] = validation["field_id"]
+                    # Store field_name for display and rule ID generation
+                    if validation.get("field_name"):
+                        rule_data["field_name"] = validation["field_name"]
+                    else:
+                        # Use original field_ref as field_name if validation didn't find it
+                        rule_data["field_name"] = field_ref
+                    logger.info(
+                        f"Auto-resolved field_id from field name: {field_ref} -> {validation['field_id']}",
+                        extra={
+                            "entity": entity,
+                            "original_field": field_ref,
+                            "field_id": validation["field_id"],
+                            "field_name": validation.get("field_name") or field_ref,
+                        }
+                    )
+                else:
+                    # No field_id found, use the field name (may be less reliable)
+                    rule_data["field"] = validation["field"]
+                    rule_data["field_name"] = validation["field"]  # Use normalized field name
+                    logger.warning(
+                        f"Could not resolve field_id for field '{field_ref}', using field name. Rule may be less reliable.",
+                        extra={
+                            "entity": entity,
+                            "original_field": field_ref,
+                            "normalized_field": validation["field"],
+                        }
+                    )
                 
                 # Log warnings
                 if validation["warning"]:
@@ -547,6 +594,15 @@ class RulesService:
         """
         if not self.db:
             raise ValueError("Firestore client not available")
+
+        # For required_fields rules, if field_name is updated, regenerate rule_id
+        new_rule_id = rule_id
+        if category == "required_fields" and entity and "field_name" in rule_data:
+            # Generate new rule_id based on updated field_name
+            new_rule_id = self._generate_rule_id(category, entity, rule_data)
+            rule_data["rule_id"] = new_rule_id
+            # Note: If rule_id changed, the document ID in Firestore won't change automatically
+            # For now, we'll update the rule_id in the data but keep the same document ID
 
         # Determine collection path
         if category == "duplicates":
@@ -637,20 +693,42 @@ class RulesService:
         logger.info(f"Deleted rule {rule_id} from {collection_path}")
 
     def _generate_rule_id(self, category: str, entity: Optional[str], rule_data: Dict[str, Any]) -> str:
-        """Generate a unique rule ID."""
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-
-        if category == "duplicates":
+        """Generate a unique rule ID.
+        
+        Format for required_fields: required_field_rule.{entity}.{field_name}
+        This makes rule IDs human-readable and allows field_name to be editable.
+        """
+        if category == "required_fields":
+            # Use field_name if available (for display), otherwise fall back to field
+            field_name = rule_data.get("field_name") or rule_data.get("field", "unknown")
+            
+            # If field_name is a field ID (fld...), try to resolve it to a name
+            if field_name.startswith("fld") and len(field_name) >= 14:
+                # Try to get field name from validation
+                validation = self._validate_and_normalize_field_reference(field_name, entity or "")
+                if validation.get("field_name"):
+                    field_name = validation["field_name"]
+                else:
+                    # Fall back to a sanitized version of the field ID
+                    field_name = f"field_{field_name[-8:]}"  # Use last 8 chars of ID
+            
+            # Sanitize field_name for use in rule ID (lowercase, replace spaces/special chars with underscores)
+            field_name_safe = field_name.lower().replace(" ", "_").replace("-", "_").replace("/", "_")
+            # Remove any remaining special characters
+            import re
+            field_name_safe = re.sub(r'[^a-z0-9_]', '', field_name_safe)
+            # Limit length
+            field_name_safe = field_name_safe[:50]
+            
+            return f"required_field_rule.{entity}.{field_name_safe}"
+        elif category == "duplicates":
             desc = rule_data.get("description", "custom").lower().replace(" ", "_")[:20]
-            return f"dup.{entity}.{desc}_{timestamp}"
+            return f"dup.{entity}.{desc}"
         elif category == "relationships":
             target = rule_data.get("target", "unknown")
-            return f"{entity}_{target}_{timestamp}"
-        elif category == "required_fields":
-            field = rule_data.get("field", "unknown")
-            return f"{entity}_{field}_{timestamp}"
+            return f"link.{entity}.{target}"
         elif category == "attendance_rules":
             metric = rule_data.get("metric", "custom")
-            return f"{metric}_{timestamp}"
+            return f"attendance.{metric}"
 
-        return f"{category}_{entity}_{timestamp}"
+        return f"{category}.{entity}.custom"

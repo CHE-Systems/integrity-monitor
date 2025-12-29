@@ -49,7 +49,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
     allow_credentials=use_credentials,
-    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
 
@@ -895,7 +895,7 @@ def airtable_schema_fields(entity: str, search: Optional[str] = None):
             - count: Number of fields returned
     """
     try:
-        from ..utils.records import _normalize_name
+        from .utils.records import _normalize_name
         
         schema_data = schema_service.load()
         tables = schema_data.get("tables", [])

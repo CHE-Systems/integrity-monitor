@@ -628,9 +628,17 @@ class IntegrityRunner:
                             f.write(_json.dumps({"sessionId":"debug-session","runId":run_id,"hypothesisId":"A","location":"integrity_runner.py:621","message":"Duplicates check decision - entry","data":{"has_run_config":hasattr(self, "_run_config"),"run_config_is_none":not (hasattr(self, "_run_config") and self._run_config)},"timestamp":int(_time_module.time()*1000)})+'\n')
                     except: pass
                     # #endregion agent log
-                    should_run_duplicates = True  # Default to True for backwards compatibility
+                    should_run_duplicates = False  # Default to False - only run when explicitly selected
                     if hasattr(self, "_run_config") and self._run_config:
                         checks = self._run_config.get("checks", {})
+                        logger.warning(
+                            f"Checks received in run_config: {checks}",
+                            extra={
+                                "has_checks": "checks" in self._run_config,
+                                "checks_keys": list(checks.keys()) if checks else [],
+                                "checks_duplicates": checks.get("duplicates") if checks else None,
+                            }
+                        )
                         # #region agent log
                         try:
                             import json as _json
@@ -655,26 +663,26 @@ class IntegrityRunner:
                             except: pass
                             # #endregion agent log
                         else:
-                            logger.warning(f"Duplicates check decision: 'duplicates' key not in checks, using default True. checks keys: {list(checks.keys())}")
+                            logger.warning(f"Duplicates check decision: 'duplicates' key not in checks, using default False. checks keys: {list(checks.keys())}")
                             # #region agent log
                             try:
                                 import json as _json
                                 import time as _time_module
                                 debug_log_path = '/Users/joshuaedwards/Library/CloudStorage/GoogleDrive-jedwards@che.school/My Drive/CHE/che-data-integrity-monitor/.cursor/debug.log'
                                 with open(debug_log_path, 'a') as f:
-                                    f.write(_json.dumps({"sessionId":"debug-session","runId":run_id,"hypothesisId":"B","location":"integrity_runner.py:640","message":"Duplicates check - key NOT found, using default True","data":{"checks_keys":list(checks.keys())},"timestamp":int(_time_module.time()*1000)})+'\n')
+                                    f.write(_json.dumps({"sessionId":"debug-session","runId":run_id,"hypothesisId":"B","location":"integrity_runner.py:640","message":"Duplicates check - key NOT found, using default False","data":{"checks_keys":list(checks.keys())},"timestamp":int(_time_module.time()*1000)})+'\n')
                             except: pass
                             # #endregion agent log
-                        # If key doesn't exist, keep default True for backwards compatibility
+                        # If key doesn't exist, keep default False
                     else:
-                        logger.warning(f"Duplicates check decision: No run_config, using default True")
+                        logger.warning(f"Duplicates check decision: No run_config, using default False")
                         # #region agent log
                         try:
                             import json as _json
                             import time as _time_module
                             debug_log_path = '/Users/joshuaedwards/Library/CloudStorage/GoogleDrive-jedwards@che.school/My Drive/CHE/che-data-integrity-monitor/.cursor/debug.log'
                             with open(debug_log_path, 'a') as f:
-                                f.write(_json.dumps({"sessionId":"debug-session","runId":run_id,"hypothesisId":"C","location":"integrity_runner.py:647","message":"Duplicates check - no run_config, using default True","data":{},"timestamp":int(_time_module.time()*1000)})+'\n')
+                                f.write(_json.dumps({"sessionId":"debug-session","runId":run_id,"hypothesisId":"C","location":"integrity_runner.py:647","message":"Duplicates check - no run_config, using default False","data":{},"timestamp":int(_time_module.time()*1000)})+'\n')
                         except: pass
                         # #endregion agent log
                     # #region agent log
@@ -744,14 +752,14 @@ class IntegrityRunner:
                     check_cancelled()
                     
                     # Links check
-                    should_run_links = True  # Default to True for backwards compatibility
+                    should_run_links = False  # Default to False - only run when explicitly selected
                     if hasattr(self, "_run_config") and self._run_config:
                         checks = self._run_config.get("checks", {})
                         # Explicitly check if links key exists and respect its value (including False)
                         # This ensures False values from frontend are properly respected
                         if "links" in checks:
                             should_run_links = bool(checks["links"])
-                        # If key doesn't exist, keep default True for backwards compatibility
+                        # If key doesn't exist, keep default False
                     
                     if should_run_links:
                         import time as _time_module
@@ -776,14 +784,14 @@ class IntegrityRunner:
                     check_cancelled()
                     
                     # Required fields check
-                    should_run_required_fields = True  # Default to True for backwards compatibility
+                    should_run_required_fields = False  # Default to False - only run when explicitly selected
                     if hasattr(self, "_run_config") and self._run_config:
                         checks = self._run_config.get("checks", {})
                         # Explicitly check if required_fields key exists and respect its value (including False)
                         # This ensures False values from frontend are properly respected
                         if "required_fields" in checks:
                             should_run_required_fields = bool(checks["required_fields"])
-                        # If key doesn't exist, keep default True for backwards compatibility
+                        # If key doesn't exist, keep default False
                     
                     if should_run_required_fields:
                         import time as _time_module
@@ -808,16 +816,28 @@ class IntegrityRunner:
                     check_cancelled()
                     
                     # Attendance check
-                    attendance_rules_to_use = self._runtime_config.attendance_rules
-                    if (hasattr(self, "_run_config") and self._run_config and
-                        self._run_config.get("rules") and
-                        "attendance_rules" in self._run_config["rules"]):
-                        # If attendance_rules is False in selection, skip attendance check
-                        if self._run_config["rules"]["attendance_rules"] is False:
-                            attendance_rules_to_use = None
-                    
+                    should_run_attendance = False  # Default to False - only run when explicitly selected
+                    if hasattr(self, "_run_config") and self._run_config:
+                        checks = self._run_config.get("checks", {})
+                        # Explicitly check if attendance key exists and respect its value (including False)
+                        # This ensures False values from frontend are properly respected
+                        if "attendance" in checks:
+                            should_run_attendance = bool(checks["attendance"])
+                        # If key doesn't exist, keep default False
+
+                    attendance_rules_to_use = None
+                    if should_run_attendance:
+                        attendance_rules_to_use = self._runtime_config.attendance_rules
+                        # Also check the legacy rules.attendance_rules field for backwards compatibility
+                        if (hasattr(self, "_run_config") and self._run_config and
+                            self._run_config.get("rules") and
+                            "attendance_rules" in self._run_config["rules"]):
+                            # If attendance_rules is False in selection, skip attendance check
+                            if self._run_config["rules"]["attendance_rules"] is False:
+                                attendance_rules_to_use = None
+
                     import time as _time_module
-                    if attendance_rules_to_use:
+                    if attendance_rules_to_use and should_run_attendance:
                         self._firestore_writer.write_log(run_id, "info", "Running attendance check...")
                         check_start = _time_module.time()
                         att_issues = attendance.run(records, attendance_rules_to_use)
@@ -835,7 +855,7 @@ class IntegrityRunner:
                         self._firestore_writer.write_log(run_id, "info", f"Attendance check: {len(att_issues)} issues found in {(att_duration/1000):.1f}s")
                     else:
                         att_issues = []
-                        self._firestore_writer.write_log(run_id, "info", "Attendance check skipped (not selected in rules)")
+                        self._firestore_writer.write_log(run_id, "info", "Attendance check skipped (not selected in checks)")
                     
                     # Merge and summarize issues
                     issues = check_results
@@ -1391,15 +1411,34 @@ class IntegrityRunner:
             logger.warning(f"run_config.get('rules'): {run_config.get('rules')}")
         logger.warning("=" * 80)
 
-        if not run_config or not run_config.get("rules"):
-            # No rule filtering requested, return original
+        if not run_config:
+            # No run_config at all = use all rules (backwards compatibility)
             logger.info(
-                "No rule filtering requested, using all loaded rules",
-                extra={"has_run_config": run_config is not None}
+                "No run_config provided, using all loaded rules",
+                extra={"has_run_config": False}
             )
             return schema_config
         
-        rules_selection = run_config["rules"]
+        rules_selection = run_config.get("rules")
+        if rules_selection is None:
+            # 'rules' key missing = use all rules (backwards compatibility)
+            logger.info(
+                "No 'rules' key in run_config, using all loaded rules",
+                extra={"has_run_config": True, "has_rules_key": False}
+            )
+            return schema_config
+        
+        # If rules_selection is {} (empty dict), continue to filtering logic
+        # which will correctly clear all rules for entities not in selection
+        logger.info(
+            "Rule filtering requested",
+            extra={
+                "has_run_config": True,
+                "has_rules_key": True,
+                "rules_selection_is_empty": rules_selection == {},
+                "rules_selection_keys": list(rules_selection.keys()) if rules_selection else []
+            }
+        )
         
         # Extract and log all selected rule IDs from run_config
         selected_rules = {
@@ -1424,6 +1463,9 @@ class IntegrityRunner:
                 "has_duplicates": bool(selected_rules["duplicates"]),
                 "has_relationships": bool(selected_rules["relationships"]),
                 "has_required_fields": bool(selected_rules["required_fields"]),
+                "duplicates_entities": list(selected_rules["duplicates"].keys()) if selected_rules["duplicates"] else [],
+                "relationships_entities": list(selected_rules["relationships"].keys()) if selected_rules["relationships"] else [],
+                "required_fields_entities": list(selected_rules["required_fields"].keys()) if selected_rules["required_fields"] else [],
             }
         )
         
@@ -1616,7 +1658,9 @@ class IntegrityRunner:
                     logger.info(
                         f"Filtering required fields for {entity}",
                         extra={
+                            "entity": entity,
                             "selected_rule_ids": rule_ids,
+                            "selected_rule_count": len(rule_ids),
                             "total_rules_before": total_rules_before,
                         }
                     )
@@ -1627,11 +1671,26 @@ class IntegrityRunner:
                         existing_identifiers.add(f"required.{entity}.{req.field}")
                         if hasattr(req, "rule_id") and req.rule_id:
                             existing_identifiers.add(req.rule_id)
+                            # Also add field-based match for timestamp format: {entity}_{field}_{timestamp}
+                            if "_" in req.rule_id:
+                                parts = req.rule_id.split("_")
+                                if len(parts) >= 2:
+                                    # Match by {entity}_{field} prefix (ignore timestamp)
+                                    field_match = f"{entity}_{parts[1]}"
+                                    existing_identifiers.add(field_match)
                     
                     # Check for missing rule IDs
                     for rule_id in rule_ids:
                         if rule_id not in existing_identifiers:
                             missing_rules.append(f"required_fields.{entity}.{rule_id}")
+                            logger.warning(
+                                f"Selected rule ID not found in schema for {entity}",
+                                extra={
+                                    "entity": entity,
+                                    "rule_id": rule_id,
+                                    "existing_identifiers": list(existing_identifiers),
+                                }
+                            )
                     
                     # Filter missing_key_data array - match ONLY by rule_id or constructed format
                     # Prioritize exact rule_id matching to prevent multiple rules matching
@@ -1645,10 +1704,22 @@ class IntegrityRunner:
                         if rule_id and rule_id in rule_ids:
                             matched = True
                             matched_by = "rule_id"
-                        # Fallback: Match by constructed format (for rules without rule_id)
+                        # Secondary: Match by constructed format (for rules without rule_id)
                         elif f"required.{entity}.{req.field}" in rule_ids:
                             matched = True
                             matched_by = "constructed_format"
+                        # Tertiary: Match by field ID only (for timestamp-based rule IDs)
+                        elif rule_id and "_" in rule_id:
+                            # Extract field from rule_id format: {entity}_{field}_{timestamp}
+                            parts = rule_id.split("_")
+                            if len(parts) >= 2:
+                                field_match = f"{entity}_{parts[1]}"
+                                # Check if any selected rule_id starts with this pattern
+                                for selected_id in rule_ids:
+                                    if selected_id.startswith(field_match + "_") or selected_id == field_match:
+                                        matched = True
+                                        matched_by = "field_prefix"
+                                        break
                         
                         if matched:
                             filtered_rules.append(req)
@@ -1663,19 +1734,36 @@ class IntegrityRunner:
                     
                     entity_schema.missing_key_data = filtered_rules
                     
-                    # Log after filtering
-                    matched_rules_info = [
-                        {
-                            "rule_id": getattr(req, "rule_id", None),
+                    # Log after filtering with detailed match information
+                    matched_rules_info = []
+                    for req in filtered_rules:
+                        rule_id = getattr(req, "rule_id", None)
+                        matched_by = None
+                        if rule_id and rule_id in rule_ids:
+                            matched_by = "rule_id"
+                        elif f"required.{entity}.{req.field}" in rule_ids:
+                            matched_by = "constructed_format"
+                        elif rule_id and "_" in rule_id:
+                            parts = rule_id.split("_")
+                            if len(parts) >= 2:
+                                field_match = f"{entity}_{parts[1]}"
+                                for selected_id in rule_ids:
+                                    if selected_id.startswith(field_match + "_") or selected_id == field_match:
+                                        matched_by = "field_prefix"
+                                        break
+                        matched_rules_info.append({
+                            "rule_id": rule_id,
                             "field": req.field,
-                            "matched_by": "rule_id" if (hasattr(req, "rule_id") and req.rule_id and req.rule_id in rule_ids) else "constructed_format"
-                        }
-                        for req in filtered_rules
-                    ]
+                            "matched_by": matched_by or "unknown"
+                        })
+                    
                     logger.info(
                         f"Required fields filtered for {entity}",
                         extra={
+                            "entity": entity,
                             "matched_rules": matched_rules_info,
+                            "matched_rule_count": len(filtered_rules),
+                            "total_rules_before": total_rules_before,
                             "total_rules_after": len(filtered_rules),
                             "rules_filtered_out": total_rules_before - len(filtered_rules),
                         }
