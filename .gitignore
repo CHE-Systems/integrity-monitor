@@ -30,6 +30,16 @@ backend/data-integrity-service-account.json
 *.bak
 .env.backup
 
-# log fils
+# log files
 .cursor/debug.log
 .cursor/debug.*.log
+firebase-debug.log
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Development lock files
+.dev-lock
