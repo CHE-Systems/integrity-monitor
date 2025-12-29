@@ -139,6 +139,9 @@ def get_field(fields: Dict[str, Any], key: str) -> Any:
     Returns:
         Field value or None if not found
     """
+    import logging
+    logger = logging.getLogger(__name__)
+    
     if not key:
         return None
 
@@ -151,6 +154,15 @@ def get_field(fields: Dict[str, Any], key: str) -> Any:
         field_name = id_to_name.get(key)
         if field_name and field_name in fields:
             return fields[field_name]
+        # Log when field ID cannot be resolved
+        logger.debug(
+            f"Field ID {key} not found in record fields",
+            extra={
+                "field_id": key,
+                "resolved_name": field_name,
+                "available_keys_sample": list(fields.keys())[:10],
+            }
+        )
         return None
     
     # Otherwise, try field name variants (backward compatibility)
@@ -168,6 +180,17 @@ def get_field(fields: Dict[str, Any], key: str) -> Any:
         field_name = id_to_name.get(field_id)
         if field_name and field_name in fields:
             return fields[field_name]
+    
+    # Log when field name cannot be resolved
+    logger.debug(
+        f"Field name '{key}' not found in record fields",
+        extra={
+            "field_name": key,
+            "normalized": normalized,
+            "matched_field_ids": name_to_ids.get(normalized, []),
+            "available_keys_sample": list(fields.keys())[:10],
+        }
+    )
     return None
 
 

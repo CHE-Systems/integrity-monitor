@@ -224,6 +224,17 @@ export function AIRuleCreator({
                     </span>
                   )}
                 </div>
+                {parsedRule.category === "required_fields" && parsedRule.rule_data?.field_id && (
+                  <div className="mb-2">
+                    <span className="font-medium">Field ID:</span>{" "}
+                    <span className="px-2 py-1 text-xs bg-purple-100 text-purple-800 rounded ml-1 font-mono">
+                      {parsedRule.rule_data.field_id}
+                    </span>
+                    <span className="text-xs text-gray-600 ml-2">
+                      (Auto-detected from schema)
+                    </span>
+                  </div>
+                )}
                 <div className="mb-2">
                   <span className="font-medium">Rule Data:</span>
                 </div>

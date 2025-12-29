@@ -4,12 +4,13 @@ AI-driven monitoring pipeline that keeps Airtable enrollment data accurate for S
 
 ## Repository Structure
 
-| Path | Description |
-| --- | --- |
-| `backend/` | FastAPI service that will host the integrity checks, integrate with Airtable via `pyairtable`, and write anomalies back to Airtable + Firestore. |
-| `frontend/` | React + TypeScript + Vite dashboard (Tailwind styling) that surfaces run status, anomaly metrics, and guided fixes. |
-| `context.md` | Living project brief that records decisions, assumptions, completions, and integration notes. |
-| `prompts.md` | Queue of outstanding AI prompt tasks. Complete prompts get removed here and summarized inside `context.md`. |
+| Path            | Description                                                                                                                                             |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `backend/`      | FastAPI service that will host the integrity checks, integrate with Airtable via `pyairtable`, and write anomalies back to Airtable + Firestore.        |
+| `frontend/`     | React + TypeScript + Vite dashboard (Tailwind styling) that surfaces run status, anomaly metrics, and guided fixes.                                     |
+| `context.md`    | Living project brief that records decisions, assumptions, completions, and integration notes.                                                           |
+| `prompts.md`    | Queue of outstanding AI prompt tasks. Complete prompts get removed here and summarized inside `context.md`.                                             |
+| `docs/rules.md` | **CRITICAL:** Complete implementation guide for creating and maintaining integrity rules. Must be consulted before implementing or modifying any rules. |
 
 ## Backend (FastAPI)
 
@@ -80,22 +81,26 @@ Configure Firebase + API base URLs via Vite env files when integrating real data
 ### Quick Start
 
 1. **Set environment variables:**
+
    ```bash
    export GCP_PROJECT_ID="your-project-id"
    export CLOUD_RUN_REGION="us-central1"
    ```
 
 2. **Set up IAM:**
+
    ```bash
    ./deploy/iam-setup.sh prod
    ```
 
 3. **Deploy service:**
+
    ```bash
    ./deploy/deploy.sh prod
    ```
 
 4. **Create scheduler jobs:**
+
    ```bash
    ./deploy/create-scheduler.sh prod
    ```
@@ -132,7 +137,10 @@ Both jobs retry up to 3 times with exponential backoff.
 
 For detailed operations guide, see `docs/runbook.md`.
 
-Refer to `context.md` for evolving implementation notes.
+**Important Documentation:**
+
+- `docs/rules.md` - **CRITICAL:** Complete guide for implementing and maintaining integrity rules. Always reference this when creating or modifying rules.
+- `context.md` - Evolving implementation notes, decisions, and deliverable log.
 
 ## Working With AI Prompts
 

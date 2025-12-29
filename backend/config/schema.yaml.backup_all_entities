@@ -1,0 +1,355 @@
+metadata:
+  source: docs/prompt-1-schema-spec.md
+  generated: "2025-11-19"
+
+entities:
+  students:
+    description: Primary Student record tracking enrollment and relationships.
+    key_identifiers:
+      - student_id
+      - truth_id
+      - student_code
+    identity_fields:
+      - legal_first_name
+      - legal_middle_name
+      - legal_last_name
+      - preferred_name
+      - date_of_birth
+      - primary_email
+      - primary_phone
+    relationships:
+      parents:
+        target: parents
+        min_links: 1
+        require_active: true
+        message: "Students need at least one active parent/guardian."
+      campus:
+        target: campuses
+        min_links: 1
+        max_links: 1
+        require_active: true
+        message: "Active students must have exactly one primary campus."
+      classes:
+        target: classes
+        min_links: 1
+        condition_field: enrollment_status
+        condition_value: enrolled
+        message: "Enrolled students must be linked to at least one class."
+      truth:
+        target: truth
+        min_links: 1
+        require_active: true
+        message: "Students require a Truth record link."
+      payments:
+        target: payments
+        condition_field: tuition_required
+        condition_value: "true"
+        message: "Tuition students must link to a payment record."
+    missing_key_data:
+      - field: truth_id
+        rule_id: "Missing Required Field: Truth ID"
+        severity: critical
+        message: "Missing Truth ID."
+      - field: primary_contact_method
+        rule_id: "Missing Required Field: Primary Contact Method"
+        severity: warning
+        alternate_fields:
+          - primary_email
+          - primary_phone
+        message: "Need at least one primary contact method."
+      - field: enrollment_status
+        rule_id: "Missing Required Field: Enrollment Status"
+        severity: warning
+        message: "Enrollment status required."
+      - field: grade_level
+        rule_id: "Missing Required Field: Grade Level"
+        severity: info
+        message: "Grade level missing."
+      - field: emergency_contact_ack
+        rule_id: "Missing Required Field: Emergency Contact Acknowledgement"
+        severity: warning
+        message: "Emergency contact acknowledgement required."
+  parents:
+    description: Parent/guardian contacts linked to students for communication.
+    key_identifiers:
+      - parent_id
+      - contact_email
+      - contact_phone
+    identity_fields:
+      - full_name
+      - contact_email
+      - contact_phone
+      - mailing_address
+    relationships:
+      students:
+        target: students
+        min_links: 1
+        require_active: true
+        message: "Active parents must link to at least one student."
+    missing_key_data:
+      - field: relationship_role
+        rule_id: "Missing Required Field: Relationship Role"
+        severity: warning
+        message: "Specify relationship role."
+      - field: contact_email
+        rule_id: "Missing Required Field: Contact Email"
+        severity: warning
+        alternate_fields:
+          - contact_phone
+        message: "Parents need email or phone."
+      - field: mailing_address
+        rule_id: "Missing Required Field: Mailing Address"
+        severity: info
+        message: "Mailing address required for billing guardians."
+  contractors:
+    description: Contractors and instructors who teach classes.
+    key_identifiers:
+      - contractor_id
+      - email
+      - phone
+      - ein
+    identity_fields:
+      - legal_name
+      - preferred_name
+      - email
+      - phone
+    relationships:
+      classes:
+        target: classes
+        min_links: 1
+        message: "Active contractors must teach at least one class."
+      campuses:
+        target: campuses
+        min_links: 1
+        message: "Contractors require a campus assignment."
+    missing_key_data:
+      - field: flddCJDACjAsP1ltS
+        rule_id: "Missing Required Field: Email"
+        severity: warning
+        message: "Email is required."
+      - field: fldWBnA5Xf6eQATOi
+        rule_id: "Missing Required Field: Cell Phone"
+        severity: warning
+        message: "Cell phone is required."
+      - field: fldvkUuMlXw8vBvNQ
+        rule_id: "Missing Required Field: Contractor/Vol"
+        severity: warning
+        message: "Contractor/Vol role type is required."
+      - field: fldUXiLJmTxJ9aeRp
+        rule_id: "Missing Required Field: Certification"
+        severity: warning
+        message: "Certification is required."
+      - field: fldi9MWrddOg3PUZ7
+        rule_id: "Missing Required Field: Approval Status"
+        severity: warning
+        message: "Approval status is required."
+  classes:
+    description: Class/section records with scheduling and enrollment data.
+    key_identifiers:
+      - class_id
+      - term_id
+    identity_fields:
+      - course_name
+      - campus
+      - term
+      - schedule_block
+    relationships:
+      campus:
+        target: campuses
+        min_links: 1
+        message: "Each class must reference a campus."
+      primary_contractor:
+        target: contractors
+        min_links: 1
+        max_links: 1
+        message: "Classes require exactly one primary instructor."
+      students:
+        target: students
+        min_links: 1
+        message: "Active classes should have enrolled students."
+    missing_key_data:
+      - field: term
+        rule_id: "Missing Required Field: Term"
+        severity: warning
+        message: "Class term missing."
+      - field: schedule
+        rule_id: "Missing Required Field: Schedule"
+        severity: warning
+        message: "Schedule details required."
+      - field: capacity
+        rule_id: "Missing Required Field: Capacity"
+        severity: info
+        message: "Capacity missing."
+  attendance:
+    description: Daily/period attendance entries.
+    key_identifiers:
+      - attendance_id
+      - student_id
+      - class_id
+      - date
+    identity_fields:
+      - date
+      - class_id
+      - student_id
+      - status
+    relationships:
+      student:
+        target: students
+        min_links: 1
+        message: "Attendance records must point to a student."
+      class:
+        target: classes
+        min_links: 1
+        message: "Attendance records must point to a class."
+    missing_key_data:
+      - field: status
+        rule_id: "Missing Required Field: Status"
+        severity: critical
+        message: "Attendance status required."
+      - field: minutes_attended
+        rule_id: "Missing Required Field: Minutes Attended"
+        severity: warning
+        message: "Need minutes attended or absence reason."
+  truth:
+    description: Canonical Truth records shared across systems.
+    key_identifiers:
+      - truth_id
+    identity_fields:
+      - truth_id
+      - status
+    relationships:
+      students:
+        target: students
+        min_links: 1
+        message: "Truth records must link to students."
+    missing_key_data:
+      - field: status
+        rule_id: "Missing Required Field: Truth Status"
+        severity: warning
+        message: "Truth status required."
+  campuses:
+    description: Campus/site definitions.
+    key_identifiers:
+      - campus_id
+    identity_fields:
+      - campus_name
+      - timezone
+      - address
+    relationships:
+      students:
+        target: students
+        message: "Optional back reference."
+    missing_key_data:
+      - field: timezone
+        rule_id: "Missing Required Field: Timezone"
+        severity: warning
+        message: "Campus timezone required."
+  payments:
+    description: Payment and billing records tied to students/parents.
+    key_identifiers:
+      - payment_id
+    identity_fields:
+      - payment_id
+      - invoice_status
+      - method
+    relationships:
+      student:
+        target: students
+        min_links: 1
+        message: "Payments should reference a student or parent."
+    missing_key_data:
+      - field: amount
+        rule_id: "Missing Required Field: Amount"
+        severity: critical
+        message: "Payment amount missing."
+      - field: invoice_status
+        rule_id: "Missing Required Field: Invoice Status"
+        severity: warning
+        message: "Invoice status required."
+      - field: truth_id
+        rule_id: "Missing Required Field: Payment Truth ID"
+        severity: warning
+        message: "Truth linkage required for reconciliation."
+
+duplicates:
+  students:
+    likely:
+      - rule_id: dup.student.email_dob
+        description: Email exact match and DOB within ±1 day.
+        conditions:
+          - type: exact_match
+            field: primary_email
+          - type: date_delta
+            field: date_of_birth
+            tolerance_days: 1
+      - rule_id: dup.student.phone_name
+        description: Phone exact match and last name similarity ≥0.92.
+        conditions:
+          - type: exact_match
+            field: primary_phone
+          - type: similarity
+            field: legal_last_name
+            similarity: 0.92
+      - rule_id: dup.student.truth_id
+        description: Truth ID matches but Airtable record differs.
+        conditions:
+          - type: exact_match
+            field: truth_id
+    possible:
+      - rule_id: dup.student.name_campus
+        description: High name similarity plus same campus/grade.
+        conditions:
+          - type: similarity
+            fields:
+              - legal_first_name
+              - legal_last_name
+            similarity: 0.9
+          - type: exact_match
+            field: campus
+  parents:
+    likely:
+      - rule_id: dup.parent.email
+        description: Parent email matches exactly.
+        conditions:
+          - type: exact_match
+            field: contact_email
+      - rule_id: dup.parent.phone
+        description: Parent phone matches exactly.
+        conditions:
+          - type: exact_match
+            field: contact_phone
+    possible:
+      - rule_id: dup.parent.name_student
+        description: Similar names with overlapping student links.
+        conditions:
+          - type: similarity
+            field: full_name
+            similarity: 0.9
+          - type: set_overlap
+            field: linked_students
+            overlap_ratio: 0.5
+  contractors:
+    likely:
+      - rule_id: dup.contractor.ein
+        description: EIN or business ID matches.
+        conditions:
+          - type: exact_match
+            field: ein
+      - rule_id: dup.contractor.email_phone
+        description: Email or phone matches plus name similarity.
+        conditions:
+          - type: exact_match
+            field: email
+          - type: similarity
+            field: legal_name
+            similarity: 0.92
+    possible:
+      - rule_id: dup.contractor.campus_name
+        description: Similar names with overlapping campus assignments.
+        conditions:
+          - type: similarity
+            field: legal_name
+            similarity: 0.9
+          - type: set_overlap
+            field: campuses
+            overlap_ratio: 0.5

@@ -189,7 +189,7 @@ export default function App({ children }: AppProps) {
       ).catch(() => {});
       // #endregion agent log
 
-      // Build run_config with entities and rules
+      // Build run_config with entities, rules, and checks
       const runConfig: any = {};
       if (config.entities && config.entities.length > 0) {
         runConfig.entities = config.entities;
@@ -197,12 +197,25 @@ export default function App({ children }: AppProps) {
       if (config.rules) {
         runConfig.rules = config.rules;
       }
-
-      // Build request body
-      const requestBody: any = {};
-      if (Object.keys(runConfig).length > 0) {
-        requestBody.run_config = runConfig;
+      if (config.checks) {
+        runConfig.checks = config.checks;
       }
+
+      // DEBUG LOGGING: Show what's being sent to backend
+      console.log("=".repeat(80));
+      console.log("FRONTEND: Starting Scan - Config Being Sent");
+      console.log("=".repeat(80));
+      console.log("Config from modal:", JSON.stringify(config, null, 2));
+      console.log("Run config to send:", JSON.stringify(runConfig, null, 2));
+      console.log("=".repeat(80));
+
+      // Build request body - send runConfig directly as the body
+      // FastAPI's Body(default=None) will receive this as the run_config parameter
+      const requestBody =
+        Object.keys(runConfig).length > 0 ? runConfig : undefined;
+
+      console.log("Request body:", JSON.stringify(requestBody, null, 2));
+      console.log("=".repeat(80));
 
       const response = await fetch(
         `${API_BASE}/integrity/run?${params.toString()}`,
@@ -212,10 +225,7 @@ export default function App({ children }: AppProps) {
             Authorization: `Bearer ${token}`,
             "Content-Type": "application/json",
           },
-          body:
-            Object.keys(requestBody).length > 0
-              ? JSON.stringify(requestBody)
-              : undefined,
+          body: requestBody ? JSON.stringify(requestBody) : undefined,
         }
       ).catch((error) => {
         // #region agent log

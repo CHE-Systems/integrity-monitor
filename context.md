@@ -1,6 +1,6 @@
 # Context – CHE Data Integrity Monitor
 
-Last updated: 2025-01-27 (Automation, QA, and KPI Measurement Complete)
+Last updated: 2025-01-27 (Conditional Check Execution Fix Complete)
 
 ## Mission & KPI 1
 
@@ -39,6 +39,7 @@ Last updated: 2025-01-27 (Automation, QA, and KPI Measurement Complete)
 - Use Airtable as the source of truth and keep Firestore optimized for dashboard consumption.
 - Always align implementations with `ChatGPT_Master_Prompt.md` (ContextPrime) plus CHE design documents (`CHE_IMPLEMENTATION_GUIDE.md`, `CHE_STYLE_GUIDE.md`) for tone, role expectations, and UI styling.
 - Environment variable setup tasks live in `pending-env.md`; keep it concise and up to date.
+- **CRITICAL: Always reference `docs/rules.md` when implementing or modifying rules.** This guide contains essential information about field reference formats (IDs vs names), schema snapshot requirements, rule storage structure, best practices, and troubleshooting. The field ID/name resolution system must be understood before creating or updating any rules.
 
 ## Deliverable Log
 
@@ -88,11 +89,115 @@ Last updated: 2025-01-27 (Automation, QA, and KPI Measurement Complete)
 | 2025-01-27 | KPI endpoints & dashboard          | Added `GET /integrity/metrics/kpi` endpoint returning latest KPI, 8-week trend, and alerts. Added `POST /integrity/kpi/sample` endpoint for scheduler to trigger weekly sampling. Updated `frontend/src/hooks/useIntegrityMetrics.ts` to fetch KPI data. Added KPI measurement card to `frontend/src/App.tsx` showing percentage, trend chart, target status, and alerts.                                                                                                                                                                                                                     |
 | 2025-01-27 | KPI scheduler job                  | Added weekly KPI sampling job to `deploy/create-scheduler.sh` – runs Sunday 04:00 AM (after weekly full scan at 03:00 AM). Job calls `/integrity/kpi/sample` endpoint.                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | 2025-01-27 | Runbook documentation              | Updated `docs/runbook.md` with QA process (pre-release checklist, test structure, golden file updates), KPI measurement workflow (weekly sampling, manual calculation, review process), and rule tuning via Firestore (threshold adjustments, flagged rules review, best practices).                                                                                                                                                                                                                                                                                                          |
-| 2025-01-XX | CORS and 500 error fixes           | Fixed CORS policy errors and 500 Internal Server Error on `/airtable/schema` endpoint. See Troubleshooting section below for details.                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| 2025-01-XX | CORS and 500 error fixes           | Fixed CORS policy errors and 500 Internal Server Error on `/airtable/schema` endpoint. See archived troubleshooting section.                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| 2025-12-26 | Rule selection bug fix             | Fixed critical bug where selecting individual rules caused ALL rules in that category to execute. Root cause: double-nested `run_config` in frontend request body. Fixed by sending `runConfig` directly as body instead of `{run_config: runConfig}`. Also fixed indentation bugs and removed duplicate `else` blocks in filtering logic. See `context-rules-fix.md` for complete debugging journey.                                                                                                                                                                                         |
 
 Update this table as prompts are completed or additional context emerges.
 
-## Troubleshooting & Fixes
+## Recent Fixes
+
+### Duplicate Check Execution Bug Fix (2025-01-27)
+
+**Issue:** Duplicate scans were running even when not selected in the scan configuration. When users selected only required field rules, the duplicates check would still execute, causing unnecessary processing and potentially returning unwanted duplicate issues.
+
+**What We Tried (That Didn't Work):**
+
+1. **Backend default logic fix** - Initially, we modified `backend/services/integrity_runner.py` to check `run_config.get("checks", {}).get("duplicates")` and default to `False` if missing. This didn't work because the `checks` field wasn't being sent from the frontend at all.
+
+2. **Frontend checks calculation** - The `ScanConfigModal` was correctly building `effectiveChecks` based on selected rules, but this wasn't being included in the request body sent to the backend.
+
+3. **Single code path assumption** - We initially only fixed `frontend/src/App.tsx`, assuming all scans went through that path. However, `frontend/src/pages/RunsPage.tsx` had a separate `executeScan` function that also needed fixing.
+
+**Root Cause:**
+
+The issue had two parts:
+
+1. **Missing `checks` field in request body** - Both `App.tsx` and `RunsPage.tsx` were building `runConfig` with `entities` and `rules`, but not including the `checks` field that the modal was sending. The backend's `IntegrityRunner` was defaulting to `should_run_duplicates = True` when the `checks` key was missing.
+
+2. **Incorrect request body structure in RunsPage** - `RunsPage.tsx` was wrapping `runConfig` in `{ run_config: runConfig }`, but FastAPI's `Body(default=None)` expects the body to be the dictionary directly, not wrapped. This caused the backend to receive the entire `{ run_config: {...} }` object as `run_config`, which didn't have a `checks` key at the top level.
+
+**What Worked:**
+
+1. **Added `checks` to `runConfig` in App.tsx** (lines 200-202):
+
+   ```typescript
+   if (config.checks) {
+     runConfig.checks = config.checks;
+   }
+   ```
+
+2. **Added `checks` to `runConfig` in RunsPage.tsx** (lines 481-483):
+
+   ```typescript
+   if (config.checks) {
+     runConfig.checks = config.checks;
+   }
+   ```
+
+3. **Fixed request body structure in RunsPage.tsx** (lines 485-489):
+   Changed from:
+
+   ```typescript
+   const requestBody: any = {};
+   if (Object.keys(runConfig).length > 0) {
+     requestBody.run_config = runConfig;
+   }
+   body: Object.keys(requestBody).length > 0
+     ? JSON.stringify(requestBody)
+     : undefined;
+   ```
+
+   To:
+
+   ```typescript
+   const requestBody =
+     Object.keys(runConfig).length > 0 ? runConfig : undefined;
+   body: requestBody ? JSON.stringify(requestBody) : undefined;
+   ```
+
+   This matches how `App.tsx` sends the request body, ensuring FastAPI receives `runConfig` directly as the `run_config` parameter.
+
+4. **Backend conditional execution** - The backend already had logic to check `run_config.checks.duplicates`, but it was defaulting to `True` when the key was missing. Now that `checks` is always sent, the backend correctly respects `False` values.
+
+**Files Modified:**
+
+- `frontend/src/App.tsx` (lines 200-202) - Added `config.checks` to `runConfig`
+- `frontend/src/pages/RunsPage.tsx` (lines 481-489) - Added `config.checks` to `runConfig` and fixed request body structure
+- `backend/services/integrity_runner.py` (lines 621-650) - Conditional check execution logic (already existed, now works correctly)
+
+**Impact:** Duplicate checks (and other checks like `links` and `required_fields`) now only run when explicitly selected in the frontend. The backend correctly respects the `checks` configuration sent from the frontend.
+
+**Key Lessons:**
+
+1. **Multiple code paths** - Always check for multiple entry points when debugging frontend issues. Different pages may have separate implementations of the same functionality.
+
+2. **FastAPI Body parameter** - When using `Body(default=None)`, the request body should be the value directly, not wrapped in another object. FastAPI will extract it as the parameter name.
+
+3. **Default values vs missing keys** - When checking for optional configuration, distinguish between "key missing" (should use default) and "key present with False value" (should respect False). The backend now explicitly checks for key existence before defaulting.
+
+---
+
+### Rule Selection Bug Fix (2025-12-26)
+
+**Issue:** Selecting individual rules in scan configuration caused ALL rules in that category to execute instead of just the selected ones.
+
+**Root Cause:** Frontend sent double-nested request body `{run_config: {entities: [...], rules: {...}}}` which, combined with FastAPI's `Body()` parameter named `run_config`, created `{run_config: {run_config: {...}}}`. This caused `run_config.get("rules")` to return `None`, skipping filtering entirely.
+
+**Solution:** Changed `frontend/src/App.tsx` to send `runConfig` directly as request body instead of wrapping it in `{run_config: ...}`.
+
+**Files Modified:**
+
+- `frontend/src/App.tsx` (lines 209-224) - Removed double-nesting
+- `backend/services/integrity_runner.py` (lines 1310, 1349, 1395) - Fixed indentation bugs
+- `backend/services/integrity_runner.py` (lines 1312-1314, 1351-1354, 1397-1400) - Removed duplicate `else` blocks
+
+**Impact:** Rule selection now works correctly. Only explicitly selected rules execute in scans.
+
+**Detailed Documentation:** See `context-rules-fix.md` for complete debugging journey including all attempts and lessons learned.
+
+---
+
+## Archived Troubleshooting & Fixes
 
 ### CORS Policy and 500 Internal Server Error (2025-01-XX)
 
@@ -135,3 +240,5 @@ The 500 error was caused by an `UnboundLocalError` in `backend/middleware/auth.p
 
 **Key Lesson:**
 When Python sees an assignment or import to a variable name anywhere in a function, it treats that variable as local throughout the entire function scope. This can cause `UnboundLocalError` if you try to use the variable before the assignment. Always use module-level imports and avoid local imports that shadow module-level names.
+
+These older fixes are documented here for historical reference but are superseded by more recent work. See deliverable log above for current state.

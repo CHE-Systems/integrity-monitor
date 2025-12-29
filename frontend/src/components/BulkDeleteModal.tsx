@@ -20,14 +20,7 @@ const ISSUE_TYPES = [
 ];
 
 const ENTITIES = [
-  { value: "students", label: "Students" },
-  { value: "parents", label: "Parents" },
   { value: "contractors", label: "Contractors" },
-  { value: "classes", label: "Classes" },
-  { value: "attendance", label: "Attendance" },
-  { value: "truth", label: "Truth" },
-  { value: "payments", label: "Payments" },
-  { value: "data_issues", label: "Data Issues" },
 ];
 
 export const BulkDeleteModal: React.FC<BulkDeleteModalProps> = ({

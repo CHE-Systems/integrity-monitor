@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import date, datetime
 from itertools import combinations
 import uuid
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
+from collections import defaultdict
 
 from ..config.models import DuplicateDefinition, DuplicateRule, SchemaConfig
 from ..utils.issues import IssuePayload
 from ..utils.normalization import normalize_name, normalize_phone
 from ..utils.similarity import jaccard_ratio, jaro_winkler
 from .duplicate_conditions import evaluate_condition
+
+logger = logging.getLogger(__name__)
 
 LIKELY_THRESHOLD = 0.8
 POSSIBLE_THRESHOLD = 0.6
@@ -79,20 +83,198 @@ class PairMatch:
     evidence: Dict[str, Any]
 
 
-def run(records: Dict[str, list], schema_config: Optional[SchemaConfig] = None) -> List[IssuePayload]:
+def run(
+    records: Dict[str, list], 
+    schema_config: Optional[SchemaConfig] = None,
+    run_id: Optional[str] = None,
+    firestore_writer = None
+) -> List[IssuePayload]:
     """Run duplicate detection checks.
     
     Args:
         records: Dictionary mapping entity names to lists of raw records
         schema_config: Optional SchemaConfig with duplicate rules. If None, uses hardcoded logic.
+        run_id: Optional run ID for logging to browser console
+        firestore_writer: Optional FirestoreWriter for logging to browser console
     """
     issues: List[IssuePayload] = []
     
+    def console_log(level: str, message: str):
+        """Helper to log to both logger and browser console"""
+        if level == "info":
+            logger.info(message)
+        elif level == "warning":
+            logger.warning(message)
+        elif level == "error":
+            logger.error(message)
+        
+        if run_id and firestore_writer:
+            try:
+                firestore_writer.write_log(run_id, level, f"[DUPLICATES] {message}")
+            except Exception:
+                pass  # Don't fail if logging fails
+    
     dup_config = schema_config.duplicates if schema_config else {}
     
-    issues.extend(_process_students(records.get("students", []), dup_config.get("students")))
-    issues.extend(_process_parents(records.get("parents", []), dup_config.get("parents")))
-    issues.extend(_process_contractors(records.get("contractors", []), dup_config.get("contractors")))
+    # Log what we received
+    console_log("info", f"Starting duplicates check - has_schema_config: {schema_config is not None}, dup_config_keys: {list(dup_config.keys()) if dup_config else []}")
+    logger.info(
+        "Duplicates check: starting",
+        extra={
+            "has_schema_config": schema_config is not None,
+            "dup_config_keys": list(dup_config.keys()) if dup_config else [],
+            "dup_config_type": type(dup_config).__name__,
+        }
+    )
+    
+    # Log rule counts per entity
+    entity_rule_counts = {}
+    for entity, dup_def in dup_config.items():
+        likely_count = len(dup_def.likely) if dup_def and dup_def.likely else 0
+        possible_count = len(dup_def.possible) if dup_def and dup_def.possible else 0
+        if likely_count > 0 or possible_count > 0:
+            likely_rule_ids = [r.rule_id for r in dup_def.likely] if dup_def and dup_def.likely else []
+            possible_rule_ids = [r.rule_id for r in dup_def.possible] if dup_def and dup_def.possible else []
+            entity_rule_counts[entity] = {
+                "likely": likely_count,
+                "possible": possible_count,
+                "likely_rule_ids": likely_rule_ids,
+                "possible_rule_ids": possible_rule_ids,
+            }
+    
+    if entity_rule_counts:
+        logger.info(
+            "Duplicates check: processing entities",
+            extra={
+                "category": "duplicates",
+                "entity_rule_counts": entity_rule_counts,
+                "total_entities": len(entity_rule_counts),
+            }
+        )
+    else:
+        logger.info("Duplicates check: no duplicate rules configured")
+    
+    # Track all rules and their issue counts
+    all_rule_issues = {}
+    
+    # Get rule IDs for each entity before processing
+    student_dup_def = dup_config.get("students")
+    student_rule_ids = []
+    if student_dup_def:
+        student_rule_ids.extend([r.rule_id for r in (student_dup_def.likely or [])])
+        student_rule_ids.extend([r.rule_id for r in (student_dup_def.possible or [])])
+        all_rule_issues.update({rule_id: 0 for rule_id in student_rule_ids})
+    
+    parent_dup_def = dup_config.get("parents")
+    parent_rule_ids = []
+    if parent_dup_def:
+        parent_rule_ids.extend([r.rule_id for r in (parent_dup_def.likely or [])])
+        parent_rule_ids.extend([r.rule_id for r in (parent_dup_def.possible or [])])
+        all_rule_issues.update({rule_id: 0 for rule_id in parent_rule_ids})
+    
+    contractor_dup_def = dup_config.get("contractors")
+    console_log("info", f"Checking contractor duplicate rules - dup_def_is_none: {contractor_dup_def is None}, dup_config_has_contractors: {'contractors' in dup_config}")
+    logger.info(
+        "Checking contractor duplicate rules",
+        extra={
+            "contractor_dup_def_is_none": contractor_dup_def is None,
+            "contractor_dup_def_type": type(contractor_dup_def).__name__ if contractor_dup_def else None,
+            "dup_config_has_contractors": "contractors" in dup_config,
+        }
+    )
+    contractor_rule_ids = []
+    if contractor_dup_def:
+        likely_list = contractor_dup_def.likely or []
+        possible_list = contractor_dup_def.possible or []
+        contractor_rule_ids.extend([r.rule_id for r in likely_list])
+        contractor_rule_ids.extend([r.rule_id for r in possible_list])
+        all_rule_issues.update({rule_id: 0 for rule_id in contractor_rule_ids})
+        console_log("info", f"Contractor duplicate rules loaded - likely: {len(likely_list)}, possible: {len(possible_list)}, rule_ids: {contractor_rule_ids}")
+        logger.info(
+            f"Contractor duplicate rules loaded",
+            extra={
+                "likely_count": len(likely_list),
+                "possible_count": len(possible_list),
+                "rule_ids": contractor_rule_ids,
+                "likely_rule_ids": [r.rule_id for r in likely_list],
+                "possible_rule_ids": [r.rule_id for r in possible_list],
+            }
+        )
+    else:
+        console_log("warning", "No contractor duplicate rules found in schema config - dup_def is None or missing")
+        logger.warning("No contractor duplicate rules found in schema config - dup_def is None or missing")
+    
+    student_issues = _process_students(records.get("students", []), student_dup_def)
+    issues.extend(student_issues)
+    # Count issues by rule_id
+    for issue in student_issues:
+        if issue.rule_id in all_rule_issues:
+            all_rule_issues[issue.rule_id] += 1
+    # Always log, even if 0 issues
+    logger.info(
+        "Duplicates check: students completed",
+        extra={
+            "category": "duplicates",
+            "entity": "students",
+            "issues_found": len(student_issues),
+            "rule_issues": {rid: all_rule_issues.get(rid, 0) for rid in student_rule_ids} if student_rule_ids else {},
+        }
+    )
+    
+    parent_issues = _process_parents(records.get("parents", []), parent_dup_def)
+    issues.extend(parent_issues)
+    for issue in parent_issues:
+        if issue.rule_id in all_rule_issues:
+            all_rule_issues[issue.rule_id] += 1
+    logger.info(
+        "Duplicates check: parents completed",
+        extra={
+            "category": "duplicates",
+            "entity": "parents",
+            "issues_found": len(parent_issues),
+            "rule_issues": {rid: all_rule_issues.get(rid, 0) for rid in parent_rule_ids} if parent_rule_ids else {},
+        }
+    )
+    
+    contractor_records = records.get("contractors", [])
+    likely_count = len(contractor_dup_def.likely) if contractor_dup_def and contractor_dup_def.likely else 0
+    possible_count = len(contractor_dup_def.possible) if contractor_dup_def and contractor_dup_def.possible else 0
+    console_log("info", f"Processing contractors - records: {len(contractor_records)}, dup_def_is_none: {contractor_dup_def is None}, likely: {likely_count}, possible: {possible_count}")
+    logger.info(
+        "Processing contractors for duplicates",
+        extra={
+            "record_count": len(contractor_records),
+            "contractor_dup_def_is_none": contractor_dup_def is None,
+            "contractor_dup_def_type": type(contractor_dup_def).__name__ if contractor_dup_def else None,
+            "has_likely": contractor_dup_def.likely is not None if contractor_dup_def else False,
+            "has_possible": contractor_dup_def.possible is not None if contractor_dup_def else False,
+            "likely_count": likely_count,
+            "possible_count": possible_count,
+        }
+    )
+    contractor_issues = _process_contractors(contractor_records, contractor_dup_def, run_id=run_id, firestore_writer=firestore_writer)
+    issues.extend(contractor_issues)
+    for issue in contractor_issues:
+        if issue.rule_id in all_rule_issues:
+            all_rule_issues[issue.rule_id] += 1
+    logger.info(
+        "Duplicates check: contractors completed",
+        extra={
+            "category": "duplicates",
+            "entity": "contractors",
+            "issues_found": len(contractor_issues),
+            "rule_issues": {rid: all_rule_issues.get(rid, 0) for rid in contractor_rule_ids} if contractor_rule_ids else {},
+        }
+    )
+    
+    logger.info(
+        "Duplicates check: completed",
+        extra={
+            "category": "duplicates",
+            "total_issues": len(issues),
+        }
+    )
+    
     return issues
 
 
@@ -273,8 +455,8 @@ def _normalize_contractors(records: Iterable[dict]) -> Dict[str, ContractorRecor
         normalized_name = normalize_name(legal_name)
         email, _, _ = _normalize_email(_extract_field(fields, "email"))
         phone = str(_extract_field(fields, "phone") or "")
-        campuses = set(_ensure_list(_extract_field(fields, "campuses", "campus_assignments")))
-        ein = str(_extract_field(fields, "ein", "vendor_id") or "").strip()
+        # Removed: campuses and ein are no longer used for duplicate detection
+        # Set to empty defaults to prevent downstream logic from using them
         normalized[record_id] = ContractorRecord(
             record_id=record_id,
             name=legal_name,
@@ -284,8 +466,8 @@ def _normalize_contractors(records: Iterable[dict]) -> Dict[str, ContractorRecor
             normalized_email=email,
             phone=phone,
             normalized_phone=normalize_phone(phone),
-            campuses=campuses,
-            ein=ein,
+            campuses=set(),  # No longer extracted - set to empty
+            ein="",  # No longer extracted - set to empty
         )
     return normalized
 
@@ -297,36 +479,91 @@ def _normalize_contractors(records: Iterable[dict]) -> Dict[str, ContractorRecor
 
 def _process_students(raw_records: List[dict], dup_def: Optional[DuplicateDefinition] = None) -> List[IssuePayload]:
     normalized = _normalize_students(raw_records)
-    classifier = lambda a, b: _classify_pair(a, b, "student", dup_def) if dup_def else _classify_student_pair(a, b)
+    # Check if dup_def has any rules (not just if it exists)
+    has_rules = dup_def and ((dup_def.likely and len(dup_def.likely) > 0) or (dup_def.possible and len(dup_def.possible) > 0))
+    if has_rules:
+        classifier = lambda a, b: _classify_pair(a, b, "student", dup_def)
+    else:
+        if dup_def:
+            logger.warning("DuplicateDefinition exists for students but has no rules - falling back to hardcoded logic")
+        classifier = _classify_student_pair
     pairs = _detect_pairs(normalized, classifier)
     return _build_group_issues("student", normalized, pairs)
 
 
 def _process_parents(raw_records: List[dict], dup_def: Optional[DuplicateDefinition] = None) -> List[IssuePayload]:
     normalized = _normalize_parents(raw_records)
-    classifier = lambda a, b: _classify_pair(a, b, "parent", dup_def) if dup_def else _classify_parent_pair(a, b)
+    # Check if dup_def has any rules (not just if it exists)
+    has_rules = dup_def and ((dup_def.likely and len(dup_def.likely) > 0) or (dup_def.possible and len(dup_def.possible) > 0))
+    if has_rules:
+        classifier = lambda a, b: _classify_pair(a, b, "parent", dup_def)
+    else:
+        if dup_def:
+            logger.warning("DuplicateDefinition exists for parents but has no rules - falling back to hardcoded logic")
+        classifier = _classify_parent_pair
     pairs = _detect_pairs(normalized, classifier)
     return _build_group_issues("parent", normalized, pairs)
 
 
-def _process_contractors(raw_records: List[dict], dup_def: Optional[DuplicateDefinition] = None) -> List[IssuePayload]:
+def _process_contractors(
+    raw_records: List[dict], 
+    dup_def: Optional[DuplicateDefinition] = None,
+    run_id: Optional[str] = None,
+    firestore_writer = None
+) -> List[IssuePayload]:
+    def console_log(level: str, message: str):
+        """Helper to log to both logger and browser console"""
+        if level == "info":
+            logger.info(message)
+        elif level == "warning":
+            logger.warning(message)
+        elif level == "error":
+            logger.error(message)
+        
+        if run_id and firestore_writer:
+            try:
+                firestore_writer.write_log(run_id, level, f"[DUPLICATES] {message}")
+            except Exception:
+                pass
+    
     normalized = _normalize_contractors(raw_records)
-    classifier = lambda a, b: _classify_pair(a, b, "contractor", dup_def) if dup_def else _classify_contractor_pair(a, b)
-    pairs = _detect_pairs(normalized, classifier)
+    # Always use hardcoded priority-based classifier (email → phone → name)
+    console_log("info", "Using priority-based duplicate detection for contractors: email → phone → name")
+    logger.info("Using priority-based duplicate detection for contractors: email → phone → name")
+    classifier = _classify_contractor_pair
+    pairs = _detect_pairs(normalized, classifier, console_log)
+    console_log("info", f"Found {len(pairs)} duplicate pairs for contractors")
     return _build_group_issues("contractor", normalized, pairs)
 
 
 def _detect_pairs(
     normalized: Dict[str, Any],
     classifier: Callable[[Any, Any], Optional[PairMatch]],
+    console_log=None,
 ) -> List[PairMatch]:
     buckets = _build_blocks(normalized)
     seen_pairs: Set[Tuple[str, str]] = set()
     matches: List[PairMatch] = []
+    
+    total_buckets = len(buckets)
+    total_pairs_evaluated = 0
+    pairs_by_block_type: Dict[str, int] = {}
 
-    for bucket in buckets.values():
+    # Maximum block size to prevent O(n²) explosion on common names
+    MAX_BLOCK_SIZE = 100
+    
+    for block_key, bucket in buckets.items():
         if len(bucket) < 2:
             continue
+        
+        # Skip blocks that are too large - likely false positives from common names
+        if len(bucket) > MAX_BLOCK_SIZE:
+            if console_log:
+                console_log("warning", f"Skipping large block {block_key[:50]}... with {len(bucket)} records (max: {MAX_BLOCK_SIZE})")
+            continue
+        
+        block_type = block_key.split(":")[0] if ":" in block_key else "unknown"
+        pairs_in_bucket = 0
         for a_id, b_id in combinations(bucket, 2):
             pair_key = tuple(sorted((a_id, b_id)))
             if pair_key in seen_pairs:
@@ -335,8 +572,16 @@ def _detect_pairs(
             record_a = normalized[a_id]
             record_b = normalized[b_id]
             match = classifier(record_a, record_b)
+            total_pairs_evaluated += 1
+            pairs_in_bucket += 1
             if match:
                 matches.append(match)
+        if pairs_in_bucket > 0:
+            pairs_by_block_type[block_type] = pairs_by_block_type.get(block_type, 0) + pairs_in_bucket
+    
+    if console_log:
+        console_log("info", f"Blocking stats - total blocks: {total_buckets}, pairs evaluated: {total_pairs_evaluated}, pairs by block type: {pairs_by_block_type}")
+    
     return matches
 
 
@@ -370,13 +615,11 @@ def _compute_blocks(record: Any) -> List[str]:
         if record.last_name_soundex and record.address_zip:
             keys.append(f"p:{record.last_name_soundex}:{record.address_zip}")
     elif isinstance(record, ContractorRecord):
+        # Only block by email or phone - name blocking removed
         if record.normalized_email:
             keys.append(f"c:email:{record.normalized_email}")
-        if record.ein:
-            keys.append(f"c:ein:{record.ein}")
-        if record.name_soundex and record.campuses:
-            for campus in record.campuses:
-                keys.append(f"c:{record.name_soundex}:{campus}")
+        if record.normalized_phone:
+            keys.append(f"c:phone:{record.normalized_phone}")
     return keys
 
 
@@ -391,6 +634,7 @@ def _evaluate_rule(
     record_b: Any,
     entity: str,
     match_type: str,
+    console_log=None,
 ) -> Optional[PairMatch]:
     """Evaluate a duplicate rule against two records.
     
@@ -400,12 +644,14 @@ def _evaluate_rule(
         record_b: Second normalized record
         entity: Entity type ("student", "parent", "contractor")
         match_type: "likely" or "possible"
+        console_log: Optional logging function for frontend visibility
         
     Returns:
         PairMatch if all conditions match, None otherwise
     """
     all_evidence: Dict[str, Any] = {}
     all_conditions_match = True
+    failed_condition = None
     
     for condition in rule.conditions:
         matches, evidence = evaluate_condition(condition, record_a, record_b, entity)
@@ -413,9 +659,19 @@ def _evaluate_rule(
         
         if not matches:
             all_conditions_match = False
+            failed_condition = {
+                "type": condition.type,
+                "field": getattr(condition, "field", None),
+                "evidence": evidence
+            }
             break
     
     if not all_conditions_match:
+        if console_log and entity == "contractor":
+            # Only log for contractors to avoid spam
+            record_a_name = getattr(record_a, "normalized_name", "unknown")
+            record_b_name = getattr(record_b, "normalized_name", "unknown")
+            console_log("debug", f"Rule {rule.rule_id} failed for {record_a_name} vs {record_b_name} - failed condition: {failed_condition}")
         return None
     
     # Calculate confidence based on match type and evidence
@@ -444,6 +700,7 @@ def _classify_pair(
     record_b: Any,
     entity: str,
     dup_def: DuplicateDefinition,
+    console_log=None,
 ) -> Optional[PairMatch]:
     """Generic rule-based classifier for duplicate pairs.
     
@@ -452,19 +709,20 @@ def _classify_pair(
         record_b: Second normalized record
         entity: Entity type ("student", "parent", "contractor")
         dup_def: DuplicateDefinition with likely/possible rules
+        console_log: Optional logging function for frontend visibility
         
     Returns:
         PairMatch if any rule matches, None otherwise
     """
     # Try likely rules first
     for rule in dup_def.likely:
-        match = _evaluate_rule(rule, record_a, record_b, entity, "likely")
+        match = _evaluate_rule(rule, record_a, record_b, entity, "likely", console_log)
         if match:
             return match
     
     # Then try possible rules
     for rule in dup_def.possible:
-        match = _evaluate_rule(rule, record_a, record_b, entity, "possible")
+        match = _evaluate_rule(rule, record_a, record_b, entity, "possible", console_log)
         if match:
             return match
     
@@ -627,61 +885,62 @@ def _classify_parent_pair(a: ParentRecord, b: ParentRecord) -> Optional[PairMatc
 
 
 def _classify_contractor_pair(a: ContractorRecord, b: ContractorRecord) -> Optional[PairMatch]:
+    """Simple priority-based duplicate detection: Email → Phone → Name (0.8 threshold).
+    
+    Only checks fields when BOTH records have them. Stops at first match.
+    All comparisons are case-insensitive.
+    """
     evidence: Dict[str, Any] = {}
-    if a.ein and a.ein == b.ein:
-        evidence["ein_match"] = True
-        return PairMatch(
-            entity="contractor",
-            primary_id=a.record_id,
-            secondary_id=b.record_id,
-            rule_id="dup.contractor.ein",
-            match_type="likely",
-            severity=LIKELY_SEVERITY,
-            confidence=0.95,
-            evidence=evidence,
-        )
-    if a.normalized_email and a.normalized_email == b.normalized_email:
-        evidence["email_match"] = True
-        return PairMatch(
-            entity="contractor",
-            primary_id=a.record_id,
-            secondary_id=b.record_id,
-            rule_id="dup.contractor.email_phone",
-            match_type="likely",
-            severity=LIKELY_SEVERITY,
-            confidence=0.9,
-            evidence=evidence,
-        )
-
-    phone_match = bool(a.normalized_phone and a.normalized_phone == b.normalized_phone)
-    evidence["phone_match"] = phone_match
-    name_similarity = jaro_winkler(a.normalized_name, b.normalized_name)
-    evidence["name_similarity"] = round(name_similarity, 3)
-    campus_overlap = jaccard_ratio(a.campuses, b.campuses)
-    evidence["campus_overlap"] = round(campus_overlap, 3)
-
-    if phone_match and name_similarity >= 0.9:
-        return PairMatch(
-            entity="contractor",
-            primary_id=a.record_id,
-            secondary_id=b.record_id,
-            rule_id="dup.contractor.email_phone",
-            match_type="likely",
-            severity=LIKELY_SEVERITY,
-            confidence=0.85,
-            evidence=evidence,
-        )
-    if name_similarity >= 0.92 and campus_overlap >= 0.5:
-        return PairMatch(
-            entity="contractor",
-            primary_id=a.record_id,
-            secondary_id=b.record_id,
-            rule_id="dup.contractor.campus_name",
-            match_type="possible",
-            severity=POSSIBLE_SEVERITY,
-            confidence=0.68,
-            evidence=evidence,
-        )
+    
+    # Priority 1: Email (if both have email) - case-insensitive
+    if a.normalized_email and b.normalized_email:
+        if a.normalized_email.lower() == b.normalized_email.lower():
+            evidence["email_match"] = True
+            return PairMatch(
+                entity="contractor",
+                primary_id=a.record_id,
+                secondary_id=b.record_id,
+                rule_id="dup.contractor.email",
+                match_type="likely",
+                severity=LIKELY_SEVERITY,
+                confidence=0.95,
+                evidence=evidence,
+            )
+    
+    # Priority 2: Phone (if both have phone) - already normalized (digits only)
+    if a.normalized_phone and b.normalized_phone:
+        if a.normalized_phone == b.normalized_phone:
+            evidence["phone_match"] = True
+            return PairMatch(
+                entity="contractor",
+                primary_id=a.record_id,
+                secondary_id=b.record_id,
+                rule_id="dup.contractor.phone",
+                match_type="likely",
+                severity=LIKELY_SEVERITY,
+                confidence=0.9,
+                evidence=evidence,
+            )
+    
+    # Priority 3: Name similarity (if both have name) - case-insensitive, threshold 0.8
+    if a.normalized_name and b.normalized_name:
+        name_a = a.normalized_name.lower().strip()
+        name_b = b.normalized_name.lower().strip()
+        if name_a and name_b:
+            similarity = jaro_winkler(name_a, name_b)
+            evidence["name_similarity"] = round(similarity, 3)
+            if similarity >= 0.8:
+                return PairMatch(
+                    entity="contractor",
+                    primary_id=a.record_id,
+                    secondary_id=b.record_id,
+                    rule_id="dup.contractor.name",
+                    match_type="likely",
+                    severity=LIKELY_SEVERITY,
+                    confidence=round(similarity, 3),
+                    evidence=evidence,
+                )
+    
     return None
 
 
@@ -773,7 +1032,8 @@ def _select_primary(entity: str, members: Set[str], normalized: Dict[str, Any]) 
         if isinstance(record, ParentRecord):
             return sum(bool(value) for value in [record.email, record.phone, record.students])
         if isinstance(record, ContractorRecord):
-            return sum(bool(value) for value in [record.email, record.phone, record.ein, record.campuses])
+            # Removed: ein and campuses - no longer used for duplicate detection
+            return sum(bool(value) for value in [record.email, record.phone])
         return 0
 
     return max(members, key=lambda record_id: (completeness(normalized[record_id]), record_id))

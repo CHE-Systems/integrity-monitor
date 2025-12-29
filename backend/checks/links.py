@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Optional, Tuple
+from collections import defaultdict
 
 from ..config.models import SchemaConfig, RelationshipRule
 from ..utils.issues import IssuePayload
@@ -14,16 +16,54 @@ from ..utils.records import (
     is_record_active,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def run(records: Dict[str, list], schema_config: SchemaConfig) -> List[IssuePayload]:
     """Run link consistency checks with active status and orphan validation."""
     issues: List[IssuePayload] = []
     record_index = build_record_index(records)
     
+    # Track seen issue keys to prevent duplicates within this check
+    seen_issues: set[str] = set()
+    
+    # Count relationship rules per entity
+    entity_rel_counts = {
+        entity: len(entity_schema.relationships)
+        for entity, entity_schema in schema_config.entities.items()
+        if entity_schema.relationships
+    }
+    
+    if entity_rel_counts:
+        logger.info(
+            "Links check: processing entities",
+            extra={
+                "category": "links",
+                "entity_rel_counts": entity_rel_counts,
+                "total_entities": len(entity_rel_counts),
+                "total_rules": sum(entity_rel_counts.values()),
+            }
+        )
+    
     for entity_name, entity_schema in schema_config.entities.items():
         entity_records = records.get(entity_name, [])
         if not entity_schema.relationships:
             continue
+        
+        rel_keys = list(entity_schema.relationships.keys())
+        logger.info(
+            f"Links check: processing {entity_name}",
+            extra={
+                "category": "links",
+                "entity": entity_name,
+                "relationship_count": len(entity_schema.relationships),
+                "relationship_keys": rel_keys,
+                "record_count": len(entity_records),
+            }
+        )
+        
+        # Initialize issues_by_relationship for ALL relationships (set to 0)
+        issues_by_relationship = {rel_key: 0 for rel_key in rel_keys}
         for record in entity_records:
             record_id = record.get("id")
             fields = record.get("fields", {})
@@ -38,22 +78,27 @@ def run(records: Dict[str, list], schema_config: SchemaConfig) -> List[IssuePayl
                 
                 # Detect orphaned links
                 orphaned_ids = _detect_orphans(link_records)
-                for orphan_id in orphaned_ids:
-                    issues.append(
-                        IssuePayload(
-                            rule_id=f"link.{entity_name}.{rel_key}.orphan",
-                            issue_type="orphaned_link",
-                            entity=entity_name,
-                            record_id=record_id,
-                            severity="critical",
-                            description=f"Link to {rel_rule.target} record {orphan_id} does not exist (orphaned).",
-                            metadata={
-                                "target_entity": rel_rule.target,
-                                "orphaned_id": orphan_id,
-                                "relationship": rel_key,
-                            },
+                if orphaned_ids:
+                    rule_id = f"link.{entity_name}.{rel_key}.orphan"
+                    issue_key = f"{rule_id}:{record_id}"
+                    if issue_key not in seen_issues:
+                        seen_issues.add(issue_key)
+                        issues.append(
+                            IssuePayload(
+                                rule_id=rule_id,
+                                issue_type="orphaned_link",
+                                entity=entity_name,
+                                record_id=record_id,
+                                severity="critical",
+                                description=f"Link to {rel_rule.target} record {orphaned_ids[0]} does not exist (orphaned).",
+                                metadata={
+                                    "target_entity": rel_rule.target,
+                                    "orphaned_ids": orphaned_ids,
+                                    "relationship": rel_key,
+                                },
+                            )
                         )
-                    )
+                        issues_by_relationship[f"{rel_key}.orphan"] += 1
                 
                 # Filter out orphans for further validation
                 valid_links = [(lid, rec) for lid, rec in link_records if rec is not None]
@@ -75,74 +120,89 @@ def run(records: Dict[str, list], schema_config: SchemaConfig) -> List[IssuePayl
                 
                 # Check min_links requirement
                 if rel_rule.min_links and count < rel_rule.min_links:
-                    metadata = {
-                        "actual": count,
-                        "expected_min": rel_rule.min_links,
-                        "valid_count": valid_count,
-                        "active_count": len(active_ids),
-                        "inactive_count": len(inactive_ids),
-                        "orphaned_count": len(orphaned_ids),
-                    }
-                    if orphaned_ids:
-                        metadata["orphaned_ids"] = orphaned_ids[:10]  # Limit to first 10
-                    if inactive_ids:
-                        metadata["inactive_ids"] = inactive_ids[:10]
-                    
-                    severity = "critical" if orphaned_ids else ("warning" if inactive_ids else "warning")
-                    issues.append(
-                        IssuePayload(
-                            rule_id=f"link.{entity_name}.{rel_key}.min",
-                            issue_type="missing_link",
-                            entity=entity_name,
-                            record_id=record_id,
-                            severity=severity,
-                            description=rel_rule.message,
-                            metadata=metadata,
+                    rule_id = f"link.{entity_name}.{rel_key}.min"
+                    issue_key = f"{rule_id}:{record_id}"
+                    if issue_key not in seen_issues:
+                        seen_issues.add(issue_key)
+                        metadata = {
+                            "actual": count,
+                            "expected_min": rel_rule.min_links,
+                            "valid_count": valid_count,
+                            "active_count": len(active_ids),
+                            "inactive_count": len(inactive_ids),
+                            "orphaned_count": len(orphaned_ids),
+                        }
+                        if orphaned_ids:
+                            metadata["orphaned_ids"] = orphaned_ids[:10]  # Limit to first 10
+                        if inactive_ids:
+                            metadata["inactive_ids"] = inactive_ids[:10]
+                        
+                        severity = "critical" if orphaned_ids else ("warning" if inactive_ids else "warning")
+                        issues.append(
+                            IssuePayload(
+                                rule_id=rule_id,
+                                issue_type="missing_link",
+                                entity=entity_name,
+                                record_id=record_id,
+                                severity=severity,
+                                description=rel_rule.message,
+                                metadata=metadata,
+                            )
                         )
-                    )
+                        issues_by_relationship[f"{rel_key}.min"] += 1
                 
                 # Check max_links requirement
                 if rel_rule.max_links is not None and count > rel_rule.max_links:
-                    metadata = {
-                        "actual": count,
-                        "expected_max": rel_rule.max_links,
-                        "valid_count": valid_count,
-                        "active_count": len(active_ids),
-                        "inactive_count": len(inactive_ids),
-                        "orphaned_count": len(orphaned_ids),
-                    }
-                    if active_ids:
-                        metadata["active_ids"] = active_ids[:10]
-                    
-                    issues.append(
-                        IssuePayload(
-                            rule_id=f"link.{entity_name}.{rel_key}.max",
-                            issue_type="excessive_link",
-                            entity=entity_name,
-                            record_id=record_id,
-                            severity="info",
-                            description=f"{rel_rule.message} (limit {rel_rule.max_links})",
-                            metadata=metadata,
+                    rule_id = f"link.{entity_name}.{rel_key}.max"
+                    issue_key = f"{rule_id}:{record_id}"
+                    if issue_key not in seen_issues:
+                        seen_issues.add(issue_key)
+                        metadata = {
+                            "actual": count,
+                            "expected_max": rel_rule.max_links,
+                            "valid_count": valid_count,
+                            "active_count": len(active_ids),
+                            "inactive_count": len(inactive_ids),
+                            "orphaned_count": len(orphaned_ids),
+                        }
+                        if active_ids:
+                            metadata["active_ids"] = active_ids[:10]
+                        
+                        issues.append(
+                            IssuePayload(
+                                rule_id=rule_id,
+                                issue_type="excessive_link",
+                                entity=entity_name,
+                                record_id=record_id,
+                                severity="info",
+                                description=f"{rel_rule.message} (limit {rel_rule.max_links})",
+                                metadata=metadata,
+                            )
                         )
-                    )
+                        issues_by_relationship[f"{rel_key}.max"] += 1
                 
                 # Report inactive links separately if require_active is True
                 if rel_rule.require_active and inactive_ids:
-                    issues.append(
-                        IssuePayload(
-                            rule_id=f"link.{entity_name}.{rel_key}.inactive",
-                            issue_type="inactive_link",
-                            entity=entity_name,
-                            record_id=record_id,
-                            severity="warning",
-                            description=f"Some linked {rel_rule.target} records are inactive.",
-                            metadata={
-                                "inactive_count": len(inactive_ids),
-                                "inactive_ids": inactive_ids[:10],
-                                "target_entity": rel_rule.target,
-                            },
+                    rule_id = f"link.{entity_name}.{rel_key}.inactive"
+                    issue_key = f"{rule_id}:{record_id}"
+                    if issue_key not in seen_issues:
+                        seen_issues.add(issue_key)
+                        issues.append(
+                            IssuePayload(
+                                rule_id=rule_id,
+                                issue_type="inactive_link",
+                                entity=entity_name,
+                                record_id=record_id,
+                                severity="warning",
+                                description=f"Some linked {rel_rule.target} records are inactive.",
+                                metadata={
+                                    "inactive_count": len(inactive_ids),
+                                    "inactive_ids": inactive_ids[:10],
+                                    "target_entity": rel_rule.target,
+                                },
+                            )
                         )
-                    )
+                        issues_by_relationship[f"{rel_key}.inactive"] += 1
                 
                 # Validate bidirectional relationships if configured
                 if rel_rule.validate_bidirectional and rel_rule.reverse_relationship_key:
@@ -156,6 +216,8 @@ def run(records: Dict[str, list], schema_config: SchemaConfig) -> List[IssuePayl
                         record_index,
                     )
                     issues.extend(bidirectional_issues)
+                    if bidirectional_issues:
+                        issues_by_relationship[f"{rel_key}.bidirectional"] += len(bidirectional_issues)
                 
                 # Validate cross-entity field matching if configured
                 if rel_rule.cross_entity_validation and valid_links:
@@ -167,6 +229,27 @@ def run(records: Dict[str, list], schema_config: SchemaConfig) -> List[IssuePayl
                         rel_key,
                     )
                     issues.extend(cross_entity_issues)
+                    if cross_entity_issues:
+                        issues_by_relationship[f"{rel_key}.cross_entity"] += len(cross_entity_issues)
+        
+        # Always log summary, even if all relationships found 0 issues
+        logger.info(
+            f"Links check: completed for {entity_name}",
+            extra={
+                "category": "links",
+                "entity": entity_name,
+                "total_issues": sum(issues_by_relationship.values()),
+                "relationship_issues": dict(issues_by_relationship),  # Shows all relationships with their issue counts (including 0)
+            }
+        )
+    
+    logger.info(
+        "Links check: completed",
+        extra={
+            "category": "links",
+            "total_issues": len(issues),
+        }
+    )
     
     return issues
 

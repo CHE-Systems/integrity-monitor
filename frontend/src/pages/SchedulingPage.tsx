@@ -1006,6 +1006,7 @@ export function SchedulingPage() {
                   interval_minutes: undefined,
                   times_of_day: undefined,
                   entities: [],
+                  rules: undefined,
                   stop_condition_type: "none",
                   max_runs: undefined,
                   stop_at: undefined,
@@ -1312,6 +1313,7 @@ export function SchedulingPage() {
               interval_minutes: undefined,
               times_of_day: undefined,
               entities: [],
+              rules: undefined,
               stop_condition_type: "none",
               max_runs: undefined,
               stop_at: undefined,
@@ -1694,8 +1696,8 @@ function CreateScheduleModal({
   const [schema, setSchema] = useState<AirtableSchema | null>(null);
   const [schemaLoading, setSchemaLoading] = useState(false);
   const [rules, setRules] = useState<any>(null);
-  const [expandedCheckTypes, setExpandedCheckTypes] = useState<Set<string>>(
-    new Set(["duplicates", "links", "required_fields", "attendance"])
+  const [expandedTables, setExpandedTables] = useState<Set<string>>(
+    new Set() // Start empty, expand as tables are selected
   );
   const { loadRules, loading: rulesLoading } = useRules();
   const { getToken, loading: authLoading, user: authUser } = useAuth();
@@ -1902,10 +1904,36 @@ function CreateScheduleModal({
     return map;
   }, [schema]);
 
-  // Get available entities (those that have tables in schema)
+  // Get available entities (those that have tables in schema AND have rules enabled)
   const availableEntities = useMemo(() => {
-    return Array.from(entityTableMap.keys()).sort();
-  }, [entityTableMap]);
+    const entitiesFromSchema = Array.from(entityTableMap.keys());
+
+    // Filter to only entities that have rules enabled
+    if (!rules) {
+      return entitiesFromSchema;
+    }
+
+    return entitiesFromSchema
+      .filter((entity) => {
+        // Check if entity has any rules in any category
+        const hasDuplicates =
+          rules.duplicates?.[entity] &&
+          ((rules.duplicates[entity].likely &&
+            rules.duplicates[entity].likely.length > 0) ||
+            (rules.duplicates[entity].possible &&
+              rules.duplicates[entity].possible.length > 0));
+        const hasRelationships =
+          rules.relationships?.[entity] &&
+          Object.keys(rules.relationships[entity]).length > 0;
+        const hasRequiredFields =
+          rules.required_fields?.[entity] &&
+          Array.isArray(rules.required_fields[entity]) &&
+          rules.required_fields[entity].length > 0;
+
+        return hasDuplicates || hasRelationships || hasRequiredFields;
+      })
+      .sort();
+  }, [entityTableMap, rules]);
 
   // Initialize selected entities when schema loads or form changes
   useEffect(() => {
@@ -1999,13 +2027,53 @@ function CreateScheduleModal({
     });
   };
 
-  const toggleCheckTypeExpansion = (checkType: string) => {
-    setExpandedCheckTypes((prev) => {
+  // Check if all rules are selected for a specific table and rule type
+  const areAllRulesSelectedForTable = (
+    entity: string,
+    category: "duplicates" | "relationships" | "required_fields"
+  ): boolean => {
+    if (!rules) return false;
+    const allIds = getAllRuleIds(category, entity);
+    if (allIds.length === 0) return true; // No rules means "all selected"
+    const selectedIds = form.rules?.[category]?.[entity] || [];
+    return (
+      selectedIds.length === allIds.length &&
+      allIds.every((id) => selectedIds.includes(id))
+    );
+  };
+
+  // Toggle all rules for a specific table and rule type
+  const toggleTableRuleType = (
+    entity: string,
+    category: "duplicates" | "relationships" | "required_fields"
+  ) => {
+    const allSelected = areAllRulesSelectedForTable(entity, category);
+    const allIds = getAllRuleIds(category, entity);
+    const nextRules = { ...form.rules };
+
+    if (allSelected) {
+      // Deselect all
+      if (nextRules[category]) {
+        delete nextRules[category]![entity];
+      }
+    } else {
+      // Select all
+      if (!nextRules[category]) {
+        nextRules[category] = {};
+      }
+      nextRules[category]![entity] = allIds;
+    }
+
+    setForm({ ...form, rules: nextRules });
+  };
+
+  const toggleTableExpansion = (entity: string) => {
+    setExpandedTables((prev) => {
       const next = new Set(prev);
-      if (next.has(checkType)) {
-        next.delete(checkType);
+      if (next.has(entity)) {
+        next.delete(entity);
       } else {
-        next.add(checkType);
+        next.add(entity);
       }
       return next;
     });
@@ -2153,9 +2221,20 @@ function CreateScheduleModal({
     if (next.has(entity)) {
       next.delete(entity);
       removeRulesForEntity(entity);
+      setExpandedTables((prevTables) => {
+        const nextTables = new Set(prevTables);
+        nextTables.delete(entity);
+        return nextTables;
+      });
     } else {
       next.add(entity);
       initializeRulesForEntity(entity);
+      // Auto-expand when table is selected
+      setExpandedTables((prevTables) => {
+        const nextTables = new Set(prevTables);
+        nextTables.add(entity);
+        return nextTables;
+      });
     }
     setSelectedEntities(next);
     setForm({ ...form, entities: Array.from(next) });
@@ -2641,13 +2720,12 @@ function CreateScheduleModal({
             </div>
           </div>
 
-          {/* Right Column - Check Types with Nested Rules */}
+          {/* Right Column - Tables with Nested Rules */}
           <div className="space-y-6">
-            {/* Check Types with Nested Rules */}
             <div>
               <div className="flex items-center justify-between mb-3">
                 <label className="block text-sm font-medium text-[var(--text-main)]">
-                  Check Types & Rules
+                  Rules by Table
                 </label>
                 {selectedEntities.size > 0 && rules && (
                   <button
@@ -2664,428 +2742,386 @@ function CreateScheduleModal({
                   </button>
                 )}
               </div>
-              <div className="space-y-3 max-h-[600px] overflow-y-auto">
-                {/* Duplicates Check Type */}
-                <div className="border border-[var(--border)] rounded-lg">
-                  <div className="flex items-center p-3 hover:bg-[var(--bg-mid)]/50 transition-colors">
-                    <input
-                      type="checkbox"
-                      checked={areAllRulesSelectedForCheckType("duplicates")}
-                      ref={(el) => {
-                        if (el) {
-                          el.indeterminate =
-                            areAnyRulesSelectedForCheckType("duplicates") &&
-                            !areAllRulesSelectedForCheckType("duplicates");
-                        }
-                      }}
-                      onChange={() => toggleCheckType("duplicates")}
-                      className="mr-3 w-4 h-4"
-                    />
-                    <div className="flex-1">
-                      <div className="font-medium text-[var(--text-main)]">
-                        Duplicates
-                      </div>
-                      <div className="text-sm text-[var(--text-muted)]">
-                        Detect duplicate records across entities
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => toggleCheckTypeExpansion("duplicates")}
-                      className="ml-2 px-2 py-1 text-sm font-medium text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-mid)]/30 rounded transition-colors"
-                      aria-label={
-                        expandedCheckTypes.has("duplicates")
-                          ? "Collapse rules"
-                          : "Expand rules"
-                      }
-                    >
-                      {expandedCheckTypes.has("duplicates") ? "▼" : "▶"}
-                    </button>
-                  </div>
-                  {expandedCheckTypes.has("duplicates") && (
-                    <div className="px-3 pb-3 pt-2 space-y-3 border-t border-[var(--border)] bg-[var(--bg-mid)]/20">
-                      {Array.from(selectedEntities).map((entity) => {
-                        const dupDef = rules?.duplicates?.[entity] as
-                          | { likely?: any[]; possible?: any[] }
-                          | undefined;
-                        if (!dupDef) return null;
-
-                        const likelyRules = dupDef.likely || [];
-                        const possibleRules = dupDef.possible || [];
-                        const allRuleIds = getAllRuleIds("duplicates", entity);
-                        const selectedIds =
-                          form.rules?.duplicates?.[entity] || [];
-
-                        if (allRuleIds.length === 0) return null;
-
-                        return (
-                          <div
-                            key={entity}
-                            className="ml-2 space-y-2 border-l-2 border-[var(--border)]/50 pl-3"
-                          >
-                            <div className="text-xs font-semibold text-[var(--text-main)] uppercase tracking-wide">
-                              {ENTITY_TABLE_MAPPING[entity] || entity}
-                            </div>
-                            {likelyRules.length > 0 && (
-                              <div className="ml-1 space-y-1">
-                                <div className="text-xs font-medium text-[var(--text-muted)] mb-1.5">
-                                  Likely
-                                </div>
-                                {likelyRules.map((rule: any) => (
-                                  <label
-                                    key={rule.rule_id}
-                                    className="flex items-center gap-2 p-2 rounded-md hover:bg-[var(--bg-mid)]/40 cursor-pointer transition-colors"
-                                  >
-                                    <input
-                                      type="checkbox"
-                                      checked={selectedIds.includes(
-                                        rule.rule_id
-                                      )}
-                                      onChange={() =>
-                                        handleRulesChange(
-                                          "duplicates",
-                                          entity,
-                                          selectedIds.includes(rule.rule_id)
-                                            ? selectedIds.filter(
-                                                (id) => id !== rule.rule_id
-                                              )
-                                            : [...selectedIds, rule.rule_id]
-                                        )
-                                      }
-                                      className="w-3.5 h-3.5"
-                                    />
-                                    <div className="flex-1 min-w-0">
-                                      <div className="text-xs font-medium text-[var(--text-main)]">
-                                        {rule.rule_id}
-                                      </div>
-                                      <div className="text-xs text-[var(--text-muted)] truncate">
-                                        {rule.description || ""}
-                                      </div>
-                                    </div>
-                                  </label>
-                                ))}
-                              </div>
-                            )}
-                            {possibleRules.length > 0 && (
-                              <div className="ml-1 mt-3 space-y-1">
-                                <div className="text-xs font-medium text-[var(--text-muted)] mb-1.5">
-                                  Possible
-                                </div>
-                                {possibleRules.map((rule: any) => (
-                                  <label
-                                    key={rule.rule_id}
-                                    className="flex items-center gap-2 p-2 rounded-md hover:bg-[var(--bg-mid)]/40 cursor-pointer transition-colors"
-                                  >
-                                    <input
-                                      type="checkbox"
-                                      checked={selectedIds.includes(
-                                        rule.rule_id
-                                      )}
-                                      onChange={() =>
-                                        handleRulesChange(
-                                          "duplicates",
-                                          entity,
-                                          selectedIds.includes(rule.rule_id)
-                                            ? selectedIds.filter(
-                                                (id) => id !== rule.rule_id
-                                              )
-                                            : [...selectedIds, rule.rule_id]
-                                        )
-                                      }
-                                      className="w-3.5 h-3.5"
-                                    />
-                                    <div className="flex-1 min-w-0">
-                                      <div className="text-xs font-medium text-[var(--text-main)]">
-                                        {rule.rule_id}
-                                      </div>
-                                      <div className="text-xs text-[var(--text-muted)] truncate">
-                                        {rule.description || ""}
-                                      </div>
-                                    </div>
-                                  </label>
-                                ))}
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
+              {selectedEntities.size === 0 ? (
+                <div className="text-sm text-[var(--text-muted)] py-8 text-center border border-[var(--border)] rounded-lg">
+                  Please select a table to see available rules
                 </div>
-
-                {/* Missing Links Check Type */}
-                <div className="border border-[var(--border)] rounded-lg">
-                  <div className="flex items-center p-3 hover:bg-[var(--bg-mid)]/50 transition-colors">
-                    <input
-                      type="checkbox"
-                      checked={areAllRulesSelectedForCheckType("links")}
-                      ref={(el) => {
-                        if (el) {
-                          el.indeterminate =
-                            areAnyRulesSelectedForCheckType("links") &&
-                            !areAllRulesSelectedForCheckType("links");
-                        }
-                      }}
-                      onChange={() => toggleCheckType("links")}
-                      className="mr-3 w-4 h-4"
-                    />
-                    <div className="flex-1">
-                      <div className="font-medium text-[var(--text-main)]">
-                        Missing Links
-                      </div>
-                      <div className="text-sm text-[var(--text-muted)]">
-                        Verify required relationships between records
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => toggleCheckTypeExpansion("links")}
-                      className="ml-2 px-2 py-1 text-sm font-medium text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-mid)]/30 rounded transition-colors"
-                      aria-label={
-                        expandedCheckTypes.has("links")
-                          ? "Collapse rules"
-                          : "Expand rules"
-                      }
-                    >
-                      {expandedCheckTypes.has("links") ? "▼" : "▶"}
-                    </button>
-                  </div>
-                  {expandedCheckTypes.has("links") && (
-                    <div className="px-3 pb-3 pt-2 space-y-3 border-t border-[var(--border)] bg-[var(--bg-mid)]/20">
-                      {Array.from(selectedEntities).map((entity) => {
-                        const relRules = rules?.relationships?.[entity];
-                        if (!relRules || Object.keys(relRules).length === 0)
-                          return null;
-
-                        const selectedIds =
-                          form.rules?.relationships?.[entity] || [];
-
-                        return (
-                          <div
-                            key={entity}
-                            className="ml-2 space-y-2 border-l-2 border-[var(--border)]/50 pl-3"
-                          >
-                            <div className="text-xs font-semibold text-[var(--text-main)] uppercase tracking-wide">
-                              {ENTITY_TABLE_MAPPING[entity] || entity}
-                            </div>
-                            {Object.entries(relRules).map(
-                              ([relKey, relRule]: [string, any]) => (
-                                <label
-                                  key={relKey}
-                                  className="flex items-center gap-2 p-2 rounded-md hover:bg-[var(--bg-mid)]/40 cursor-pointer transition-colors"
-                                >
-                                  <input
-                                    type="checkbox"
-                                    checked={selectedIds.includes(relKey)}
-                                    onChange={() =>
-                                      handleRulesChange(
-                                        "relationships",
-                                        entity,
-                                        selectedIds.includes(relKey)
-                                          ? selectedIds.filter(
-                                              (id) => id !== relKey
-                                            )
-                                          : [...selectedIds, relKey]
-                                      )
-                                    }
-                                    className="w-3.5 h-3.5"
-                                  />
-                                  <div className="flex-1 min-w-0">
-                                    <div className="text-xs font-medium text-[var(--text-main)]">
-                                      {relKey}
-                                    </div>
-                                    <div className="text-xs text-[var(--text-muted)] truncate">
-                                      {relRule.message || ""}
-                                    </div>
-                                  </div>
-                                </label>
-                              )
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
+              ) : !rules ? (
+                <div className="text-sm text-[var(--text-muted)] py-8 text-center border border-[var(--border)] rounded-lg">
+                  Loading rules...
                 </div>
+              ) : (
+                <div className="space-y-4 max-h-[600px] overflow-y-auto">
+                  {Array.from(selectedEntities).map((entity) => {
+                    const table = entityTableMap.get(entity);
+                    const isExpanded = expandedTables.has(entity);
 
-                {/* Missing Fields Check Type */}
-                <div className="border border-[var(--border)] rounded-lg">
-                  <div className="flex items-center p-3 hover:bg-[var(--bg-mid)]/50 transition-colors">
-                    <input
-                      type="checkbox"
-                      checked={areAllRulesSelectedForCheckType(
-                        "required_fields"
-                      )}
-                      ref={(el) => {
-                        if (el) {
-                          el.indeterminate =
-                            areAnyRulesSelectedForCheckType(
-                              "required_fields"
-                            ) &&
-                            !areAllRulesSelectedForCheckType("required_fields");
-                        }
-                      }}
-                      onChange={() => toggleCheckType("required_fields")}
-                      className="mr-3 w-4 h-4"
-                    />
-                    <div className="flex-1">
-                      <div className="font-medium text-[var(--text-main)]">
-                        Missing Fields
-                      </div>
-                      <div className="text-sm text-[var(--text-muted)]">
-                        Check for required field values
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        toggleCheckTypeExpansion("required_fields")
-                      }
-                      className="ml-2 px-2 py-1 text-sm font-medium text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-mid)]/30 rounded transition-colors"
-                      aria-label={
-                        expandedCheckTypes.has("required_fields")
-                          ? "Collapse rules"
-                          : "Expand rules"
-                      }
-                    >
-                      {expandedCheckTypes.has("required_fields") ? "▼" : "▶"}
-                    </button>
-                  </div>
-                  {expandedCheckTypes.has("required_fields") && (
-                    <div className="px-3 pb-3 pt-2 space-y-3 border-t border-[var(--border)] bg-[var(--bg-mid)]/20">
-                      {Array.from(selectedEntities).map((entity) => {
-                        const reqFields = rules?.required_fields?.[entity];
-                        if (
-                          !reqFields ||
-                          !Array.isArray(reqFields) ||
-                          reqFields.length === 0
-                        )
-                          return null;
-
-                        const selectedIds =
-                          form.rules?.required_fields?.[entity] || [];
-
-                        return (
-                          <div
-                            key={entity}
-                            className="ml-2 space-y-2 border-l-2 border-[var(--border)]/50 pl-3"
-                          >
-                            <div className="text-xs font-semibold text-[var(--text-main)] uppercase tracking-wide">
-                              {ENTITY_TABLE_MAPPING[entity] || entity}
-                            </div>
-                            {reqFields.map((field: any) => {
-                              const ruleId =
-                                field.rule_id ||
-                                field.field ||
-                                `required.${entity}.${field.field}`;
-                              return (
-                                <label
-                                  key={ruleId}
-                                  className="flex items-center gap-2 p-2 rounded-md hover:bg-[var(--bg-mid)]/40 cursor-pointer transition-colors"
-                                >
-                                  <input
-                                    type="checkbox"
-                                    checked={selectedIds.includes(ruleId)}
-                                    onChange={() =>
-                                      handleRulesChange(
-                                        "required_fields",
-                                        entity,
-                                        selectedIds.includes(ruleId)
-                                          ? selectedIds.filter(
-                                              (id) => id !== ruleId
-                                            )
-                                          : [...selectedIds, ruleId]
-                                      )
-                                    }
-                                    className="w-3.5 h-3.5"
-                                  />
-                                  <div className="flex-1 min-w-0">
-                                    <div className="text-xs font-medium text-[var(--text-main)]">
-                                      {field.field || ruleId}
-                                    </div>
-                                    <div className="text-xs text-[var(--text-muted)] truncate">
-                                      {field.message || ""}
-                                    </div>
-                                  </div>
-                                </label>
-                              );
-                            })}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-
-                {/* Attendance Anomalies Check Type */}
-                <div className="border border-[var(--border)] rounded-lg">
-                  <div className="flex items-center p-3 hover:bg-[var(--bg-mid)]/50 transition-colors">
-                    <input
-                      type="checkbox"
-                      checked={areAllRulesSelectedForCheckType("attendance")}
-                      onChange={() => toggleCheckType("attendance")}
-                      className="mr-3 w-4 h-4"
-                    />
-                    <div className="flex-1">
-                      <div className="font-medium text-[var(--text-main)]">
-                        Attendance Anomalies
-                      </div>
-                      <div className="text-sm text-[var(--text-muted)]">
-                        Detect attendance pattern issues
-                      </div>
-                    </div>
-                    {rules?.attendance_rules && (
-                      <button
-                        type="button"
-                        onClick={() => toggleCheckTypeExpansion("attendance")}
-                        className="ml-2 px-2 py-1 text-sm font-medium text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-mid)]/30 rounded transition-colors"
-                        aria-label={
-                          expandedCheckTypes.has("attendance")
-                            ? "Collapse rules"
-                            : "Expand rules"
-                        }
+                    return (
+                      <div
+                        key={entity}
+                        className="border border-[var(--border)] rounded-lg"
                       >
-                        {expandedCheckTypes.has("attendance") ? "▼" : "▶"}
-                      </button>
-                    )}
-                  </div>
-                  {expandedCheckTypes.has("attendance") &&
-                    rules?.attendance_rules && (
-                      <div className="px-3 pb-3 pt-2 border-t border-[var(--border)] bg-[var(--bg-mid)]/20">
-                        <label className="flex items-center gap-2 p-2 rounded-md hover:bg-[var(--bg-mid)]/40 cursor-pointer transition-colors">
-                          <input
-                            type="checkbox"
-                            checked={form.rules?.attendance_rules ?? true}
-                            onChange={(e) =>
-                              handleRulesChange(
-                                "attendance_rules",
-                                "",
-                                e.target.checked
-                              )
+                        {/* Table Header */}
+                        <div className="flex items-center p-3 hover:bg-[var(--bg-mid)]/50 transition-colors">
+                          <button
+                            type="button"
+                            onClick={() => toggleTableExpansion(entity)}
+                            className="mr-2 px-2 py-1 text-sm font-medium text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-mid)]/30 rounded transition-colors"
+                            aria-label={
+                              isExpanded ? "Collapse table" : "Expand table"
                             }
-                            className="w-3.5 h-3.5"
-                          />
-                          <span className="text-sm font-medium text-[var(--text-main)]">
-                            Attendance Rules
-                          </span>
-                        </label>
+                          >
+                            {isExpanded ? "▼" : "▶"}
+                          </button>
+                          <div className="flex-1">
+                            <div className="font-medium text-[var(--text-main)]">
+                              {ENTITY_TABLE_MAPPING[entity] || entity}
+                            </div>
+                            <div className="text-xs text-[var(--text-muted)]">
+                              {table?.recordCount ?? 0} records •{" "}
+                              {table?.fieldCount ?? 0} fields
+                            </div>
+                          </div>
+                        </div>
+
+                        {isExpanded && (
+                          <div className="px-3 pb-3 pt-2 space-y-4 border-t border-[var(--border)] bg-[var(--bg-mid)]/20">
+                            {/* Duplicate Detection Rules */}
+                            {(() => {
+                              const dupDef = rules?.duplicates?.[entity] as
+                                | { likely?: any[]; possible?: any[] }
+                                | undefined;
+                              if (!dupDef) return null;
+
+                              const likelyRules = dupDef.likely || [];
+                              const possibleRules = dupDef.possible || [];
+                              const allRuleIds = getAllRuleIds(
+                                "duplicates",
+                                entity
+                              );
+                              const selectedIds =
+                                form.rules?.duplicates?.[entity] || [];
+
+                              if (allRuleIds.length === 0) return null;
+
+                              return (
+                                <div className="space-y-2">
+                                  <div className="flex items-center justify-between">
+                                    <div className="text-sm font-medium text-[var(--text-main)]">
+                                      Duplicate Detection
+                                    </div>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        toggleTableRuleType(
+                                          entity,
+                                          "duplicates"
+                                        )
+                                      }
+                                      className="text-xs text-[var(--brand)] hover:underline"
+                                    >
+                                      {areAllRulesSelectedForTable(
+                                        entity,
+                                        "duplicates"
+                                      )
+                                        ? "Deselect All"
+                                        : "Select All"}
+                                    </button>
+                                  </div>
+                                  {likelyRules.length > 0 && (
+                                    <div className="ml-2 space-y-1">
+                                      <div className="text-xs font-medium text-[var(--text-muted)] mb-1.5">
+                                        Likely
+                                      </div>
+                                      {likelyRules.map((rule: any) => (
+                                        <label
+                                          key={rule.rule_id}
+                                          className="flex items-center gap-2 p-2 rounded-md hover:bg-[var(--bg-mid)]/40 cursor-pointer transition-colors"
+                                        >
+                                          <input
+                                            type="checkbox"
+                                            checked={selectedIds.includes(
+                                              rule.rule_id
+                                            )}
+                                            onChange={() =>
+                                              handleRulesChange(
+                                                "duplicates",
+                                                entity,
+                                                selectedIds.includes(
+                                                  rule.rule_id
+                                                )
+                                                  ? selectedIds.filter(
+                                                      (id) =>
+                                                        id !== rule.rule_id
+                                                    )
+                                                  : [
+                                                      ...selectedIds,
+                                                      rule.rule_id,
+                                                    ]
+                                              )
+                                            }
+                                            className="w-3.5 h-3.5"
+                                          />
+                                          <div className="flex-1 min-w-0">
+                                            <div className="text-xs font-medium text-[var(--text-main)]">
+                                              {rule.rule_id}
+                                            </div>
+                                            <div className="text-xs text-[var(--text-muted)] truncate">
+                                              {rule.description || ""}
+                                            </div>
+                                          </div>
+                                        </label>
+                                      ))}
+                                    </div>
+                                  )}
+                                  {possibleRules.length > 0 && (
+                                    <div className="ml-2 mt-3 space-y-1">
+                                      <div className="text-xs font-medium text-[var(--text-muted)] mb-1.5">
+                                        Possible
+                                      </div>
+                                      {possibleRules.map((rule: any) => (
+                                        <label
+                                          key={rule.rule_id}
+                                          className="flex items-center gap-2 p-2 rounded-md hover:bg-[var(--bg-mid)]/40 cursor-pointer transition-colors"
+                                        >
+                                          <input
+                                            type="checkbox"
+                                            checked={selectedIds.includes(
+                                              rule.rule_id
+                                            )}
+                                            onChange={() =>
+                                              handleRulesChange(
+                                                "duplicates",
+                                                entity,
+                                                selectedIds.includes(
+                                                  rule.rule_id
+                                                )
+                                                  ? selectedIds.filter(
+                                                      (id) =>
+                                                        id !== rule.rule_id
+                                                    )
+                                                  : [
+                                                      ...selectedIds,
+                                                      rule.rule_id,
+                                                    ]
+                                              )
+                                            }
+                                            className="w-3.5 h-3.5"
+                                          />
+                                          <div className="flex-1 min-w-0">
+                                            <div className="text-xs font-medium text-[var(--text-main)]">
+                                              {rule.rule_id}
+                                            </div>
+                                            <div className="text-xs text-[var(--text-muted)] truncate">
+                                              {rule.description || ""}
+                                            </div>
+                                          </div>
+                                        </label>
+                                      ))}
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })()}
+
+                            {/* Relationship Rules */}
+                            {(() => {
+                              const relRules = rules?.relationships?.[entity];
+                              if (
+                                !relRules ||
+                                Object.keys(relRules).length === 0
+                              )
+                                return null;
+
+                              const selectedIds =
+                                form.rules?.relationships?.[entity] || [];
+
+                              return (
+                                <div className="space-y-2">
+                                  <div className="flex items-center justify-between">
+                                    <div className="text-sm font-medium text-[var(--text-main)]">
+                                      Relationship Rules
+                                    </div>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        toggleTableRuleType(
+                                          entity,
+                                          "relationships"
+                                        )
+                                      }
+                                      className="text-xs text-[var(--brand)] hover:underline"
+                                    >
+                                      {areAllRulesSelectedForTable(
+                                        entity,
+                                        "relationships"
+                                      )
+                                        ? "Deselect All"
+                                        : "Select All"}
+                                    </button>
+                                  </div>
+                                  <div className="ml-2 space-y-1">
+                                    {Object.entries(relRules).map(
+                                      ([relKey, relRule]: [string, any]) => (
+                                        <label
+                                          key={relKey}
+                                          className="flex items-center gap-2 p-2 rounded-md hover:bg-[var(--bg-mid)]/40 cursor-pointer transition-colors"
+                                        >
+                                          <input
+                                            type="checkbox"
+                                            checked={selectedIds.includes(
+                                              relKey
+                                            )}
+                                            onChange={() =>
+                                              handleRulesChange(
+                                                "relationships",
+                                                entity,
+                                                selectedIds.includes(relKey)
+                                                  ? selectedIds.filter(
+                                                      (id) => id !== relKey
+                                                    )
+                                                  : [...selectedIds, relKey]
+                                              )
+                                            }
+                                            className="w-3.5 h-3.5"
+                                          />
+                                          <div className="flex-1 min-w-0">
+                                            <div className="text-xs font-medium text-[var(--text-main)]">
+                                              {relKey}
+                                            </div>
+                                            <div className="text-xs text-[var(--text-muted)] truncate">
+                                              {relRule.message || ""}
+                                            </div>
+                                          </div>
+                                        </label>
+                                      )
+                                    )}
+                                  </div>
+                                </div>
+                              );
+                            })()}
+
+                            {/* Required Field Rules */}
+                            {(() => {
+                              const reqFields =
+                                rules?.required_fields?.[entity];
+                              if (
+                                !reqFields ||
+                                !Array.isArray(reqFields) ||
+                                reqFields.length === 0
+                              )
+                                return null;
+
+                              const selectedIds =
+                                form.rules?.required_fields?.[entity] || [];
+
+                              return (
+                                <div className="space-y-2">
+                                  <div className="flex items-center justify-between">
+                                    <div className="text-sm font-medium text-[var(--text-main)]">
+                                      Required Field Rules
+                                    </div>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        toggleTableRuleType(
+                                          entity,
+                                          "required_fields"
+                                        )
+                                      }
+                                      className="text-xs text-[var(--brand)] hover:underline"
+                                    >
+                                      {areAllRulesSelectedForTable(
+                                        entity,
+                                        "required_fields"
+                                      )
+                                        ? "Deselect All"
+                                        : "Select All"}
+                                    </button>
+                                  </div>
+                                  <div className="ml-2 space-y-1">
+                                    {reqFields.map((field: any) => {
+                                      const ruleId =
+                                        field.rule_id ||
+                                        field.field ||
+                                        `required.${entity}.${field.field}`;
+                                      return (
+                                        <label
+                                          key={ruleId}
+                                          className="flex items-center gap-2 p-2 rounded-md hover:bg-[var(--bg-mid)]/40 cursor-pointer transition-colors"
+                                        >
+                                          <input
+                                            type="checkbox"
+                                            checked={selectedIds.includes(
+                                              ruleId
+                                            )}
+                                            onChange={() =>
+                                              handleRulesChange(
+                                                "required_fields",
+                                                entity,
+                                                selectedIds.includes(ruleId)
+                                                  ? selectedIds.filter(
+                                                      (id) => id !== ruleId
+                                                    )
+                                                  : [...selectedIds, ruleId]
+                                              )
+                                            }
+                                            className="w-3.5 h-3.5"
+                                          />
+                                          <div className="flex-1 min-w-0">
+                                            <div className="text-xs font-medium text-[var(--text-main)]">
+                                              {field.field || ruleId}
+                                            </div>
+                                            <div className="text-xs text-[var(--text-muted)] truncate">
+                                              {field.message || ""}
+                                            </div>
+                                          </div>
+                                        </label>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+                              );
+                            })()}
+
+                            {/* Attendance Rules (global, not per-table) */}
+                            {entity === Array.from(selectedEntities)[0] &&
+                              rules?.attendance_rules && (
+                                <div className="space-y-2">
+                                  <div className="text-sm font-medium text-[var(--text-main)]">
+                                    Attendance Rules
+                                  </div>
+                                  <label className="flex items-center gap-2 p-2 rounded-md hover:bg-[var(--bg-mid)]/40 cursor-pointer transition-colors">
+                                    <input
+                                      type="checkbox"
+                                      checked={
+                                        form.rules?.attendance_rules ?? false
+                                      }
+                                      onChange={(e) =>
+                                        handleRulesChange(
+                                          "attendance_rules",
+                                          "",
+                                          e.target.checked
+                                        )
+                                      }
+                                      className="w-3.5 h-3.5"
+                                    />
+                                    <span className="text-xs font-medium text-[var(--text-main)]">
+                                      Attendance Anomalies
+                                    </span>
+                                  </label>
+                                </div>
+                              )}
+                          </div>
+                        )}
                       </div>
-                    )}
+                    );
+                  })}
                 </div>
-              </div>
+              )}
               {selectedEntities.size > 0 && rules && !hasAtLeastOneCheck && (
                 <p className="mt-2 text-sm text-red-600">
-                  Please select at least one check type
-                </p>
-              )}
-              {selectedEntities.size === 0 && (
-                <p className="text-sm text-[var(--text-muted)] py-4 text-center">
-                  Select tables to configure check types and rules
-                </p>
-              )}
-              {!rules && (
-                <p className="text-sm text-[var(--text-muted)] py-4 text-center">
-                  Loading rules...
+                  Please select at least one rule
                 </p>
               )}
             </div>

@@ -1,6 +1,7 @@
 metadata:
-  description: "Runtime + schedule config derived from docs/prompt-2-architecture-plan.md"
+  description: "Runtime + schedule config - simplified to contractors-only"
   generated: "2025-11-19"
+  note: "Attendance rules removed, only contractors table configured"
 
 run_config:
   nightly_cron: "0 2 * * *"
@@ -10,30 +11,9 @@ run_config:
     duplicate_warning_count: 500
 
 airtable:
-  students:
-    base_env: "AT_STUDENTS_BASE"
-    table_env: "AT_STUDENTS_TABLE"
-  parents:
-    base_env: "AT_PARENTS_BASE"
-    table_env: "AT_PARENTS_TABLE"
   contractors:
     base_env: "AT_CONTRACTORS_BASE"
     table_env: "AT_CONTRACTORS_TABLE"
-  classes:
-    base_env: "AT_CLASSES_BASE"
-    table_env: "AT_CLASSES_TABLE"
-  attendance:
-    base_env: "AT_ATTENDANCE_BASE"
-    table_env: "AT_ATTENDANCE_TABLE"
-  truth:
-    base_env: "AT_TRUTH_BASE"
-    table_env: "AT_TRUTH_TABLE"
-  payments:
-    base_env: "AT_PAYMENTS_BASE"
-    table_env: "AT_PAYMENTS_TABLE"
-  data_issues:
-    base_env: "AT_DATA_ISSUES_BASE"
-    table_env: "AT_DATA_ISSUES_TABLE"
 
 firestore:
   runs_collection: "integrity_runs"
@@ -44,26 +24,4 @@ firestore:
 attendance_rules:
   onboarding_grace_days: 7
   limited_schedule_threshold: 3
-  thresholds:
-    absence_rate_30d:
-      info: 0.1
-      warning: 0.15
-      critical: 0.25
-    absence_rate_term:
-      warning: 0.2
-      critical: 0.25
-    absences_4w:
-      warning: 5
-      critical: 8
-    consecutive_absences:
-      warning: 3
-      critical: 5
-    consecutive_weeks_absences:
-      warning: 2
-      critical: 3
-    tardy_rate:
-      warning: 0.15
-      critical: 0.2
-    partial_attendance:
-      warning: 3
-      critical: 6
+  thresholds: {}

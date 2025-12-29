@@ -24,6 +24,15 @@ export interface RunStatus {
   duration_checks?: number;
   duration_write_airtable?: number;
   duration_write_firestore?: number;
+  run_config?: {
+    entities?: string[];
+    rules?: {
+      duplicates?: Record<string, string[]>;
+      relationships?: Record<string, string[]>;
+      required_fields?: Record<string, string[]>;
+      attendance_rules?: boolean;
+    };
+  };
 }
 
 const MAX_WAIT_TIME = 30000; // 30 seconds max wait

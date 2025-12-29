@@ -1,4 +1,13 @@
-"""Service for managing rules using the new rules/ collection structure."""
+"""Service for managing rules using the new rules/ collection structure.
+
+IMPORTANT: Before creating or modifying rules, consult docs/rules.md for:
+- Field reference formats (IDs vs names)
+- Schema snapshot requirements
+- Rule structure and best practices
+- Troubleshooting common issues
+
+The field ID/name resolution system must be understood to avoid rule failures.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +17,8 @@ from typing import Any, Dict, List, Optional
 
 from google.cloud import firestore
 
+from pathlib import Path
+import json
 from ..config.config_loader import load_runtime_config
 from ..config.models import (
     DuplicateDefinition,
@@ -18,6 +29,7 @@ from ..config.models import (
 )
 from ..config.schema_loader import load_schema_config
 from ..config.settings import AttendanceRules
+from ..utils.records import _normalize_name
 
 logger = logging.getLogger(__name__)
 
@@ -54,26 +66,58 @@ class RulesService:
 
                 likely = []
                 possible = []
+                likely_rule_ids = []
+                possible_rule_ids = []
 
                 for doc in docs:
                     rule_data = doc.to_dict()
-                    # Add the document ID as rule_id if not present
-                    if "rule_id" not in rule_data:
+                    # Always ensure rule_id is set - use doc.id if missing or empty
+                    if not rule_data.get("rule_id"):
                         rule_data["rule_id"] = doc.id
+                    # Also store doc.id for reference (in case rule_id was empty and we need it later)
+                    rule_data["_doc_id"] = doc.id
 
+                    rule_id = rule_data["rule_id"]
                     severity = rule_data.get("severity", "likely")
                     if severity == "likely":
                         likely.append(rule_data)
+                        likely_rule_ids.append(rule_id)
                     else:
                         possible.append(rule_data)
+                        possible_rule_ids.append(rule_id)
 
                 if likely or possible:
                     duplicates[entity] = {
                         "likely": likely,
                         "possible": possible,
                     }
+                    logger.info(
+                        f"Loaded duplicate rules for {entity}",
+                        extra={
+                            "category": "duplicates",
+                            "entity": entity,
+                            "likely_count": len(likely),
+                            "possible_count": len(possible),
+                            "likely_rule_ids": likely_rule_ids,
+                            "possible_rule_ids": possible_rule_ids,
+                        }
+                    )
             except Exception as exc:
                 logger.warning(f"Failed to load duplicates for {entity}: {exc}")
+
+        total_likely = sum(len(d.get("likely", [])) for d in duplicates.values())
+        total_possible = sum(len(d.get("possible", [])) for d in duplicates.values())
+        if duplicates:
+            logger.info(
+                "Loaded duplicate rules from Firestore",
+                extra={
+                    "category": "duplicates",
+                    "total_entities": len(duplicates),
+                    "total_likely": total_likely,
+                    "total_possible": total_possible,
+                    "entities": list(duplicates.keys()),
+                }
+            )
 
         return duplicates
 
@@ -93,15 +137,39 @@ class RulesService:
                 docs = self.db.collection(collection_path).where("enabled", "==", True).stream()
 
                 entity_rels = {}
+                rel_keys = []
                 for doc in docs:
                     rule_data = doc.to_dict()
                     # Use document ID as the relationship key
-                    entity_rels[doc.id] = rule_data
+                    rel_key = doc.id
+                    entity_rels[rel_key] = rule_data
+                    rel_keys.append(rel_key)
 
                 if entity_rels:
                     relationships[entity] = entity_rels
+                    logger.info(
+                        f"Loaded relationship rules for {entity}",
+                        extra={
+                            "category": "relationships",
+                            "entity": entity,
+                            "rule_count": len(entity_rels),
+                            "relationship_keys": rel_keys,
+                        }
+                    )
             except Exception as exc:
                 logger.warning(f"Failed to load relationships for {entity}: {exc}")
+
+        total_rules = sum(len(r) for r in relationships.values())
+        if relationships:
+            logger.info(
+                "Loaded relationship rules from Firestore",
+                extra={
+                    "category": "relationships",
+                    "total_entities": len(relationships),
+                    "total_rules": total_rules,
+                    "entities": list(relationships.keys()),
+                }
+            )
 
         return relationships
 
@@ -121,17 +189,43 @@ class RulesService:
                 docs = self.db.collection(collection_path).where("enabled", "==", True).stream()
 
                 fields = []
+                rule_ids = []
                 for doc in docs:
                     rule_data = doc.to_dict()
                     # Always use document ID as rule_id to ensure consistency
                     # This ensures deletion works correctly
-                    rule_data["rule_id"] = doc.id
+                    rule_id = doc.id
+                    rule_data["rule_id"] = rule_id
                     fields.append(rule_data)
+                    rule_ids.append(rule_id)
 
                 if fields:
                     required_fields[entity] = fields
+                    logger.info(
+                        f"Loaded required field rules for {entity}",
+                        extra={
+                            "category": "required_fields",
+                            "entity": entity,
+                            "rule_count": len(fields),
+                            "rule_ids": rule_ids,
+                        }
+                    )
             except Exception as exc:
                 logger.warning(f"Failed to load required fields for {entity}: {exc}")
+
+        total_rules = sum(len(r) for r in required_fields.values())
+        entity_counts = {entity: len(rules) for entity, rules in required_fields.items()}
+        if required_fields:
+            logger.info(
+                "Loaded required field rules from Firestore",
+                extra={
+                    "category": "required_fields",
+                    "total_entities": len(required_fields),
+                    "total_rules": total_rules,
+                    "entity_counts": entity_counts,
+                    "entities": list(required_fields.keys()),
+                }
+            )
 
         return required_fields
 
@@ -217,6 +311,122 @@ class RulesService:
         else:
             raise ValueError(f"Unknown category: {category}")
 
+    def _validate_and_normalize_field_reference(
+        self, field_ref: str, entity: str, table_name: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Validate and normalize a field reference for a required field rule.
+        
+        Args:
+            field_ref: Field ID (fld...) or field name
+            entity: Entity name (e.g., "contractors")
+            table_name: Optional table name for lookup (if None, will be inferred from entity)
+            
+        Returns:
+            Dict with:
+                - field: Normalized field reference (prefers field ID if both provided)
+                - field_id: Field ID if found
+                - field_name: Field name if found
+                - valid: Whether field exists in schema
+                - warning: Optional warning message
+        """
+        result = {
+            "field": field_ref,
+            "field_id": None,
+            "field_name": None,
+            "valid": False,
+            "warning": None,
+        }
+        
+        # If it's already a field ID, validate it exists
+        if field_ref.startswith("fld") and len(field_ref) >= 14:
+            result["field_id"] = field_ref
+            result["field"] = field_ref
+            
+            # Try to resolve field ID to name
+            schema_path = Path(__file__).resolve().parent.parent / "config" / "airtable_schema.json"
+            try:
+                with schema_path.open("r", encoding="utf-8") as f:
+                    schema = json.load(f)
+                
+                # Find the table for this entity
+                if not table_name:
+                    # Try to infer table name from entity
+                    entity_to_table = {
+                        "contractors": "Contractors/Volunteers",
+                        "students": "Students",
+                        "parents": "Parents",
+                        "classes": "Classes",
+                    }
+                    table_name = entity_to_table.get(entity, entity.title())
+                
+                # Find field by ID
+                for table in schema.get("tables", []):
+                    if table.get("name") == table_name or entity.lower() in table.get("name", "").lower():
+                        for field in table.get("fields", []):
+                            if field.get("id") == field_ref:
+                                result["field_name"] = field.get("name")
+                                result["valid"] = True
+                                return result
+                
+                # Field ID not found in schema
+                result["warning"] = f"Field ID {field_ref} not found in schema snapshot for {entity}"
+                logger.warning(result["warning"])
+            except Exception as exc:
+                result["warning"] = f"Could not validate field ID: {exc}"
+                logger.warning(result["warning"])
+            
+            # Assume valid if we can't verify (backward compatibility)
+            result["valid"] = True
+            return result
+        
+        # It's a field name - try to find the field ID
+        schema_path = Path(__file__).resolve().parent.parent / "config" / "airtable_schema.json"
+        try:
+            with schema_path.open("r", encoding="utf-8") as f:
+                schema = json.load(f)
+            
+            # Find the table for this entity
+            if not table_name:
+                entity_to_table = {
+                    "contractors": "Contractors/Volunteers",
+                    "students": "Students",
+                    "parents": "Parents",
+                    "classes": "Classes",
+                }
+                table_name = entity_to_table.get(entity, entity.title())
+            
+            normalized_field_name = _normalize_name(field_ref)
+            
+            # Find field by name (case-insensitive, normalized)
+            for table in schema.get("tables", []):
+                if table.get("name") == table_name or entity.lower() in table.get("name", "").lower():
+                    for field in table.get("fields", []):
+                        field_name = field.get("name", "")
+                        if _normalize_name(field_name) == normalized_field_name or field_name == field_ref:
+                            field_id = field.get("id")
+                            if field_id:
+                                result["field_id"] = field_id
+                                result["field_name"] = field_name
+                                result["field"] = field_id  # Prefer field ID
+                                result["valid"] = True
+                                
+                                # Warn if name doesn't match exactly
+                                if field_name != field_ref:
+                                    result["warning"] = f"Field name '{field_ref}' matched '{field_name}' (using field ID {field_id})"
+                                    logger.info(result["warning"])
+                                return result
+            
+            # Field name not found
+            result["warning"] = f"Field name '{field_ref}' not found in schema for {entity}. Rule may not work correctly."
+            logger.warning(result["warning"])
+        except Exception as exc:
+            result["warning"] = f"Could not validate field name: {exc}"
+            logger.warning(result["warning"])
+        
+        # Assume valid if we can't verify (backward compatibility)
+        result["valid"] = True
+        return result
+
     def create_rule(
         self,
         category: str,
@@ -237,6 +447,36 @@ class RulesService:
         """
         if not self.db:
             raise ValueError("Firestore client not available")
+
+        # Validate and normalize field reference for required_fields rules
+        if category == "required_fields" and entity and "field" in rule_data:
+            field_ref = rule_data.get("field")
+            field_id_override = rule_data.get("field_id")  # Allow manual field_id override
+            
+            # If both field and field_id are provided, prefer field_id
+            if field_id_override:
+                rule_data["field"] = field_id_override
+                logger.info(f"Using provided field_id: {field_id_override}")
+            else:
+                # Validate and normalize the field reference
+                validation = self._validate_and_normalize_field_reference(field_ref, entity)
+                rule_data["field"] = validation["field"]
+                
+                # Store field_id if found
+                if validation["field_id"]:
+                    rule_data["field_id"] = validation["field_id"]
+                
+                # Log warnings
+                if validation["warning"]:
+                    logger.warning(
+                        f"Field validation warning for {entity}: {validation['warning']}",
+                        extra={
+                            "entity": entity,
+                            "original_field": field_ref,
+                            "normalized_field": validation["field"],
+                            "warning": validation["warning"],
+                        }
+                    )
 
         # Generate rule ID if not provided
         if "rule_id" not in rule_data:

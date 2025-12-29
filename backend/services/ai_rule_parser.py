@@ -264,6 +264,7 @@ Return only valid JSON, no markdown."""
             "address": "address",
             "status": "status",
             "grade": "grade_level",
+            "certification": "certification",
         }
         
         for pattern, field_name in field_patterns.items():
@@ -279,6 +280,44 @@ Return only valid JSON, no markdown."""
             else:
                 field = "field_name"
         
+        # Try to look up field ID from schema snapshot (optional enhancement)
+        field_id = None
+        try:
+            from pathlib import Path
+            import json
+            from ..utils.records import _normalize_name
+            
+            schema_path = Path(__file__).resolve().parent.parent / "config" / "airtable_schema.json"
+            if schema_path.exists():
+                with schema_path.open("r", encoding="utf-8") as f:
+                    schema = json.load(f)
+                
+                # Map entity to table name
+                entity_to_table = {
+                    "contractors": "Contractors/Volunteers",
+                    "students": "Students",
+                    "parents": "Parents",
+                    "classes": "Classes",
+                }
+                table_name = entity_to_table.get(entity, entity.title())
+                
+                # Find field by name
+                normalized_field = _normalize_name(field)
+                for table in schema.get("tables", []):
+                    if table.get("name") == table_name or entity.lower() in table.get("name", "").lower():
+                        for schema_field in table.get("fields", []):
+                            schema_field_name = schema_field.get("name", "")
+                            if (_normalize_name(schema_field_name) == normalized_field or
+                                schema_field_name.lower() == field.lower()):
+                                field_id = schema_field.get("id")
+                                # Update field to exact name from schema
+                                field = schema_field_name
+                                break
+                        if field_id:
+                            break
+        except Exception as exc:
+            logger.debug(f"Could not look up field ID for {field}: {exc}")
+        
         # Determine severity
         severity = "warning"
         if "critical" in description_lower or "must" in description_lower:
@@ -286,14 +325,20 @@ Return only valid JSON, no markdown."""
         elif "info" in description_lower or "optional" in description_lower:
             severity = "info"
         
+        rule_data = {
+            "field": field,
+            "message": description,
+            "severity": severity,
+        }
+        
+        # Include field_id if found
+        if field_id:
+            rule_data["field_id"] = field_id
+        
         return {
             "category": "required_fields",
             "entity": entity,
-            "rule_data": {
-                "field": field,
-                "message": description,
-                "severity": severity,
-            },
+            "rule_data": rule_data,
         }
 
     def _parse_attendance_rule(self, description: str) -> Dict[str, Any]:

@@ -18,7 +18,7 @@ from tenacity import (
 )
 
 # Constants
-MIN_REQUEST_INTERVAL = float(os.getenv("AIRTABLE_MIN_REQUEST_INTERVAL", "0.2"))  # Seconds between requests
+MIN_REQUEST_INTERVAL = float(os.getenv("AIRTABLE_MIN_REQUEST_INTERVAL", "0.05"))  # Seconds between requests (0.05s = 20 req/s max, safe for parallel workers)
 API_TIMEOUT_SECONDS = int(os.getenv("AIRTABLE_API_TIMEOUT_SECONDS", "30"))  # Timeout for retries
 # Socket-level timeout for large record fetches (~10k records per entity)
 REQUEST_TIMEOUT_SECONDS = int(os.getenv("AIRTABLE_REQUEST_TIMEOUT_SECONDS", "300"))  # 5 minutes default
@@ -94,15 +94,26 @@ class AirtableClient:
 
     def _throttle_request(self, base_id: str) -> None:
         """Throttle requests to respect rate limits."""
+        throttle_start = time.time()
         now = time.time()
         last_time = self._last_request_time[base_id]
         elapsed = now - last_time
         
         if elapsed < MIN_REQUEST_INTERVAL:
             sleep_time = MIN_REQUEST_INTERVAL - elapsed
+            logger.debug(
+                f"Throttling request: sleeping {sleep_time:.3f}s (elapsed: {elapsed:.3f}s, min_interval: {MIN_REQUEST_INTERVAL}s)",
+                extra={"base_id": base_id, "sleep_time": sleep_time, "elapsed": elapsed}
+            )
             time.sleep(sleep_time)
         
         self._last_request_time[base_id] = time.time()
+        throttle_duration = time.time() - throttle_start
+        if throttle_duration > 0.01:  # Only log if significant
+            logger.debug(
+                f"Throttle completed in {throttle_duration:.3f}s",
+                extra={"base_id": base_id, "throttle_duration": throttle_duration}
+            )
 
     @retry(
         retry=retry_if_exception_type((HTTPError, RequestException)),
@@ -143,19 +154,48 @@ class AirtableClient:
         records = []
         page_count = 0
         total_records = 0
+        fetch_start_time = time.time()
         
         try:
             # Use iterate() directly so we can throttle between pages
             for page in table.iterate(page_size=100):
+                page_start_time = time.time()
+                
+                # Time the actual page fetch from Airtable
+                page_fetch_start = time.time()
                 records.extend(page)
                 total_records += len(page)
                 page_count += 1
+                page_fetch_duration = time.time() - page_fetch_start
+                
+                logger.info(
+                    f"[TIMING] Page {page_count} fetch: {page_fetch_duration:.3f}s ({len(page)} records)",
+                    extra={
+                        "entity": key,
+                        "page": page_count,
+                        "records_in_page": len(page),
+                        "total_records": total_records,
+                        "page_fetch_duration": page_fetch_duration,
+                    }
+                )
                 
                 # Throttle between pages (first page already throttled above)
+                throttle_start = time.time()
                 if page_count > 1:
                     self._throttle_request(base_id)
+                throttle_duration = time.time() - throttle_start
+                if throttle_duration > 0.01:
+                    logger.info(
+                        f"[TIMING] Page {page_count} throttle: {throttle_duration:.3f}s",
+                        extra={
+                            "entity": key,
+                            "page": page_count,
+                            "throttle_duration": throttle_duration,
+                        }
+                    )
                 
                 # Call progress callback if provided
+                callback_start = time.time()
                 if progress_callback:
                     try:
                         progress_callback(
@@ -164,6 +204,20 @@ class AirtableClient:
                         )
                     except Exception:
                         pass  # Don't fail on callback errors
+                callback_duration = time.time() - callback_start
+                
+                page_total_duration = time.time() - page_start_time
+                logger.info(
+                    f"[TIMING] Page {page_count} total: {page_total_duration:.3f}s (fetch: {page_fetch_duration:.3f}s, throttle: {throttle_duration:.3f}s, callback: {callback_duration:.3f}s)",
+                    extra={
+                        "entity": key,
+                        "page": page_count,
+                        "page_total_duration": page_total_duration,
+                        "page_fetch_duration": page_fetch_duration,
+                        "throttle_duration": throttle_duration,
+                        "callback_duration": callback_duration,
+                    }
+                )
                 
                 # Log progress periodically (for console logs)
                 if page_count % PROGRESS_LOG_INTERVAL == 0 or total_records % 500 == 0:
@@ -188,12 +242,16 @@ class AirtableClient:
                 except Exception:
                     pass
 
+            total_fetch_duration = time.time() - fetch_start_time
+            avg_time_per_page = total_fetch_duration / page_count if page_count > 0 else 0
             logger.info(
-                "Fetched Airtable records successfully",
+                f"Fetched Airtable records successfully: {total_fetch_duration:.3f}s total ({avg_time_per_page:.3f}s avg per page)",
                 extra={
                     "entity": key,
                     "record_count": len(records),
                     "pages": page_count,
+                    "total_fetch_duration": total_fetch_duration,
+                    "avg_time_per_page": avg_time_per_page,
                 },
             )
 

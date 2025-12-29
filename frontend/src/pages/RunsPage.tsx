@@ -466,7 +466,7 @@ export function RunsPage() {
         trigger: "manual",
       });
 
-      // Build run_config
+      // Build run_config with entities, rules, and checks
       const runConfig: any = {};
       if (config.entities && config.entities.length > 0) {
         runConfig.entities = config.entities;
@@ -478,12 +478,14 @@ export function RunsPage() {
       if (config.rules) {
         runConfig.rules = config.rules;
       }
-
-      // Build request body
-      const requestBody: any = {};
-      if (Object.keys(runConfig).length > 0) {
-        requestBody.run_config = runConfig;
+      if (config.checks) {
+        runConfig.checks = config.checks;
       }
+
+      // Build request body - send runConfig directly as the body
+      // FastAPI's Body(default=None) will receive this as the run_config parameter
+      const requestBody =
+        Object.keys(runConfig).length > 0 ? runConfig : undefined;
 
       const response = await fetch(
         `${API_BASE}/integrity/run?${params.toString()}`,
@@ -493,10 +495,7 @@ export function RunsPage() {
             Authorization: `Bearer ${token}`,
             "Content-Type": "application/json",
           },
-          body:
-            Object.keys(requestBody).length > 0
-              ? JSON.stringify(requestBody)
-              : undefined,
+          body: requestBody ? JSON.stringify(requestBody) : undefined,
         }
       );
 

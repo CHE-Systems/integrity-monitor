@@ -44,10 +44,13 @@ CONTRACTOR_FIELD_MAP = {
     "phone": "normalized_phone",
     "legal_name": "normalized_name",
     "name": "normalized_name",
-    "campuses": "campuses",
-    "campus_assignments": "campuses",
-    "ein": "ein",
-    "vendor_id": "ein",
+    # Removed: campuses, campus_assignments, ein, vendor_id - no longer used for duplicate detection
+    # Airtable field ID mappings for Contractors/Volunteers table
+    "flddCJDACjAsP1ltS": "email",  # Email
+    "fldWBnA5Xf6eQATOi": "normalized_phone",  # Cell phone
+    "fldvkUuMlXw8vBvNQ": "normalized_name",  # Contractor/Vol (role type)
+    "fldUXiLJmTxJ9aeRp": "normalized_name",  # Certification
+    "fldi9MWrddOg3PUZ7": "normalized_name",  # Approval
 }
 
 
@@ -145,6 +148,13 @@ def _evaluate_exact_match(
         value_a = get_field_value(record_a, condition.field, entity)
         value_b = get_field_value(record_b, condition.field, entity)
         
+        # Special handling for email fields: skip check if either value is missing
+        # This allows name-only matching when emails are missing
+        if condition.field in ("email", "primary_email", "contact_email"):
+            if value_a is None or value_b is None:
+                return True, {condition.field: {"a": value_a, "b": value_b, "match": "skipped_missing"}}
+        
+        # For other fields, require both values to be present
         if value_a is None or value_b is None:
             return False, {condition.field: {"a": value_a, "b": value_b, "match": False}}
         
