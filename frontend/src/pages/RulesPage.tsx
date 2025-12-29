@@ -7,6 +7,7 @@ import { RuleEditor } from "../components/RuleEditor";
 import { AIRuleCreator } from "../components/AIRuleCreator";
 import ConfirmModal from "../components/ConfirmModal";
 import trashIcon from "../assets/trash.svg";
+import { formatRuleId } from "../utils/ruleFormatter";
 
 type EntityName = string;
 
@@ -634,7 +635,13 @@ function RuleCard({
         <div className="flex-1">
           <div className="flex items-center gap-2 mb-2">
             <h4 className="font-medium text-[var(--text-main)]">
-              {rule.rule_id || ruleId || rule.field || "Rule"}
+              {category === "required_fields" && rule.field_name
+                ? formatRuleId(`required_field_rule.${entity}.${rule.field_name}`)
+                : rule.rule_id
+                ? formatRuleId(rule.rule_id)
+                : ruleId
+                ? formatRuleId(ruleId)
+                : rule.field || "Rule"}
             </h4>
             {rule.severity && (
               <span

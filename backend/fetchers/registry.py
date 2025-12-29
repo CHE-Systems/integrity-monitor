@@ -8,13 +8,7 @@ from ..clients.airtable import AirtableClient
 from .base import BaseFetcher
 
 ENTITY_KEYS = [
-    "students",
-    "parents",
     "contractors",
-    "classes",
-    "attendance",
-    "truth",
-    "payments",
 ]
 
 

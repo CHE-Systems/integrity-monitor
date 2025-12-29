@@ -252,10 +252,14 @@ Return only valid JSON, no markdown."""
         }
 
     def _parse_required_field_rule(self, description: str, entity: str) -> Dict[str, Any]:
-        """Parse required field rule from description."""
+        """Parse required field rule from description.
+        
+        Always attempts to look up field ID from schema snapshot and includes
+        it in the rule_data JSON so users can see if the field was found.
+        """
         description_lower = description.lower()
         
-        # Extract field name
+        # Extract field name with expanded patterns
         field = None
         field_patterns = {
             "email": "email",
@@ -264,6 +268,10 @@ Return only valid JSON, no markdown."""
             "address": "address",
             "status": "status",
             "grade": "grade_level",
+            "certification": "certification",
+            "background": "background check",
+            "background check": "background check",
+            "background_check": "background check",
         }
         
         for pattern, field_name in field_patterns.items():
@@ -272,12 +280,117 @@ Return only valid JSON, no markdown."""
                 break
         
         if not field:
-            # Try to extract from "missing X" or "X is required"
-            missing_match = re.search(r"missing (\w+)", description_lower)
+            # Try to extract from "missing X" or "X is required" or "X field"
+            missing_match = re.search(r"missing (\w+(?:\s+\w+)*)", description_lower)
             if missing_match:
                 field = missing_match.group(1)
             else:
-                field = "field_name"
+                required_match = re.search(r"(\w+(?:\s+\w+)*)\s+is required", description_lower)
+                if required_match:
+                    field = required_match.group(1)
+                else:
+                    field_match = re.search(r"(\w+(?:\s+\w+)*)\s+field", description_lower)
+                    if field_match:
+                        field = field_match.group(1)
+                    else:
+                        field = "field_name"
+        
+        # Always try to look up field ID from schema snapshot
+        field_id = None
+        field_name_resolved = field  # Store the resolved field name
+        field_lookup_status = "not_found"
+        field_lookup_message = None
+        
+        try:
+            from pathlib import Path
+            import json
+            from ..utils.records import _normalize_name
+            
+            schema_path = Path(__file__).resolve().parent.parent / "config" / "airtable_schema.json"
+            if not schema_path.exists():
+                field_lookup_status = "schema_not_found"
+                field_lookup_message = "Schema snapshot not found. Run airtable_records_snapshot to generate it."
+                logger.warning(f"Schema snapshot not found at {schema_path}")
+            else:
+                with schema_path.open("r", encoding="utf-8") as f:
+                    schema = json.load(f)
+                
+                # Map entity to table name
+                entity_to_table = {
+                    "contractors": "Contractors/Volunteers",
+                    "students": "Students",
+                    "parents": "Parents",
+                    "classes": "Classes",
+                    "attendance": "Attendance",
+                    "truth": "Truth",
+                    "payments": "Contractor/Vendor Invoices",
+                }
+                table_name = entity_to_table.get(entity, entity.title())
+                
+                # Find the target table
+                target_table = None
+                for table in schema.get("tables", []):
+                    table_name_lower = table.get("name", "").lower()
+                    if (table.get("name") == table_name or 
+                        entity.lower() in table_name_lower or
+                        table_name_lower in entity.lower()):
+                        target_table = table
+                        break
+                
+                if not target_table:
+                    field_lookup_status = "table_not_found"
+                    field_lookup_message = f"Table not found for entity '{entity}' in schema"
+                    logger.warning(f"Table not found for entity: {entity}")
+                else:
+                    # Try multiple matching strategies
+                    normalized_field = _normalize_name(field)
+                    field_variants = [
+                        field,  # Original
+                        field.replace("_", " "),  # Underscore to space
+                        field.replace(" ", "_"),  # Space to underscore
+                        normalized_field,  # Normalized
+                    ]
+                    
+                    # Find field by name (try exact match, then normalized, then contains)
+                    for schema_field in target_table.get("fields", []):
+                        schema_field_name = schema_field.get("name", "")
+                        schema_field_normalized = _normalize_name(schema_field_name)
+                        
+                        # Try exact match first
+                        if (schema_field_name.lower() == field.lower() or
+                            schema_field_normalized == normalized_field):
+                            field_id = schema_field.get("id")
+                            field_name_resolved = schema_field_name
+                            field_lookup_status = "found"
+                            field_lookup_message = f"Found field '{schema_field_name}' (ID: {field_id})"
+                            logger.info(f"Found field ID for '{field}': {field_id} ({schema_field_name})")
+                            break
+                    
+                    # If not found, try partial/contains match
+                    if not field_id:
+                        for schema_field in target_table.get("fields", []):
+                            schema_field_name = schema_field.get("name", "")
+                            schema_field_normalized = _normalize_name(schema_field_name)
+                            
+                            # Check if field name contains our search term or vice versa
+                            if (normalized_field in schema_field_normalized or
+                                schema_field_normalized in normalized_field):
+                                field_id = schema_field.get("id")
+                                field_name_resolved = schema_field_name
+                                field_lookup_status = "found_partial"
+                                field_lookup_message = f"Found similar field '{schema_field_name}' (ID: {field_id})"
+                                logger.info(f"Found partial match for '{field}': {field_id} ({schema_field_name})")
+                                break
+                    
+                    if not field_id:
+                        field_lookup_status = "field_not_found"
+                        field_lookup_message = f"Field '{field}' not found in table '{target_table.get('name')}'"
+                        logger.warning(f"Field '{field}' not found in table '{target_table.get('name')}' for entity '{entity}'")
+                        
+        except Exception as exc:
+            field_lookup_status = "error"
+            field_lookup_message = f"Error looking up field: {str(exc)}"
+            logger.error(f"Could not look up field ID for {field}: {exc}", exc_info=True)
         
         # Determine severity
         severity = "warning"
@@ -286,14 +399,30 @@ Return only valid JSON, no markdown."""
         elif "info" in description_lower or "optional" in description_lower:
             severity = "info"
         
+        rule_data = {
+            "field": field_name_resolved,  # Use resolved field name
+            "message": description,
+            "severity": severity,
+        }
+        
+        # Always include field lookup information in rule_data
+        if field_id:
+            rule_data["field_id"] = field_id
+            rule_data["field_lookup_status"] = "found"
+        else:
+            rule_data["field_lookup_status"] = field_lookup_status
+        
+        # Include lookup message for user feedback
+        if field_lookup_message:
+            rule_data["field_lookup_message"] = field_lookup_message
+        
+        # Include field_name for display (same as field for now, but can be edited)
+        rule_data["field_name"] = field_name_resolved
+        
         return {
             "category": "required_fields",
             "entity": entity,
-            "rule_data": {
-                "field": field,
-                "message": description,
-                "severity": severity,
-            },
+            "rule_data": rule_data,
         }
 
     def _parse_attendance_rule(self, description: str) -> Dict[str, Any]:

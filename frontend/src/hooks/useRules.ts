@@ -153,7 +153,7 @@ export function useRules() {
         if (!token) {
           throw new Error("Not authenticated. Please log in.");
         }
-        const response = await fetch(`${API_BASE}/rules/${category}/${ruleId}`, {
+        const response = await fetch(`${API_BASE}/rules/${encodeURIComponent(category)}/${encodeURIComponent(ruleId)}`, {
           method: "PUT",
           headers: {
             Authorization: `Bearer ${token}`,
@@ -194,7 +194,7 @@ export function useRules() {
         if (!token) {
           throw new Error("Not authenticated. Please log in.");
         }
-        const url = new URL(`${API_BASE}/rules/${category}/${ruleId}`);
+        const url = new URL(`${API_BASE}/rules/${encodeURIComponent(category)}/${encodeURIComponent(ruleId)}`);
         if (entity) {
           url.searchParams.set("entity", entity);
         }

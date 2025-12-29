@@ -33,16 +33,6 @@ class FirestoreClient:
 
     def _get_client(self) -> firestore.Client:
         """Lazy initialization of Firestore client."""
-        # #region agent log
-        import json
-        import time
-        debug_log_path = '/Users/joshuaedwards/Library/CloudStorage/GoogleDrive-jedwards@che.school/My Drive/CHE/che-data-integrity-monitor/.cursor/debug.log'
-        try:
-            with open(debug_log_path, 'a') as f:
-                f.write(json.dumps({"sessionId":"debug-session","runId":"startup","hypothesisId":"B","location":"firestore.py:28","message":"_get_client called","data":{"has_client":self._client is not None},"timestamp":int(time.time()*1000)})+'\n')
-        except: pass
-        # #endregion agent log
-        
         if self._client is None:
             if firestore is None:
                 raise ImportError(
@@ -52,13 +42,6 @@ class FirestoreClient:
                 import os
                 from google.auth.exceptions import DefaultCredentialsError
                 from google.oauth2 import service_account
-                
-                # #region agent log
-                try:
-                    with open(debug_log_path, 'a') as f:
-                        f.write(json.dumps({"sessionId":"debug-session","runId":"startup","hypothesisId":"B","location":"firestore.py:40","message":"Before credential loading","data":{"step":"before_cred_load"},"timestamp":int(time.time()*1000)})+'\n')
-                except: pass
-                # #endregion agent log
                 
                 # Try to initialize with explicit credentials path if set
                 cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
@@ -76,30 +59,8 @@ class FirestoreClient:
                     
                     if os.path.exists(cred_path):
                         # Load credentials explicitly
-                        # #region agent log
-                        try:
-                            with open(debug_log_path, 'a') as f:
-                                f.write(json.dumps({"sessionId":"debug-session","runId":"startup","hypothesisId":"B","location":"firestore.py:55","message":"Before loading credentials file","data":{"cred_path":cred_path},"timestamp":int(time.time()*1000)})+'\n')
-                        except: pass
-                        # #endregion agent log
-                        
                         credentials = service_account.Credentials.from_service_account_file(cred_path)
-                        
-                        # #region agent log
-                        try:
-                            with open(debug_log_path, 'a') as f:
-                                f.write(json.dumps({"sessionId":"debug-session","runId":"startup","hypothesisId":"B","location":"firestore.py:58","message":"After loading credentials, before Firestore client init","data":{"step":"before_firestore_init"},"timestamp":int(time.time()*1000)})+'\n')
-                        except: pass
-                        # #endregion agent log
-                        
                         self._client = firestore.Client(credentials=credentials, project=credentials.project_id)
-                        
-                        # #region agent log
-                        try:
-                            with open(debug_log_path, 'a') as f:
-                                f.write(json.dumps({"sessionId":"debug-session","runId":"startup","hypothesisId":"B","location":"firestore.py:61","message":"Firestore client initialized","data":{"step":"after_firestore_init"},"timestamp":int(time.time()*1000)})+'\n')
-                        except: pass
-                        # #endregion agent log
                         
                         logger.info(f"Firestore client initialized with credentials from {cred_path}")
                     else:
@@ -338,13 +299,30 @@ class FirestoreClient:
         
         for attempt in range(max_retries):
             try:
-                batch.commit()
-                if attempt > 0:
-                    logger.info(
-                        f"Batch commit succeeded on retry attempt {attempt + 1}",
+                # Use ThreadPoolExecutor with timeout to prevent indefinite hanging
+                # This is critical for Cloud Run where resources are limited
+                executor = ThreadPoolExecutor(max_workers=1)
+                try:
+                    future = executor.submit(batch.commit)
+                    # 30 second timeout per attempt (reasonable for 500 operations)
+                    future.result(timeout=30)
+                    
+                    if attempt > 0:
+                        logger.info(
+                            f"Batch commit succeeded on retry attempt {attempt + 1}",
+                            extra={"batch_size": batch_count, "attempt": attempt + 1}
+                        )
+                    return
+                except FuturesTimeoutError:
+                    # Treat timeout as a retryable error
+                    error_msg = f"Batch commit timed out after 30 seconds"
+                    logger.warning(
+                        error_msg,
                         extra={"batch_size": batch_count, "attempt": attempt + 1}
                     )
-                return
+                    raise Exception(error_msg)
+                finally:
+                    executor.shutdown(wait=False, cancel_futures=True)
             except Exception as exc:
                 last_exception = exc
                 # Check if this is a retryable error
@@ -414,6 +392,28 @@ class FirestoreClient:
             for issue in issues:
                 doc_id = self._generate_doc_id(issue)
                 issue_doc_pairs.append((doc_id, issue))
+            
+            # Validate no duplicate document IDs are being written in the same batch
+            doc_ids_seen = set()
+            duplicate_doc_ids = []
+            for doc_id, issue in issue_doc_pairs:
+                if doc_id in doc_ids_seen:
+                    duplicate_doc_ids.append((doc_id, issue.get('rule_id'), issue.get('record_id')))
+                doc_ids_seen.add(doc_id)
+            
+            if duplicate_doc_ids:
+                logger.error(
+                    f"Found {len(duplicate_doc_ids)} duplicate document IDs before writing to Firestore",
+                    extra={
+                        "duplicate_count": len(duplicate_doc_ids),
+                        "total_issues": len(issue_doc_pairs)
+                    }
+                )
+                for doc_id, rule_id, record_id in duplicate_doc_ids[:10]:  # Log first 10
+                    logger.error(
+                        f"Duplicate doc_id: {doc_id} (rule: {rule_id}, record: {record_id})",
+                        extra={"doc_id": doc_id, "rule_id": rule_id, "record_id": record_id}
+                    )
             
             # Check which documents already exist
             all_doc_ids = [doc_id for doc_id, _ in issue_doc_pairs]
@@ -663,48 +663,58 @@ class FirestoreClient:
                         
                         try:
                             # Use timeout protection for post-write check (60 seconds)
-                            with ThreadPoolExecutor(max_workers=1) as executor:
+                            # IMPORTANT: Don't use 'with' context manager to avoid hanging on timeout
+                            executor = ThreadPoolExecutor(max_workers=1)
+                        except Exception as exc:
+                            logger.warning(f"Failed to create executor: {exc}")
+                            total_new_issues = int(len(all_doc_ids) * 0.8)
+                        else:
+                            try:
                                 future = executor.submit(check_sample_documents)
                                 sample_new_count = future.result(timeout=60)
-                            
-                            # Extrapolate from sample
-                            new_ratio = sample_new_count / sample_size if sample_size > 0 else 0.0
-                            total_new_issues = int(new_ratio * len(all_doc_ids))
-                            
-                            # Calculate confidence interval (95% confidence)
-                            # Using normal approximation for binomial distribution
-                            p = new_ratio
-                            n = sample_size
-                            z = 1.96  # 95% confidence
-                            margin = z * math.sqrt((p * (1 - p)) / n) if n > 0 else 0
-                            lower_bound = max(0, int((p - margin) * len(all_doc_ids)))
-                            upper_bound = min(len(all_doc_ids), int((p + margin) * len(all_doc_ids)))
-                            
-                            logger.info(
-                                f"Estimated new issues from sample: {total_new_issues}/{len(all_doc_ids)} "
-                                f"(95% CI: {lower_bound}-{upper_bound}, sample: {sample_new_count}/{sample_size})",
-                                extra={
-                                    "run_id": run_id,
-                                    "method": "sampling",
-                                    "sample_size": sample_size,
-                                    "sample_new": sample_new_count,
-                                    "estimated_new": total_new_issues,
-                                    "total": len(all_doc_ids),
-                                    "confidence_interval": [lower_bound, upper_bound],
-                                }
-                            )
-                        except FuturesTimeoutError:
-                            logger.warning(
-                                "Post-write check timed out after 60 seconds, using estimate",
-                                extra={"run_id": run_id, "total_issues": len(all_doc_ids)},
-                            )
-                            total_new_issues = int(len(all_doc_ids) * 0.8)  # Conservative estimate: 80% new
-                        except Exception as exc:
-                            logger.warning(
-                                "Failed to count new issues after writing, using estimate",
-                                extra={"error": str(exc), "run_id": run_id, "total_issues": len(all_doc_ids)},
-                            )
-                            total_new_issues = int(len(all_doc_ids) * 0.8)  # Conservative estimate: 80% new
+
+                                # Extrapolate from sample
+                                new_ratio = sample_new_count / sample_size if sample_size > 0 else 0.0
+                                total_new_issues = int(new_ratio * len(all_doc_ids))
+
+                                # Calculate confidence interval (95% confidence)
+                                # Using normal approximation for binomial distribution
+                                p = new_ratio
+                                n = sample_size
+                                z = 1.96  # 95% confidence
+                                margin = z * math.sqrt((p * (1 - p)) / n) if n > 0 else 0
+                                lower_bound = max(0, int((p - margin) * len(all_doc_ids)))
+                                upper_bound = min(len(all_doc_ids), int((p + margin) * len(all_doc_ids)))
+
+                                logger.info(
+                                    f"Estimated new issues from sample: {total_new_issues}/{len(all_doc_ids)} "
+                                    f"(95% CI: {lower_bound}-{upper_bound}, sample: {sample_new_count}/{sample_size})",
+                                    extra={
+                                        "run_id": run_id,
+                                        "method": "sampling",
+                                        "sample_size": sample_size,
+                                        "sample_new": sample_new_count,
+                                        "estimated_new": total_new_issues,
+                                        "total": len(all_doc_ids),
+                                        "confidence_interval": [lower_bound, upper_bound],
+                                    }
+                                )
+                            except FuturesTimeoutError:
+                                logger.warning(
+                                    "Post-write check timed out after 60 seconds, using estimate",
+                                    extra={"run_id": run_id, "total_issues": len(all_doc_ids)},
+                                )
+                                total_new_issues = int(len(all_doc_ids) * 0.8)  # Conservative estimate: 80% new
+                            except Exception as exc:
+                                logger.warning(
+                                    "Failed to count new issues after writing, using estimate",
+                                    extra={"error": str(exc), "run_id": run_id, "total_issues": len(all_doc_ids)},
+                                )
+                                total_new_issues = int(len(all_doc_ids) * 0.8)  # Conservative estimate: 80% new
+                            finally:
+                                # Immediately shutdown executor without waiting for background thread
+                                # This prevents hanging when the check times out
+                                executor.shutdown(wait=False, cancel_futures=True)
                     else:
                         # For smaller batches, read all documents
                         def check_all_documents() -> int:
@@ -740,26 +750,36 @@ class FirestoreClient:
                         
                         try:
                             # Use timeout protection (60 seconds)
-                            with ThreadPoolExecutor(max_workers=1) as executor:
+                            # IMPORTANT: Don't use 'with' context manager to avoid hanging on timeout
+                            executor = ThreadPoolExecutor(max_workers=1)
+                        except Exception as exc:
+                            logger.warning(f"Failed to create executor: {exc}")
+                            total_new_issues = int(len(all_doc_ids) * 0.8)
+                        else:
+                            try:
                                 future = executor.submit(check_all_documents)
                                 total_new_issues = future.result(timeout=60)
-                            
-                            logger.info(
-                                f"Counted new issues after writing: {total_new_issues}/{len(all_doc_ids)}",
-                                extra={"run_id": run_id, "method": "full_check"}
-                            )
-                        except FuturesTimeoutError:
-                            logger.warning(
-                                "Post-write check timed out after 60 seconds, using estimate",
-                                extra={"run_id": run_id, "total_issues": len(all_doc_ids)},
-                            )
-                            total_new_issues = int(len(all_doc_ids) * 0.8)  # Conservative estimate: 80% new
-                        except Exception as exc:
-                            logger.warning(
-                                "Failed to count new issues after writing, using estimate",
-                                extra={"error": str(exc), "run_id": run_id, "total_issues": len(all_doc_ids)},
-                            )
-                            total_new_issues = int(len(all_doc_ids) * 0.8)  # Conservative estimate: 80% new
+
+                                logger.info(
+                                    f"Counted new issues after writing: {total_new_issues}/{len(all_doc_ids)}",
+                                    extra={"run_id": run_id, "method": "full_check"}
+                                )
+                            except FuturesTimeoutError:
+                                logger.warning(
+                                    "Post-write check timed out after 60 seconds, using estimate",
+                                    extra={"run_id": run_id, "total_issues": len(all_doc_ids)},
+                                )
+                                total_new_issues = int(len(all_doc_ids) * 0.8)  # Conservative estimate: 80% new
+                            except Exception as exc:
+                                logger.warning(
+                                    "Failed to count new issues after writing, using estimate",
+                                    extra={"error": str(exc), "run_id": run_id, "total_issues": len(all_doc_ids)},
+                                )
+                                total_new_issues = int(len(all_doc_ids) * 0.8)  # Conservative estimate: 80% new
+                            finally:
+                                # Immediately shutdown executor without waiting for background thread
+                                # This prevents hanging when the check times out
+                                executor.shutdown(wait=False, cancel_futures=True)
                 else:
                     # No run_id, can't determine - estimate
                     total_new_issues = int(len(all_doc_ids) * 0.8)

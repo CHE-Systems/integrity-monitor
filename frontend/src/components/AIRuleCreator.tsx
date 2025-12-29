@@ -36,6 +36,10 @@ export function AIRuleCreator({
   const [autoDetectEntity, setAutoDetectEntity] = useState(!currentEntity);
   const [parsedRule, setParsedRule] = useState<any>(null);
   const [parseError, setParseError] = useState<string | null>(null);
+  const [editableCategory, setEditableCategory] = useState<string>("");
+  const [editableRuleData, setEditableRuleData] = useState<string>("");
+  const [editableEntity, setEditableEntity] = useState<string>("");
+  const [jsonError, setJsonError] = useState<string | null>(null);
 
   if (!isOpen) return null;
 
@@ -58,6 +62,11 @@ export function AIRuleCreator({
       }
 
       setParsedRule(result);
+      // Initialize editable fields with parsed values
+      setEditableCategory(result.category || "");
+      setEditableRuleData(JSON.stringify(result.rule_data || {}, null, 2));
+      setEditableEntity(!autoDetectEntity && entityHint ? entityHint : result.entity || "");
+      setJsonError(null);
     } catch (err) {
       setParseError(
         err instanceof Error ? err.message : "Failed to parse rule"
@@ -66,19 +75,37 @@ export function AIRuleCreator({
   };
 
   const handleUseRule = () => {
-    if (parsedRule) {
-      // Final check: use manual entity selection if provided
-      const finalEntity = !autoDetectEntity && entityHint
-        ? entityHint
-        : parsedRule.entity;
+    if (!parsedRule) return;
 
-      onRuleParsed({
-        category: parsedRule.category,
-        entity: finalEntity,
-        rule_data: parsedRule.rule_data,
-      });
-      handleClose();
+    // Validate JSON
+    let parsedRuleData;
+    try {
+      parsedRuleData = JSON.parse(editableRuleData);
+      setJsonError(null);
+    } catch (err) {
+      setJsonError("Invalid JSON format. Please fix the syntax errors.");
+      return;
     }
+
+    // Validate category
+    if (!editableCategory.trim()) {
+      setJsonError("Category is required");
+      return;
+    }
+
+    // Validate entity
+    if (!editableEntity.trim()) {
+      setJsonError("Entity/Table is required");
+      return;
+    }
+
+    // Use edited values
+    onRuleParsed({
+      category: editableCategory.trim(),
+      entity: editableEntity.trim(),
+      rule_data: parsedRuleData,
+    });
+    handleClose();
   };
 
   const handleClose = () => {
@@ -88,6 +115,10 @@ export function AIRuleCreator({
     setAutoDetectEntity(!currentEntity);
     setParsedRule(null);
     setParseError(null);
+    setEditableCategory("");
+    setEditableRuleData("");
+    setEditableEntity("");
+    setJsonError(null);
     onClose();
   };
 
@@ -201,41 +232,120 @@ export function AIRuleCreator({
 
           {parsedRule && (
             <div className="mt-4 p-4 bg-green-50 border border-green-200 rounded-lg">
-              <h3 className="font-semibold text-green-800 mb-2">
-                Parsed Rule:
+              <h3 className="font-semibold text-green-800 mb-3">
+                Parsed Rule (Edit before submitting):
               </h3>
-              <div className="bg-white p-3 rounded border border-green-300">
-                <div className="mb-2">
-                  <span className="font-medium">Rule Type:</span>{" "}
-                  <span className="px-2 py-1 text-xs bg-blue-100 text-blue-800 rounded ml-1">
-                    {parsedRule.category}
-                  </span>
+              <div className="bg-white p-4 rounded border border-green-300 space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-[var(--text-main)] mb-2">
+                    Rule Type (Category) *
+                  </label>
+                  <select
+                    value={editableCategory}
+                    onChange={(e) => setEditableCategory(e.target.value)}
+                    className="w-full p-2 border border-[var(--border)] rounded-lg focus:outline-none focus:ring-2 focus:ring-[var(--cta-blue)]"
+                  >
+                    <option value="">Select category...</option>
+                    <option value="duplicates">Duplicate Detection</option>
+                    <option value="relationships">Relationship</option>
+                    <option value="required_fields">Required Field</option>
+                    <option value="attendance_rules">Attendance Rule</option>
+                  </select>
                 </div>
-                <div className="mb-2">
-                  <span className="font-medium">Table:</span>{" "}
-                  <span className="px-2 py-1 text-xs bg-green-100 text-green-800 rounded ml-1 capitalize">
-                    {!autoDetectEntity && entityHint
-                      ? entityHint
-                      : parsedRule.entity || "Not specified"}
-                  </span>
-                  {!autoDetectEntity && entityHint && entityHint !== parsedRule.entity && (
-                    <span className="text-xs text-gray-600 ml-2">
-                      (Manually selected: {entityHint})
-                    </span>
-                  )}
+
+                <div>
+                  <label className="block text-sm font-medium text-[var(--text-main)] mb-2">
+                    Table/Entity *
+                  </label>
+                  <select
+                    value={editableEntity}
+                    onChange={(e) => setEditableEntity(e.target.value)}
+                    className="w-full p-2 border border-[var(--border)] rounded-lg focus:outline-none focus:ring-2 focus:ring-[var(--cta-blue)]"
+                  >
+                    <option value="">Select a table...</option>
+                    {ENTITY_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
                 </div>
-                <div className="mb-2">
-                  <span className="font-medium">Rule Data:</span>
-                </div>
-                <pre className="text-xs bg-gray-50 p-2 rounded overflow-x-auto max-h-60">
-                  {JSON.stringify(parsedRule.rule_data, null, 2)}
-                </pre>
+
+                 {/* Field Lookup Status Indicator */}
+                 {parsedRule?.rule_data?.field_lookup_status && (
+                   <div className={`p-3 rounded-lg border ${
+                     parsedRule.rule_data.field_lookup_status === "found" || parsedRule.rule_data.field_lookup_status === "found_partial"
+                       ? "bg-green-50 border-green-200"
+                       : parsedRule.rule_data.field_lookup_status === "field_not_found" || parsedRule.rule_data.field_lookup_status === "table_not_found"
+                       ? "bg-yellow-50 border-yellow-200"
+                       : "bg-red-50 border-red-200"
+                   }`}>
+                     <div className="flex items-start gap-2">
+                       {parsedRule.rule_data.field_lookup_status === "found" || parsedRule.rule_data.field_lookup_status === "found_partial" ? (
+                         <span className="text-green-600">✓</span>
+                       ) : (
+                         <span className="text-yellow-600">⚠</span>
+                       )}
+                       <div className="flex-1">
+                         <div className="text-sm font-medium text-[var(--text-main)] mb-1">
+                           Field Lookup: {parsedRule.rule_data.field_lookup_status === "found" ? "Found" : 
+                                         parsedRule.rule_data.field_lookup_status === "found_partial" ? "Found (Partial Match)" :
+                                         parsedRule.rule_data.field_lookup_status === "field_not_found" ? "Field Not Found" :
+                                         parsedRule.rule_data.field_lookup_status === "table_not_found" ? "Table Not Found" :
+                                         parsedRule.rule_data.field_lookup_status === "schema_not_found" ? "Schema Not Found" :
+                                         "Error"}
+                         </div>
+                         {parsedRule.rule_data.field_lookup_message && (
+                           <div className="text-xs text-[var(--text-muted)]">
+                             {parsedRule.rule_data.field_lookup_message}
+                           </div>
+                         )}
+                         {parsedRule.rule_data.field_id && (
+                           <div className="text-xs font-mono text-[var(--text-muted)] mt-1">
+                             Field ID: {parsedRule.rule_data.field_id}
+                           </div>
+                         )}
+                       </div>
+                     </div>
+                   </div>
+                 )}
+
+                 <div>
+                   <label className="block text-sm font-medium text-[var(--text-main)] mb-2">
+                     Rule Data (JSON) *
+                   </label>
+                   <textarea
+                     value={editableRuleData}
+                     onChange={(e) => {
+                       setEditableRuleData(e.target.value);
+                       // Validate JSON on change
+                       try {
+                         JSON.parse(e.target.value);
+                         setJsonError(null);
+                       } catch {
+                         // Don't show error while typing, only on submit
+                       }
+                     }}
+                     className={`w-full p-3 border rounded-lg font-mono text-sm focus:outline-none focus:ring-2 focus:ring-[var(--cta-blue)] ${
+                       jsonError ? "border-red-500" : "border-[var(--border)]"
+                     }`}
+                     rows={12}
+                     placeholder='{"field": "email", "message": "Email is required", "severity": "warning"}'
+                   />
+                   {jsonError && (
+                     <p className="text-red-500 text-xs mt-1">{jsonError}</p>
+                   )}
+                   <p className="text-xs text-[var(--text-muted)] mt-1">
+                     Edit the JSON data as needed. Invalid JSON will prevent submission.
+                   </p>
+                 </div>
               </div>
               <button
                 onClick={handleUseRule}
-                className="mt-3 w-full py-2 px-4 bg-green-600 text-white rounded-lg hover:bg-green-700"
+                className="mt-3 w-full py-2 px-4 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                disabled={!editableCategory || !editableEntity || !editableRuleData.trim()}
               >
-                Use This Rule
+                Submit Rule
               </button>
             </div>
           )}

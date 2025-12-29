@@ -49,7 +49,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
     allow_credentials=use_credentials,
-    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
 
@@ -407,7 +407,20 @@ def run_integrity(
         final_entities = run_config["entities"]
     elif entities:
         final_entities = entities
-    
+
+    # DEBUG LOGGING: Show what was received from frontend
+    logger.info("=" * 80)
+    logger.info("API ENDPOINT: Received Scan Request")
+    logger.info("=" * 80)
+    logger.info(f"Trigger: {trigger}")
+    logger.info(f"Entities (query param): {entities}")
+    logger.info(f"Run config received: {run_config}")
+    if run_config:
+        logger.info(f"Run config entities: {run_config.get('entities')}")
+        logger.info(f"Run config rules: {run_config.get('rules')}")
+        logger.info(f"Run config checks: {run_config.get('checks')}")
+    logger.info("=" * 80)
+
     logger.info(
         "Integrity run requested",
         extra={
@@ -415,7 +428,8 @@ def run_integrity(
             "entities": final_entities,
             "has_run_config": run_config is not None,
             "has_rules": run_config is not None and "rules" in run_config if run_config else False,
-            "request_id": request_id
+            "request_id": request_id,
+            "run_config_full": run_config
         }
     )
 
@@ -863,6 +877,97 @@ def airtable_schema_summary():
         return schema_service.summary()
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/airtable/schema/fields/{entity}", dependencies=[Depends(verify_firebase_token)])
+def airtable_schema_fields(entity: str, search: Optional[str] = None):
+    """Return fields for a specific entity/table, optionally filtered by search term.
+    
+    Args:
+        entity: Entity name (e.g., "contractors", "students")
+        search: Optional search term to filter fields by name (case-insensitive)
+        
+    Returns:
+        Dictionary with:
+            - entity: Entity name
+            - table_name: Airtable table name
+            - fields: List of field objects with id, name, type
+            - count: Number of fields returned
+    """
+    try:
+        from .utils.records import _normalize_name
+        
+        schema_data = schema_service.load()
+        tables = schema_data.get("tables", [])
+        
+        # Map entity to table name
+        entity_to_table = {
+            "contractors": "Contractors/Volunteers",
+            "students": "Students",
+            "parents": "Parents",
+            "classes": "Classes",
+            "attendance": "Attendance",
+            "truth": "Truth",
+            "payments": "Contractor/Vendor Invoices",
+        }
+        
+        table_name = entity_to_table.get(entity.lower(), entity.title())
+        
+        # Find the table
+        target_table = None
+        for table in tables:
+            table_name_lower = table.get("name", "").lower()
+            if (table.get("name") == table_name or 
+                entity.lower() in table_name_lower or
+                table_name_lower in entity.lower()):
+                target_table = table
+                break
+        
+        if not target_table:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Table not found for entity: {entity}"
+            )
+        
+        # Get all fields
+        all_fields = target_table.get("fields", [])
+        
+        # Filter by search term if provided
+        if search:
+            search_normalized = _normalize_name(search)
+            filtered_fields = []
+            for field in all_fields:
+                field_name = field.get("name", "")
+                if (search.lower() in field_name.lower() or
+                    search_normalized in _normalize_name(field_name) or
+                    search.lower() in field.get("id", "").lower()):
+                    filtered_fields.append(field)
+            fields = filtered_fields
+        else:
+            fields = all_fields
+        
+        # Format response
+        formatted_fields = [
+            {
+                "id": field.get("id"),
+                "name": field.get("name"),
+                "type": field.get("type"),
+            }
+            for field in fields
+        ]
+        
+        return {
+            "entity": entity,
+            "table_name": target_table.get("name"),
+            "table_id": target_table.get("id"),
+            "fields": formatted_fields,
+            "count": len(formatted_fields),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Error loading fields for entity", exc_info=True, extra={"entity": entity, "error": str(exc)})
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(exc)}") from exc
 
 
 @app.post("/airtable/schema/discover-table-ids", dependencies=[Depends(verify_firebase_token)])

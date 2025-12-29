@@ -7,6 +7,7 @@ import os
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -160,7 +161,19 @@ class IntegrityRunner:
         
         # Store run_config for use in filtering
         self._run_config = run_config
-        
+
+        # CRITICAL DEBUG: Use logger.warning so it definitely shows up
+        logger.warning("=" * 80)
+        logger.warning("STORING RUN_CONFIG in IntegrityRunner.run()")
+        logger.warning(f"run_config parameter: {run_config}")
+        if run_config:
+            logger.warning(f"run_config keys: {list(run_config.keys())}")
+            logger.warning(f"Has 'rules' key: {'rules' in run_config}")
+            if 'rules' in run_config:
+                logger.warning(f"run_config['rules']: {run_config['rules']}")
+        logger.warning(f"self._run_config after assignment: {self._run_config}")
+        logger.warning("=" * 80)
+
         # Initialize summary to empty dict so it's always available in finally block
         summary: Dict[str, Any] = {}
 
@@ -402,12 +415,17 @@ class IntegrityRunner:
         check_cancelled()
 
         # Write initial "running" status to Firestore immediately so frontend can see it
+        # CRITICAL: Write run document FIRST before any logging to ensure it exists
+        initial_metadata = {
+            "trigger": trigger,
+            "status": "running",
+            "started_at": start_time,
+        }
+        # Include run_config if provided (contains selected entities and rules)
+        if run_config:
+            initial_metadata["run_config"] = run_config
+        
         try:
-            initial_metadata = {
-                "trigger": trigger,
-                "status": "running",
-                "started_at": start_time,
-            }
             self._firestore_writer.write_run(run_id, {}, initial_metadata)
             logger.info("Initial run status written to Firestore", extra={"run_id": run_id})
         except Exception as exc:
@@ -423,6 +441,120 @@ class IntegrityRunner:
             )
             # Don't fail the run if initial write fails - continue execution
             # The run will still complete and return results, just won't be tracked in Firestore
+        
+        # LOG SELECTED RULES AT SCAN START (after run document is created)
+        # Wrap in try-except so logging failures don't affect the run
+        try:
+            if run_config:
+                logger.info(
+                    "=" * 80,
+                    extra={"run_id": run_id}
+                )
+                logger.info(
+                    "SCAN STARTED - Rules Configuration",
+                    extra={"run_id": run_id}
+                )
+                logger.info(
+                    "=" * 80,
+                    extra={"run_id": run_id}
+                )
+
+                # Log selected entities
+                selected_entities = run_config.get("entities", [])
+                logger.info(
+                    f"Selected Entities: {', '.join(selected_entities) if selected_entities else 'ALL'}",
+                    extra={"run_id": run_id, "selected_entities": selected_entities}
+                )
+
+                # Log selected rules by category
+                rules_config = run_config.get("rules", {})
+
+                # Log duplicates
+                if "duplicates" in rules_config:
+                    dup_rules = rules_config["duplicates"]
+                    total_dup = sum(len(rules) for rules in dup_rules.values())
+                    logger.info(
+                        f"Selected Duplicate Rules: {total_dup} total",
+                        extra={"run_id": run_id, "duplicate_rules": dup_rules}
+                    )
+                    for entity, rule_ids in dup_rules.items():
+                        logger.info(
+                            f"  - {entity}: {', '.join(rule_ids)}",
+                            extra={"run_id": run_id, "entity": entity, "rule_ids": rule_ids}
+                        )
+                else:
+                    logger.info(
+                        "Selected Duplicate Rules: NONE (category not selected)",
+                        extra={"run_id": run_id}
+                    )
+
+                # Log relationships
+                if "relationships" in rules_config:
+                    rel_rules = rules_config["relationships"]
+                    total_rel = sum(len(rules) for rules in rel_rules.values())
+                    logger.info(
+                        f"Selected Relationship Rules: {total_rel} total",
+                        extra={"run_id": run_id, "relationship_rules": rel_rules}
+                    )
+                    for entity, rule_ids in rel_rules.items():
+                        logger.info(
+                            f"  - {entity}: {', '.join(rule_ids)}",
+                            extra={"run_id": run_id, "entity": entity, "rule_ids": rule_ids}
+                        )
+                else:
+                    logger.info(
+                        "Selected Relationship Rules: NONE (category not selected)",
+                        extra={"run_id": run_id}
+                    )
+
+                # Log required fields
+                if "required_fields" in rules_config:
+                    req_rules = rules_config["required_fields"]
+                    total_req = sum(len(rules) for rules in req_rules.values())
+                    logger.info(
+                        f"Selected Required Field Rules: {total_req} total",
+                        extra={"run_id": run_id, "required_field_rules": req_rules}
+                    )
+                    for entity, rule_ids in req_rules.items():
+                        logger.info(
+                            f"  - {entity}: {', '.join(rule_ids)}",
+                            extra={"run_id": run_id, "entity": entity, "rule_ids": rule_ids}
+                        )
+                else:
+                    logger.info(
+                        "Selected Required Field Rules: NONE (category not selected)",
+                        extra={"run_id": run_id}
+                    )
+
+                # Log attendance
+                if "attendance_rules" in rules_config:
+                    attendance_enabled = rules_config["attendance_rules"]
+                    logger.info(
+                        f"Selected Attendance Rules: {'ENABLED' if attendance_enabled else 'DISABLED'}",
+                        extra={"run_id": run_id, "attendance_enabled": attendance_enabled}
+                    )
+                else:
+                    logger.info(
+                        "Selected Attendance Rules: NONE (category not selected)",
+                        extra={"run_id": run_id}
+                    )
+
+                logger.info(
+                    "=" * 80,
+                    extra={"run_id": run_id}
+                )
+            else:
+                logger.info(
+                    "SCAN STARTED - No rule filtering (all rules will be used)",
+                    extra={"run_id": run_id}
+                )
+        except Exception as exc:
+            # Logging failures should not affect the run
+            logger.warning(
+                "Failed to log selected rules configuration",
+                extra={"run_id": run_id, "error": str(exc)},
+                exc_info=True
+            )
 
         try:
             # Load config (with timing)
@@ -487,73 +619,225 @@ class IntegrityRunner:
                         )
                     
                     # Duplicates check
-                    import time as _time_module
-                    self._firestore_writer.write_log(run_id, "info", "Running duplicates check...")
-                    check_start = _time_module.time()
-                    dup_issues = duplicates.run(records, schema_config_to_use)
-                    check_results.extend(dup_issues)
-                    dup_summary = scorer.summarize(dup_issues)
-                    dup_duration = int((_time_module.time() - check_start) * 1000)
-                    log_check(
-                        logger,
-                        run_id,
-                        "duplicates",
-                        len(dup_issues),
-                        dup_duration,
-                        {k: v for k, v in dup_summary.items() if "duplicate" in k},
-                    )
-                    self._firestore_writer.write_log(run_id, "info", f"Duplicates check: {len(dup_issues)} issues found in {(dup_duration/1000):.1f}s")
+                    # #region agent log
+                    try:
+                        import json as _json
+                        import time as _time_module
+                        debug_log_path = '/Users/joshuaedwards/Library/CloudStorage/GoogleDrive-jedwards@che.school/My Drive/CHE/che-data-integrity-monitor/.cursor/debug.log'
+                        with open(debug_log_path, 'a') as f:
+                            f.write(_json.dumps({"sessionId":"debug-session","runId":run_id,"hypothesisId":"A","location":"integrity_runner.py:621","message":"Duplicates check decision - entry","data":{"has_run_config":hasattr(self, "_run_config"),"run_config_is_none":not (hasattr(self, "_run_config") and self._run_config)},"timestamp":int(_time_module.time()*1000)})+'\n')
+                    except: pass
+                    # #endregion agent log
+                    should_run_duplicates = False  # Default to False - only run when explicitly selected
+                    if hasattr(self, "_run_config") and self._run_config:
+                        checks = self._run_config.get("checks", {})
+                        logger.warning(
+                            f"Checks received in run_config: {checks}",
+                            extra={
+                                "has_checks": "checks" in self._run_config,
+                                "checks_keys": list(checks.keys()) if checks else [],
+                                "checks_duplicates": checks.get("duplicates") if checks else None,
+                            }
+                        )
+                        # #region agent log
+                        try:
+                            import json as _json
+                            import time as _time_module
+                            debug_log_path = '/Users/joshuaedwards/Library/CloudStorage/GoogleDrive-jedwards@che.school/My Drive/CHE/che-data-integrity-monitor/.cursor/debug.log'
+                            with open(debug_log_path, 'a') as f:
+                                f.write(_json.dumps({"sessionId":"debug-session","runId":run_id,"hypothesisId":"A","location":"integrity_runner.py:628","message":"Duplicates check - run_config exists","data":{"has_checks":"checks" in self._run_config,"checks_keys":list(checks.keys()) if checks else [],"checks_duplicates_value":checks.get("duplicates") if checks else None,"checks_duplicates_type":type(checks.get("duplicates")).__name__ if checks and "duplicates" in checks else None},"timestamp":int(_time_module.time()*1000)})+'\n')
+                        except: pass
+                        # #endregion agent log
+                        # Explicitly check if duplicates key exists and respect its value (including False)
+                        # This ensures False values from frontend are properly respected
+                        if "duplicates" in checks:
+                            should_run_duplicates = bool(checks["duplicates"])
+                            logger.warning(f"Duplicates check decision: run_config.checks.duplicates = {checks['duplicates']}, should_run = {should_run_duplicates}")
+                            # #region agent log
+                            try:
+                                import json as _json
+                                import time as _time_module
+                                debug_log_path = '/Users/joshuaedwards/Library/CloudStorage/GoogleDrive-jedwards@che.school/My Drive/CHE/che-data-integrity-monitor/.cursor/debug.log'
+                                with open(debug_log_path, 'a') as f:
+                                    f.write(_json.dumps({"sessionId":"debug-session","runId":run_id,"hypothesisId":"A","location":"integrity_runner.py:633","message":"Duplicates check - key found in checks","data":{"checks_duplicates_raw":checks["duplicates"],"should_run_duplicates":should_run_duplicates},"timestamp":int(_time_module.time()*1000)})+'\n')
+                            except: pass
+                            # #endregion agent log
+                        else:
+                            logger.warning(f"Duplicates check decision: 'duplicates' key not in checks, using default False. checks keys: {list(checks.keys())}")
+                            # #region agent log
+                            try:
+                                import json as _json
+                                import time as _time_module
+                                debug_log_path = '/Users/joshuaedwards/Library/CloudStorage/GoogleDrive-jedwards@che.school/My Drive/CHE/che-data-integrity-monitor/.cursor/debug.log'
+                                with open(debug_log_path, 'a') as f:
+                                    f.write(_json.dumps({"sessionId":"debug-session","runId":run_id,"hypothesisId":"B","location":"integrity_runner.py:640","message":"Duplicates check - key NOT found, using default False","data":{"checks_keys":list(checks.keys())},"timestamp":int(_time_module.time()*1000)})+'\n')
+                            except: pass
+                            # #endregion agent log
+                        # If key doesn't exist, keep default False
+                    else:
+                        logger.warning(f"Duplicates check decision: No run_config, using default False")
+                        # #region agent log
+                        try:
+                            import json as _json
+                            import time as _time_module
+                            debug_log_path = '/Users/joshuaedwards/Library/CloudStorage/GoogleDrive-jedwards@che.school/My Drive/CHE/che-data-integrity-monitor/.cursor/debug.log'
+                            with open(debug_log_path, 'a') as f:
+                                f.write(_json.dumps({"sessionId":"debug-session","runId":run_id,"hypothesisId":"C","location":"integrity_runner.py:647","message":"Duplicates check - no run_config, using default False","data":{},"timestamp":int(_time_module.time()*1000)})+'\n')
+                        except: pass
+                        # #endregion agent log
+                    # #region agent log
+                    try:
+                        import json as _json
+                        import time as _time_module
+                        debug_log_path = '/Users/joshuaedwards/Library/CloudStorage/GoogleDrive-jedwards@che.school/My Drive/CHE/che-data-integrity-monitor/.cursor/debug.log'
+                        with open(debug_log_path, 'a') as f:
+                            f.write(_json.dumps({"sessionId":"debug-session","runId":run_id,"hypothesisId":"A","location":"integrity_runner.py:650","message":"Duplicates check - final decision","data":{"should_run_duplicates":should_run_duplicates},"timestamp":int(_time_module.time()*1000)})+'\n')
+                    except: pass
+                    # #endregion agent log
+                    
+                    if should_run_duplicates:
+                        import time as _time_module
+                        import json
+                        self._firestore_writer.write_log(run_id, "info", "Running duplicates check...")
+                        
+                        # Log what we're passing to duplicates.run() - send to browser console
+                        if schema_config_to_use and schema_config_to_use.duplicates:
+                            contractors_dup = schema_config_to_use.duplicates.get("contractors")
+                            contractors_info = None
+                            if contractors_dup:
+                                contractors_info = {
+                                    "likely_count": len(contractors_dup.likely) if contractors_dup.likely else 0,
+                                    "possible_count": len(contractors_dup.possible) if contractors_dup.possible else 0,
+                                    "likely_rule_ids": [r.rule_id for r in contractors_dup.likely] if contractors_dup.likely else [],
+                                    "possible_rule_ids": [r.rule_id for r in contractors_dup.possible] if contractors_dup.possible else [],
+                                }
+                            
+                            log_msg = f"[DUPLICATES DEBUG] Passing schema config to duplicates.run()\n"
+                            log_msg += f"  - Duplicates keys: {list(schema_config_to_use.duplicates.keys())}\n"
+                            log_msg += f"  - Contractors in duplicates: {'contractors' in schema_config_to_use.duplicates}\n"
+                            if contractors_info:
+                                log_msg += f"  - Contractors dup_def: {json.dumps(contractors_info, indent=2)}"
+                            else:
+                                log_msg += f"  - Contractors dup_def: None"
+                            self._firestore_writer.write_log(run_id, "info", log_msg)
+                            logger.info(
+                                "Passing schema config to duplicates.run()",
+                                extra={
+                                    "duplicates_keys": list(schema_config_to_use.duplicates.keys()),
+                                    "contractors_in_duplicates": "contractors" in schema_config_to_use.duplicates,
+                                    "contractors_dup_def": contractors_info,
+                                }
+                            )
+                        else:
+                            self._firestore_writer.write_log(run_id, "warning", "[DUPLICATES DEBUG] No schema_config_to_use or no duplicates in schema_config_to_use")
+                            logger.warning("No schema_config_to_use or no duplicates in schema_config_to_use")
+                        
+                        check_start = _time_module.time()
+                        dup_issues = duplicates.run(records, schema_config_to_use, run_id=run_id, firestore_writer=self._firestore_writer)
+                        check_results.extend(dup_issues)
+                        dup_summary = scorer.summarize(dup_issues)
+                        dup_duration = int((_time_module.time() - check_start) * 1000)
+                        log_check(
+                            logger,
+                            run_id,
+                            "duplicates",
+                            len(dup_issues),
+                            dup_duration,
+                            {k: v for k, v in dup_summary.items() if "duplicate" in k},
+                        )
+                        self._firestore_writer.write_log(run_id, "info", f"Duplicates check: {len(dup_issues)} issues found in {(dup_duration/1000):.1f}s")
+                    else:
+                        dup_issues = []
+                        self._firestore_writer.write_log(run_id, "info", "Duplicates check skipped (not selected in checks)")
                     check_cancelled()
                     
                     # Links check
-                    import time as _time_module
-                    self._firestore_writer.write_log(run_id, "info", "Running links check...")
-                    check_start = _time_module.time()
-                    link_issues = links.run(records, schema_config_to_use)
-                    check_results.extend(link_issues)
-                    link_summary = scorer.summarize(link_issues)
-                    link_duration = int((_time_module.time() - check_start) * 1000)
-                    log_check(
-                        logger,
-                        run_id,
-                        "links",
-                        len(link_issues),
-                        link_duration,
-                        {k: v for k, v in link_summary.items() if "link" in k},
-                    )
-                    self._firestore_writer.write_log(run_id, "info", f"Links check: {len(link_issues)} issues found in {(link_duration/1000):.1f}s")
+                    should_run_links = False  # Default to False - only run when explicitly selected
+                    if hasattr(self, "_run_config") and self._run_config:
+                        checks = self._run_config.get("checks", {})
+                        # Explicitly check if links key exists and respect its value (including False)
+                        # This ensures False values from frontend are properly respected
+                        if "links" in checks:
+                            should_run_links = bool(checks["links"])
+                        # If key doesn't exist, keep default False
+                    
+                    if should_run_links:
+                        import time as _time_module
+                        self._firestore_writer.write_log(run_id, "info", "Running links check...")
+                        check_start = _time_module.time()
+                        link_issues = links.run(records, schema_config_to_use)
+                        check_results.extend(link_issues)
+                        link_summary = scorer.summarize(link_issues)
+                        link_duration = int((_time_module.time() - check_start) * 1000)
+                        log_check(
+                            logger,
+                            run_id,
+                            "links",
+                            len(link_issues),
+                            link_duration,
+                            {k: v for k, v in link_summary.items() if "link" in k},
+                        )
+                        self._firestore_writer.write_log(run_id, "info", f"Links check: {len(link_issues)} issues found in {(link_duration/1000):.1f}s")
+                    else:
+                        link_issues = []
+                        self._firestore_writer.write_log(run_id, "info", "Links check skipped (not selected in checks)")
                     check_cancelled()
                     
                     # Required fields check
-                    import time as _time_module
-                    self._firestore_writer.write_log(run_id, "info", "Running required fields check...")
-                    check_start = _time_module.time()
-                    req_issues = required_fields.run(records, schema_config_to_use)
-                    check_results.extend(req_issues)
-                    req_summary = scorer.summarize(req_issues)
-                    req_duration = int((_time_module.time() - check_start) * 1000)
-                    log_check(
-                        logger,
-                        run_id,
-                        "required_fields",
-                        len(req_issues),
-                        req_duration,
-                        {k: v for k, v in req_summary.items() if "required" in k},
-                    )
-                    self._firestore_writer.write_log(run_id, "info", f"Required fields check: {len(req_issues)} issues found in {(req_duration/1000):.1f}s")
+                    should_run_required_fields = False  # Default to False - only run when explicitly selected
+                    if hasattr(self, "_run_config") and self._run_config:
+                        checks = self._run_config.get("checks", {})
+                        # Explicitly check if required_fields key exists and respect its value (including False)
+                        # This ensures False values from frontend are properly respected
+                        if "required_fields" in checks:
+                            should_run_required_fields = bool(checks["required_fields"])
+                        # If key doesn't exist, keep default False
+                    
+                    if should_run_required_fields:
+                        import time as _time_module
+                        self._firestore_writer.write_log(run_id, "info", "Running required fields check...")
+                        check_start = _time_module.time()
+                        req_issues = required_fields.run(records, schema_config_to_use)
+                        check_results.extend(req_issues)
+                        req_summary = scorer.summarize(req_issues)
+                        req_duration = int((_time_module.time() - check_start) * 1000)
+                        log_check(
+                            logger,
+                            run_id,
+                            "required_fields",
+                            len(req_issues),
+                            req_duration,
+                            {k: v for k, v in req_summary.items() if "required" in k},
+                        )
+                        self._firestore_writer.write_log(run_id, "info", f"Required fields check: {len(req_issues)} issues found in {(req_duration/1000):.1f}s")
+                    else:
+                        req_issues = []
+                        self._firestore_writer.write_log(run_id, "info", "Required fields check skipped (not selected in checks)")
                     check_cancelled()
                     
                     # Attendance check
-                    attendance_rules_to_use = self._runtime_config.attendance_rules
-                    if (hasattr(self, "_run_config") and self._run_config and
-                        self._run_config.get("rules") and
-                        "attendance_rules" in self._run_config["rules"]):
-                        # If attendance_rules is False in selection, skip attendance check
-                        if self._run_config["rules"]["attendance_rules"] is False:
-                            attendance_rules_to_use = None
-                    
+                    should_run_attendance = False  # Default to False - only run when explicitly selected
+                    if hasattr(self, "_run_config") and self._run_config:
+                        checks = self._run_config.get("checks", {})
+                        # Explicitly check if attendance key exists and respect its value (including False)
+                        # This ensures False values from frontend are properly respected
+                        if "attendance" in checks:
+                            should_run_attendance = bool(checks["attendance"])
+                        # If key doesn't exist, keep default False
+
+                    attendance_rules_to_use = None
+                    if should_run_attendance:
+                        attendance_rules_to_use = self._runtime_config.attendance_rules
+                        # Also check the legacy rules.attendance_rules field for backwards compatibility
+                        if (hasattr(self, "_run_config") and self._run_config and
+                            self._run_config.get("rules") and
+                            "attendance_rules" in self._run_config["rules"]):
+                            # If attendance_rules is False in selection, skip attendance check
+                            if self._run_config["rules"]["attendance_rules"] is False:
+                                attendance_rules_to_use = None
+
                     import time as _time_module
-                    if attendance_rules_to_use:
+                    if attendance_rules_to_use and should_run_attendance:
                         self._firestore_writer.write_log(run_id, "info", "Running attendance check...")
                         check_start = _time_module.time()
                         att_issues = attendance.run(records, attendance_rules_to_use)
@@ -571,20 +855,54 @@ class IntegrityRunner:
                         self._firestore_writer.write_log(run_id, "info", f"Attendance check: {len(att_issues)} issues found in {(att_duration/1000):.1f}s")
                     else:
                         att_issues = []
-                        self._firestore_writer.write_log(run_id, "info", "Attendance check skipped (not selected in rules)")
+                        self._firestore_writer.write_log(run_id, "info", "Attendance check skipped (not selected in checks)")
                     
                     # Merge and summarize issues
                     issues = check_results
                     total_issues_before_merge = len(issues)
+                    
+                    # Validate no duplicates exist before merging
+                    from collections import defaultdict
+                    seen_combinations = {}
+                    duplicate_warnings = []
+                    for issue in check_results:
+                        key = f"{issue.rule_id}:{issue.record_id}"
+                        if key in seen_combinations:
+                            duplicate_warnings.append(f"Duplicate found: {key} (rule: {issue.rule_id}, record: {issue.record_id})")
+                        else:
+                            seen_combinations[key] = issue
+                    
+                    if duplicate_warnings:
+                        logger.warning(
+                            f"Found {len(duplicate_warnings)} duplicate issues before merge",
+                            extra={"duplicate_count": len(duplicate_warnings), "total_issues": total_issues_before_merge}
+                        )
+                        for warning in duplicate_warnings[:10]:  # Log first 10
+                            logger.warning(warning)
+                    
                     self._firestore_writer.write_log(run_id, "info", f"Merging duplicate issues from {total_issues_before_merge} total issues...")
                     merged = scorer.merge(issues)
                     merged_count = len(merged)
                     self._firestore_writer.write_log(run_id, "info", f"Merged to {merged_count} unique issues (removed {total_issues_before_merge - merged_count} duplicates)")
                     
+                    # Add detailed breakdown by rule
+                    rule_counts_before = defaultdict(int)
+                    rule_counts_after = defaultdict(int)
+                    
+                    for issue in check_results:
+                        rule_counts_before[issue.rule_id] += 1
+                    
+                    for issue in merged:
+                        rule_counts_after[issue.rule_id] += 1
+                    
+                    self._firestore_writer.write_log(
+                        run_id, "info",
+                        f"Issue counts by rule - Before merge: {dict(rule_counts_before)}, After merge: {dict(rule_counts_after)}"
+                    )
+                    
                     self._firestore_writer.write_log(run_id, "info", "Calculating issue summary...")
                     summary = scorer.summarize(merged)
-                    total_issues = sum(summary.values())
-                    self._firestore_writer.write_log(run_id, "info", f"Prepared {total_issues} total issues for writing")
+                    self._firestore_writer.write_log(run_id, "info", f"Prepared {len(merged)} total issues for writing")
             except Exception as exc:
                 logger.error("Check execution failed catastrophically", extra={"run_id": run_id}, exc_info=True)
                 failed_checks.append("all")
@@ -610,6 +928,10 @@ class IntegrityRunner:
                         run_metadata["failed_checks"] = failed_checks
                     if error_message:
                         run_metadata["error_message"] = error_message
+
+                    # Include run_config in metadata if provided
+                    if hasattr(self, "_run_config") and self._run_config:
+                        run_metadata["run_config"] = self._run_config
 
                     # Update the existing document (merge=True in record_run)
                     # This keeps the status as "running" while operations continue
@@ -721,7 +1043,10 @@ class IntegrityRunner:
                         final_metadata["failed_checks"] = failed_checks
                     if error_message:
                         final_metadata["error_message"] = error_message
-                    
+                    # Include run_config in final metadata if provided
+                    if hasattr(self, "_run_config") and self._run_config:
+                        final_metadata["run_config"] = self._run_config
+
                     try:
                         self._firestore_writer.write_run(run_id, summary, final_metadata)
                     except Exception as exc:
@@ -843,6 +1168,9 @@ class IntegrityRunner:
                 # Include new_issues_count if it was captured
                 if "new_issues_count" in locals():
                     final_metadata["new_issues_count"] = new_issues_count
+                # Include run_config in final metadata if provided
+                if hasattr(self, "_run_config") and self._run_config:
+                    final_metadata["run_config"] = self._run_config
                 # Write summary (will only update counts if summary has content, preserving existing counts if empty)
                 self._firestore_writer.write_run(run_id, summary, final_metadata)
             except Exception:
@@ -876,7 +1204,7 @@ class IntegrityRunner:
         return result
 
     def _fetch_records(self, entities: List[str] | None = None) -> Tuple[Dict[str, List[dict]], Dict[str, int]]:
-        """Fetch records for the specified entities.
+        """Fetch records for the specified entities using parallel fetching.
         
         Args:
             entities: Optional list of entity names to fetch. If None, fetches all entities.
@@ -890,55 +1218,172 @@ class IntegrityRunner:
             fetchers = {key: fetcher for key, fetcher in fetchers.items() if key in entities}
             logger.info(f"Filtered to {len(fetchers)} entities: {', '.join(entities)}")
         
+        # Extract run_id for async logging
+        run_id = None
+        if hasattr(self, '_current_run_id'):
+            run_id = self._current_run_id
+        elif hasattr(logger, 'extra') and logger.extra:
+            run_id = logger.extra.get('run_id')
+        
+        # Create async log buffer for non-blocking progress logging
+        async_buffer = None
+        if run_id:
+            async_buffer = self._firestore_writer.create_async_log_buffer(run_id)
+            async_buffer.start()
+            try:
+                async_buffer.log("info", f"Starting to fetch records (entities: {', '.join(fetchers.keys()) if fetchers else 'all'})...")
+            except Exception:
+                pass
+                
         records: Dict[str, List[dict]] = {}
         counts: Dict[str, int] = {}
-        for key, fetcher in fetchers.items():
+        errors: Dict[str, Exception] = {}
+        
+        # Fetch entities in parallel using ThreadPoolExecutor
+        max_workers = min(4, len(fetchers)) if fetchers else 1
+        parallel_fetch_start = time.time()
+        
+        logger.info(
+            f"[TIMING] Starting parallel fetch: {len(fetchers)} entities, {max_workers} workers",
+            extra={
+                "entity_count": len(fetchers),
+                "max_workers": max_workers,
+                "entities": list(fetchers.keys()),
+            }
+        )
+        
+        def fetch_entity(key: str, fetcher) -> Tuple[str, List[dict], Optional[Exception]]:
+            """Fetch a single entity and return (key, records, error)."""
+            entity_start_time = time.time()
             try:
-                # Extract run_id from logger context if available
-                run_id = None
-                if hasattr(self, '_current_run_id'):
-                    run_id = self._current_run_id
-                elif hasattr(logger, 'extra') and logger.extra:
-                    run_id = logger.extra.get('run_id')
+                logger.info(
+                    f"[TIMING] Entity '{key}' fetch started",
+                    extra={"entity": key, "thread_id": threading.current_thread().ident}
+                )
                 
-                if run_id:
-                    try:
-                        self._firestore_writer.write_log(run_id, "info", f"Fetching {key} records...")
-                    except Exception:
-                        pass
+                if async_buffer:
+                    buffer_log_start = time.time()
+                    async_buffer.log("info", f"Fetching {key} records...")
+                    buffer_log_duration = time.time() - buffer_log_start
+                    if buffer_log_duration > 0.01:
+                        logger.debug(
+                            f"[TIMING] Entity '{key}' async buffer log: {buffer_log_duration:.3f}s",
+                            extra={"entity": key, "buffer_log_duration": buffer_log_duration}
+                        )
                 
-                # Create progress callback that writes to Firestore logs
+                # Create progress callback that uses async buffer
+                callback_times = []
                 def log_progress(message: str, metadata: Optional[Dict[str, Any]] = None) -> None:
-                    if run_id:
-                        try:
-                            self._firestore_writer.write_log(run_id, "info", message, metadata)
-                        except Exception:
-                            pass
+                    callback_start = time.time()
+                    if async_buffer:
+                        async_buffer.log("info", message, metadata)
+                    callback_duration = time.time() - callback_start
+                    callback_times.append(callback_duration)
+                    if callback_duration > 0.1:  # Log slow callbacks
+                        logger.warning(
+                            f"[TIMING] Slow progress callback: {callback_duration:.3f}s",
+                            extra={"entity": key, "message": message, "callback_duration": callback_duration}
+                        )
                 
-                data = fetcher.fetch(progress_callback=log_progress if run_id else None)
-                records[key] = data
-                counts[key] = len(data)
+                fetch_start = time.time()
+                data = fetcher.fetch(progress_callback=log_progress if async_buffer else None)
+                fetch_duration = time.time() - fetch_start
                 
-                if run_id:
-                    try:
-                        self._firestore_writer.write_log(run_id, "info", f"Fetched {len(data)} {key} records")
-                    except Exception:
-                        pass
+                total_callback_time = sum(callback_times)
+                entity_total_time = time.time() - entity_start_time
+                
+                logger.info(
+                    f"[TIMING] Entity '{key}' completed: {entity_total_time:.3f}s total (fetch: {fetch_duration:.3f}s, callbacks: {total_callback_time:.3f}s, {len(callback_times)} callbacks)",
+                    extra={
+                        "entity": key,
+                        "entity_total_time": entity_total_time,
+                        "fetch_duration": fetch_duration,
+                        "total_callback_time": total_callback_time,
+                        "callback_count": len(callback_times),
+                        "record_count": len(data),
+                    }
+                )
+                
+                if async_buffer:
+                    async_buffer.log("info", f"Fetched {len(data)} {key} records")
+                
+                return (key, data, None)
             except Exception as exc:
-                run_id = None
-                if hasattr(self, '_current_run_id'):
-                    run_id = self._current_run_id
-                elif hasattr(logger, 'extra') and logger.extra:
-                    run_id = logger.extra.get('run_id')
+                entity_error_time = time.time() - entity_start_time
+                if async_buffer:
+                    async_buffer.log("error", f"Failed to fetch {key}: {str(exc)}")
+                logger.error(
+                    f"Failed to fetch {key} after {entity_error_time:.3f}s",
+                    extra={"entity": key, "error": str(exc), "duration": entity_error_time},
+                    exc_info=True
+                )
+                return (key, [], exc)
+        
+        # Execute parallel fetches
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            submit_start = time.time()
+            futures = {executor.submit(fetch_entity, key, fetcher): key for key, fetcher in fetchers.items()}
+            submit_duration = time.time() - submit_start
+            logger.info(
+                f"[TIMING] Submitted {len(futures)} fetch tasks in {submit_duration:.3f}s",
+                extra={"task_count": len(futures), "submit_duration": submit_duration}
+            )
+            
+            completion_times = {}
+            for future in as_completed(futures):
+                result_start = time.time()
+                key, data, error = future.result()
+                result_duration = time.time() - result_start
+                completion_times[key] = time.time() - parallel_fetch_start
                 
-                if run_id:
-                    try:
-                        self._firestore_writer.write_log(run_id, "error", f"Failed to fetch {key}: {str(exc)}")
-                    except Exception:
-                        pass
+                logger.info(
+                    f"[TIMING] Entity '{key}' result retrieved: {result_duration:.3f}s (completed at {completion_times[key]:.3f}s from start)",
+                    extra={"entity": key, "result_duration": result_duration, "completion_time": completion_times[key]}
+                )
                 
-                logger.error(f"Failed to fetch {key}", extra={"entity": key, "error": str(exc)}, exc_info=True)
-                raise FetchError(key, f"Failed to fetch {key}: {str(exc)}", "unknown") from exc
+                if error:
+                    errors[key] = error
+                else:
+                    records[key] = data
+                    counts[key] = len(data)
+        
+        parallel_fetch_duration = time.time() - parallel_fetch_start
+        logger.info(
+            f"[TIMING] Parallel fetch completed: {parallel_fetch_duration:.3f}s total for {len(fetchers)} entities",
+            extra={
+                "parallel_fetch_duration": parallel_fetch_duration,
+                "entity_count": len(fetchers),
+                "completion_times": completion_times,
+            }
+        )
+        
+        # Stop async buffer and flush remaining logs
+        buffer_stop_start = time.time()
+        if async_buffer:
+            async_buffer.stop()
+        buffer_stop_duration = time.time() - buffer_stop_start
+        if buffer_stop_duration > 0.1:
+            logger.info(
+                f"[TIMING] Async buffer stop/flush: {buffer_stop_duration:.3f}s",
+                extra={"buffer_stop_duration": buffer_stop_duration}
+            )
+        
+        # Raise error if any entity failed
+        if errors:
+            failed_entity = next(iter(errors.keys()))
+            error = errors[failed_entity]
+            raise FetchError(failed_entity, f"Failed to fetch {failed_entity}: {str(error)}", "unknown") from error
+        
+        total_records_fetched = sum(counts.values())
+        logger.info(
+            f"[TIMING] Record fetch summary: {total_records_fetched} total records from {len(records)} entities",
+            extra={
+                "total_records": total_records_fetched,
+                "entity_count": len(records),
+                "entity_counts": counts,
+            }
+        )
+        
         return records, counts
 
     def _filter_rules_by_selection(
@@ -956,11 +1401,95 @@ class IntegrityRunner:
         Returns:
             Filtered SchemaConfig with only selected rules that exist
         """
-        if not run_config or not run_config.get("rules"):
-            # No rule filtering requested, return original
+        # CRITICAL DEBUG: Use logger.warning so it definitely shows up
+        logger.warning("=" * 80)
+        logger.warning("FILTER METHOD CALLED")
+        logger.warning(f"run_config is None: {run_config is None}")
+        if run_config:
+            logger.warning(f"run_config keys: {list(run_config.keys())}")
+            logger.warning(f"run_config contents: {run_config}")
+            logger.warning(f"run_config.get('rules'): {run_config.get('rules')}")
+        logger.warning("=" * 80)
+
+        if not run_config:
+            # No run_config at all = use all rules (backwards compatibility)
+            logger.info(
+                "No run_config provided, using all loaded rules",
+                extra={"has_run_config": False}
+            )
             return schema_config
         
-        rules_selection = run_config["rules"]
+        rules_selection = run_config.get("rules")
+        if rules_selection is None:
+            # 'rules' key missing = use all rules (backwards compatibility)
+            logger.info(
+                "No 'rules' key in run_config, using all loaded rules",
+                extra={"has_run_config": True, "has_rules_key": False}
+            )
+            return schema_config
+        
+        # If rules_selection is {} (empty dict), continue to filtering logic
+        # which will correctly clear all rules for entities not in selection
+        logger.info(
+            "Rule filtering requested",
+            extra={
+                "has_run_config": True,
+                "has_rules_key": True,
+                "rules_selection_is_empty": rules_selection == {},
+                "rules_selection_keys": list(rules_selection.keys()) if rules_selection else []
+            }
+        )
+        
+        # Extract and log all selected rule IDs from run_config
+        selected_rules = {
+            "duplicates": {},
+            "relationships": {},
+            "required_fields": {},
+        }
+        
+        if "duplicates" in rules_selection:
+            selected_rules["duplicates"] = rules_selection.get("duplicates", {})
+        
+        if "relationships" in rules_selection:
+            selected_rules["relationships"] = rules_selection.get("relationships", {})
+        
+        if "required_fields" in rules_selection:
+            selected_rules["required_fields"] = rules_selection.get("required_fields", {})
+        
+        logger.info(
+            "Selected rules from run_config",
+            extra={
+                "selected_rules": selected_rules,
+                "has_duplicates": bool(selected_rules["duplicates"]),
+                "has_relationships": bool(selected_rules["relationships"]),
+                "has_required_fields": bool(selected_rules["required_fields"]),
+                "duplicates_entities": list(selected_rules["duplicates"].keys()) if selected_rules["duplicates"] else [],
+                "relationships_entities": list(selected_rules["relationships"].keys()) if selected_rules["relationships"] else [],
+                "required_fields_entities": list(selected_rules["required_fields"].keys()) if selected_rules["required_fields"] else [],
+            }
+        )
+        
+        # Log before filtering: count rules per category
+        total_duplicates = sum(
+            len(d.likely or []) + len(d.possible or [])
+            for d in schema_config.duplicates.values()
+        )
+        total_relationships = sum(
+            len(e.relationships) for e in schema_config.entities.values()
+        )
+        total_required_fields = sum(
+            len(e.missing_key_data) for e in schema_config.entities.values()
+        )
+        
+        logger.info(
+            "Rule filtering: before filtering",
+            extra={
+                "duplicates_count": total_duplicates,
+                "relationships_count": total_relationships,
+                "required_fields_count": total_required_fields,
+                "rules_selection": rules_selection,
+            }
+        )
         
         # Create a copy to avoid modifying the original
         from copy import deepcopy
@@ -985,6 +1514,25 @@ class IntegrityRunner:
                         continue
                         
                     dup_def = filtered_config.duplicates[entity]
+                    
+                    # Log before filtering
+                    before_likely = len(dup_def.likely or [])
+                    before_possible = len(dup_def.possible or [])
+                    all_existing_rule_ids = [
+                        rule.rule_id for rule in (dup_def.likely or []) + (dup_def.possible or [])
+                    ]
+                    
+                    logger.info(
+                        f"Filtering duplicate rules for {entity}",
+                        extra={
+                            "entity": entity,
+                            "selected_rule_ids": rule_ids,
+                            "likely_before": before_likely,
+                            "possible_before": before_possible,
+                            "existing_rule_ids": all_existing_rule_ids,
+                        }
+                    )
+                    
                     # Get all existing rule IDs for validation
                     existing_rule_ids = {
                         rule.rule_id for rule in (dup_def.likely or []) + (dup_def.possible or [])
@@ -996,23 +1544,54 @@ class IntegrityRunner:
                             missing_rules.append(f"duplicates.{entity}.{rule_id}")
                     
                     # Filter likely rules
-                    dup_def.likely = [
-                        rule for rule in (dup_def.likely or [])
-                        if rule.rule_id in rule_ids
-                    ]
+                    likely_filtered = []
+                    for rule in (dup_def.likely or []):
+                        if rule.rule_id in rule_ids:
+                            likely_filtered.append(rule)
+                        else:
+                            logger.debug(
+                                f"Filtering out likely rule: {rule.rule_id}",
+                                extra={"entity": entity, "selected_rule_ids": rule_ids}
+                            )
+                    dup_def.likely = likely_filtered
+                    
                     # Filter possible rules
-                    dup_def.possible = [
-                        rule for rule in (dup_def.possible or [])
-                        if rule.rule_id in rule_ids
+                    possible_filtered = []
+                    for rule in (dup_def.possible or []):
+                        if rule.rule_id in rule_ids:
+                            possible_filtered.append(rule)
+                        else:
+                            logger.debug(
+                                f"Filtering out possible rule: {rule.rule_id}",
+                                extra={"entity": entity, "selected_rule_ids": rule_ids}
+                            )
+                    dup_def.possible = possible_filtered
+                    
+                    # Log after filtering
+                    after_likely = len(dup_def.likely)
+                    after_possible = len(dup_def.possible)
+                    matched_rule_ids = [
+                        rule.rule_id for rule in (dup_def.likely or []) + (dup_def.possible or [])
                     ]
+                    
+                    logger.info(
+                        f"Filtered duplicate rules for {entity}",
+                        extra={
+                            "entity": entity,
+                            "selected_rule_ids": rule_ids,
+                            "likely_before": before_likely,
+                            "likely_after": after_likely,
+                            "possible_before": before_possible,
+                            "possible_after": after_possible,
+                            "filtered_out": (before_likely + before_possible) - (after_likely + after_possible),
+                            "matched_rule_ids": matched_rule_ids,
+                        }
+                    )
                 
-                # Clear duplicates for entities not in selection
-                for entity in list(filtered_config.duplicates.keys()):
-                    if entity not in selected_dup:
-                        del filtered_config.duplicates[entity]
-            else:
-                # User selected duplicates category but no specific rules - clear all
-                filtered_config.duplicates = {}
+            # Clear duplicates for entities not in selection
+            for entity in list(filtered_config.duplicates.keys()):
+                if entity not in selected_dup:
+                    del filtered_config.duplicates[entity]
         else:
             # Key absent = user didn't select any duplicates - clear all
             filtered_config.duplicates = {}
@@ -1047,14 +1626,10 @@ class IntegrityRunner:
                         for key, rule in entity_schema.relationships.items()
                         if key in rel_keys
                     }
-                
-                # Clear relationships for entities not in selection
-                for entity in filtered_config.entities:
-                    if entity not in selected_rel:
-                        filtered_config.entities[entity].relationships = {}
-            else:
-                # User selected relationships category but no specific rules - clear all
-                for entity in filtered_config.entities:
+            
+            # Clear relationships for entities not in selection
+            for entity in filtered_config.entities:
+                if entity not in selected_rel:
                     filtered_config.entities[entity].relationships = {}
         else:
             # Key absent = user didn't select any relationships - clear all
@@ -1077,34 +1652,126 @@ class IntegrityRunner:
                         continue
                         
                     entity_schema = filtered_config.entities[entity]
-                    # Get all existing rule identifiers
+                    
+                    # Log before filtering
+                    total_rules_before = len(entity_schema.missing_key_data or [])
+                    logger.info(
+                        f"Filtering required fields for {entity}",
+                        extra={
+                            "entity": entity,
+                            "selected_rule_ids": rule_ids,
+                            "selected_rule_count": len(rule_ids),
+                            "total_rules_before": total_rules_before,
+                        }
+                    )
+                    
+                    # Get all existing rule identifiers for validation
                     existing_identifiers = set()
                     for req in (entity_schema.missing_key_data or []):
-                        existing_identifiers.add(req.field)
                         existing_identifiers.add(f"required.{entity}.{req.field}")
                         if hasattr(req, "rule_id") and req.rule_id:
                             existing_identifiers.add(req.rule_id)
+                            # Also add field-based match for timestamp format: {entity}_{field}_{timestamp}
+                            if "_" in req.rule_id:
+                                parts = req.rule_id.split("_")
+                                if len(parts) >= 2:
+                                    # Match by {entity}_{field} prefix (ignore timestamp)
+                                    field_match = f"{entity}_{parts[1]}"
+                                    existing_identifiers.add(field_match)
                     
                     # Check for missing rule IDs
                     for rule_id in rule_ids:
                         if rule_id not in existing_identifiers:
                             missing_rules.append(f"required_fields.{entity}.{rule_id}")
+                            logger.warning(
+                                f"Selected rule ID not found in schema for {entity}",
+                                extra={
+                                    "entity": entity,
+                                    "rule_id": rule_id,
+                                    "existing_identifiers": list(existing_identifiers),
+                                }
+                            )
                     
-                    # Filter missing_key_data array
-                    entity_schema.missing_key_data = [
-                        req for req in (entity_schema.missing_key_data or [])
-                        if (req.field in rule_ids or
-                            f"required.{entity}.{req.field}" in rule_ids or
-                            getattr(req, "rule_id", None) in rule_ids)
-                    ]
-                
-                # Clear required fields for entities not in selection
-                for entity in filtered_config.entities:
-                    if entity not in selected_req:
-                        filtered_config.entities[entity].missing_key_data = []
-            else:
-                # User selected required_fields category but no specific rules - clear all
-                for entity in filtered_config.entities:
+                    # Filter missing_key_data array - match ONLY by rule_id or constructed format
+                    # Prioritize exact rule_id matching to prevent multiple rules matching
+                    filtered_rules = []
+                    for req in (entity_schema.missing_key_data or []):
+                        rule_id = getattr(req, "rule_id", None)
+                        matched = False
+                        matched_by = None
+                        
+                        # Primary: Match by exact rule_id (most reliable)
+                        if rule_id and rule_id in rule_ids:
+                            matched = True
+                            matched_by = "rule_id"
+                        # Secondary: Match by constructed format (for rules without rule_id)
+                        elif f"required.{entity}.{req.field}" in rule_ids:
+                            matched = True
+                            matched_by = "constructed_format"
+                        # Tertiary: Match by field ID only (for timestamp-based rule IDs)
+                        elif rule_id and "_" in rule_id:
+                            # Extract field from rule_id format: {entity}_{field}_{timestamp}
+                            parts = rule_id.split("_")
+                            if len(parts) >= 2:
+                                field_match = f"{entity}_{parts[1]}"
+                                # Check if any selected rule_id starts with this pattern
+                                for selected_id in rule_ids:
+                                    if selected_id.startswith(field_match + "_") or selected_id == field_match:
+                                        matched = True
+                                        matched_by = "field_prefix"
+                                        break
+                        
+                        if matched:
+                            filtered_rules.append(req)
+                            logger.debug(
+                                f"Rule matched for {entity}",
+                                extra={
+                                    "rule_id": rule_id,
+                                    "field": req.field,
+                                    "matched_by": matched_by,
+                                }
+                            )
+                    
+                    entity_schema.missing_key_data = filtered_rules
+                    
+                    # Log after filtering with detailed match information
+                    matched_rules_info = []
+                    for req in filtered_rules:
+                        rule_id = getattr(req, "rule_id", None)
+                        matched_by = None
+                        if rule_id and rule_id in rule_ids:
+                            matched_by = "rule_id"
+                        elif f"required.{entity}.{req.field}" in rule_ids:
+                            matched_by = "constructed_format"
+                        elif rule_id and "_" in rule_id:
+                            parts = rule_id.split("_")
+                            if len(parts) >= 2:
+                                field_match = f"{entity}_{parts[1]}"
+                                for selected_id in rule_ids:
+                                    if selected_id.startswith(field_match + "_") or selected_id == field_match:
+                                        matched_by = "field_prefix"
+                                        break
+                        matched_rules_info.append({
+                            "rule_id": rule_id,
+                            "field": req.field,
+                            "matched_by": matched_by or "unknown"
+                        })
+                    
+                    logger.info(
+                        f"Required fields filtered for {entity}",
+                        extra={
+                            "entity": entity,
+                            "matched_rules": matched_rules_info,
+                            "matched_rule_count": len(filtered_rules),
+                            "total_rules_before": total_rules_before,
+                            "total_rules_after": len(filtered_rules),
+                            "rules_filtered_out": total_rules_before - len(filtered_rules),
+                        }
+                    )
+            
+            # Clear required fields for entities not in selection
+            for entity in filtered_config.entities:
+                if entity not in selected_req:
                     filtered_config.entities[entity].missing_key_data = []
         else:
             # Key absent = user didn't select any required fields - clear all
@@ -1121,9 +1788,115 @@ class IntegrityRunner:
                 }
             )
         
+        # Log after filtering: extract ALL rule IDs that remain
+        filtered_duplicates = sum(
+            len(d.likely or []) + len(d.possible or [])
+            for d in filtered_config.duplicates.values()
+        )
+        filtered_relationships = sum(
+            len(e.relationships) for e in filtered_config.entities.values()
+        )
+        filtered_required_fields = sum(
+            len(e.missing_key_data) for e in filtered_config.entities.values()
+        )
+        
+        # Extract all rule IDs that passed filtering
+        filtered_rule_ids = {
+            "duplicates": {},
+            "relationships": {},
+            "required_fields": {},
+        }
+        
+        # Extract duplicate rule IDs
+        for entity, dup_def in filtered_config.duplicates.items():
+            likely_ids = [r.rule_id for r in (dup_def.likely or [])]
+            possible_ids = [r.rule_id for r in (dup_def.possible or [])]
+            filtered_rule_ids["duplicates"][entity] = {
+                "likely": likely_ids,
+                "possible": possible_ids,
+            }
+        
+        # Extract relationship rule IDs (keys)
+        for entity, entity_schema in filtered_config.entities.items():
+            if entity_schema.relationships:
+                filtered_rule_ids["relationships"][entity] = list(entity_schema.relationships.keys())
+        
+        # Extract required field rule IDs
+        for entity, entity_schema in filtered_config.entities.items():
+            if entity_schema.missing_key_data:
+                req_ids = [
+                    req.rule_id or f"required.{entity}.{req.field}"
+                    for req in entity_schema.missing_key_data
+                ]
+                filtered_rule_ids["required_fields"][entity] = req_ids
+        
+        logger.info(
+            "Rule filtering: after filtering",
+            extra={
+                "duplicates_count": filtered_duplicates,
+                "relationships_count": filtered_relationships,
+                "required_fields_count": filtered_required_fields,
+                "duplicates_filtered": total_duplicates - filtered_duplicates,
+                "relationships_filtered": total_relationships - filtered_relationships,
+                "required_fields_filtered": total_required_fields - filtered_required_fields,
+                "filtered_rule_ids": filtered_rule_ids,
+            }
+        )
+
+        # DETAILED LOGGING: Show filtered rules in human-readable format
+        logger.info("=" * 80)
+        logger.info("RULES LOADED - After Filtering")
+        logger.info("=" * 80)
+
+        # Log duplicate rules
+        if filtered_duplicates > 0:
+            logger.info(f"Duplicate Rules Loaded: {filtered_duplicates} total")
+            for entity, rule_dict in filtered_rule_ids["duplicates"].items():
+                likely = rule_dict.get("likely", [])
+                possible = rule_dict.get("possible", [])
+                if likely:
+                    logger.info(f"  - {entity} (likely): {', '.join(likely)}")
+                if possible:
+                    logger.info(f"  - {entity} (possible): {', '.join(possible)}")
+        else:
+            logger.info("Duplicate Rules Loaded: NONE")
+
+        # Log relationship rules
+        if filtered_relationships > 0:
+            logger.info(f"Relationship Rules Loaded: {filtered_relationships} total")
+            for entity, rule_ids in filtered_rule_ids["relationships"].items():
+                if rule_ids:
+                    logger.info(f"  - {entity}: {', '.join(rule_ids)}")
+        else:
+            logger.info("Relationship Rules Loaded: NONE")
+
+        # Log required field rules
+        if filtered_required_fields > 0:
+            logger.info(f"Required Field Rules Loaded: {filtered_required_fields} total")
+            for entity, rule_ids in filtered_rule_ids["required_fields"].items():
+                if rule_ids:
+                    logger.info(f"  - {entity}: {', '.join(rule_ids)}")
+        else:
+            logger.info("Required Field Rules Loaded: NONE")
+
+        logger.info("=" * 80)
+
+        # CRITICAL DEBUG: Print the ACTUAL missing_key_data arrays
+        print("=" * 80)
+        print("FILTER DEBUG: ACTUAL missing_key_data in filtered_config")
+        print("=" * 80)
+        for entity_name, entity_schema in filtered_config.entities.items():
+            if entity_schema.missing_key_data:
+                print(f"{entity_name} has {len(entity_schema.missing_key_data)} rules:")
+                for req in entity_schema.missing_key_data:
+                    print(f"  - {req.rule_id or req.field}")
+            else:
+                print(f"{entity_name} has NO required field rules")
+        print("=" * 80)
+
         # Note: attendance_rules is handled separately in attendance.run()
         # since it's not part of SchemaConfig
-        
+
         return filtered_config
     
     def _execute_checks(self, records: Dict[str, List[dict]]) -> List[IssuePayload]:
@@ -1135,10 +1908,64 @@ class IntegrityRunner:
                 self._run_config
             )
         
+        # Log rule counts being passed to checks
+        duplicates_count = sum(
+            len(d.likely or []) + len(d.possible or [])
+            for d in schema_config_to_use.duplicates.values()
+        )
+        relationships_count = sum(
+            len(e.relationships) for e in schema_config_to_use.entities.values()
+        )
+        required_fields_count = sum(
+            len(e.missing_key_data) for e in schema_config_to_use.entities.values()
+        )
+        
+        logger.info(
+            "Executing checks with filtered rules",
+            extra={
+                "duplicates_rules": duplicates_count,
+                "relationships_rules": relationships_count,
+                "required_fields_rules": required_fields_count,
+            }
+        )
+        
         results: List[IssuePayload] = []
-        results.extend(duplicates.run(records, schema_config_to_use))
-        results.extend(links.run(records, schema_config_to_use))
-        results.extend(required_fields.run(records, schema_config_to_use))
+        
+        # Execute duplicates check
+        logger.info("Executing duplicates check")
+        dup_results = duplicates.run(records, schema_config_to_use)
+        results.extend(dup_results)
+        logger.info(
+            "Duplicates check completed",
+            extra={
+                "category": "duplicates",
+                "issues_found": len(dup_results),
+            }
+        )
+        
+        # Execute links check
+        logger.info("Executing links check")
+        links_results = links.run(records, schema_config_to_use)
+        results.extend(links_results)
+        logger.info(
+            "Links check completed",
+            extra={
+                "category": "links",
+                "issues_found": len(links_results),
+            }
+        )
+        
+        # Execute required fields check
+        logger.info("Executing required fields check")
+        req_results = required_fields.run(records, schema_config_to_use)
+        results.extend(req_results)
+        logger.info(
+            "Required fields check completed",
+            extra={
+                "category": "required_fields",
+                "issues_found": len(req_results),
+            }
+        )
         
         # Handle attendance rules filtering
         attendance_rules_to_use = self._runtime_config.attendance_rules
@@ -1148,8 +1975,135 @@ class IntegrityRunner:
             # If attendance_rules is False in selection, skip attendance check
             if self._run_config["rules"]["attendance_rules"] is False:
                 attendance_rules_to_use = None
+                logger.info("Attendance rules disabled by run_config")
         
+        attendance_results = []
         if attendance_rules_to_use:
-            results.extend(attendance.run(records, attendance_rules_to_use))
+            logger.info("Executing attendance check")
+            attendance_results = attendance.run(records, attendance_rules_to_use)
+            results.extend(attendance_results)
+            logger.info(
+                "Attendance check completed",
+                extra={
+                    "category": "attendance",
+                    "issues_found": len(attendance_results),
+                }
+            )
+        else:
+            logger.info("Attendance check skipped (no rules configured)")
         
+        # Collect all executed rule IDs from filtered config for final summary
+        executed_rules = {
+            "duplicates": {},
+            "relationships": {},
+            "required_fields": {},
+        }
+        
+        # Extract duplicate rule IDs
+        for entity, dup_def in schema_config_to_use.duplicates.items():
+            likely_ids = [r.rule_id for r in (dup_def.likely or [])]
+            possible_ids = [r.rule_id for r in (dup_def.possible or [])]
+            executed_rules["duplicates"][entity] = {
+                "likely": likely_ids,
+                "possible": possible_ids,
+            }
+        
+        # Extract relationship rule IDs
+        for entity, entity_schema in schema_config_to_use.entities.items():
+            if entity_schema.relationships:
+                executed_rules["relationships"][entity] = list(entity_schema.relationships.keys())
+            if entity_schema.missing_key_data:
+                req_ids = [
+                    req.rule_id or f"required.{entity}.{req.field}"
+                    for req in entity_schema.missing_key_data
+                ]
+                executed_rules["required_fields"][entity] = req_ids
+        
+        # Get selected rules from run_config if available
+        selected_rules_summary = None
+        if hasattr(self, "_run_config") and self._run_config and self._run_config.get("rules"):
+            selected_rules_summary = {
+                "duplicates": self._run_config["rules"].get("duplicates", {}),
+                "relationships": self._run_config["rules"].get("relationships", {}),
+                "required_fields": self._run_config["rules"].get("required_fields", {}),
+            }
+        
+        # Log final summary with all selected and executed rules
+        logger.info(
+            "Final execution summary: All selected and executed rules",
+            extra={
+                "total_issues": len(results),
+                "duplicates_issues": len(dup_results),
+                "links_issues": len(links_results),
+                "required_fields_issues": len(req_results),
+                "attendance_issues": len(attendance_results),
+                "selected_rules": selected_rules_summary,
+                "executed_rules": executed_rules,
+                "executed_duplicates_count": sum(
+                    len(d.get("likely", [])) + len(d.get("possible", []))
+                    for d in executed_rules["duplicates"].values()
+                ),
+                "executed_relationships_count": sum(
+                    len(r) for r in executed_rules["relationships"].values()
+                ),
+                "executed_required_fields_count": sum(
+                    len(r) for r in executed_rules["required_fields"].values()
+                ),
+            }
+        )
+
+        # DETAILED LOGGING: Human-readable final summary
+        logger.info("=" * 80)
+        logger.info("SCAN COMPLETED - Final Rules Execution Summary")
+        logger.info("=" * 80)
+
+        total_executed = (
+            sum(len(d.get("likely", [])) + len(d.get("possible", []))
+                for d in executed_rules["duplicates"].values()) +
+            sum(len(r) for r in executed_rules["relationships"].values()) +
+            sum(len(r) for r in executed_rules["required_fields"].values())
+        )
+        if attendance_results:
+            total_executed += 1  # Count attendance as 1 rule if it ran
+
+        logger.info(f"Total Rules Executed: {total_executed}")
+        logger.info(f"Total Issues Found: {len(results)}")
+        logger.info("")
+
+        # Show executed rules by category with issue counts
+        if executed_rules["duplicates"]:
+            logger.info(f"Duplicate Rules Executed: {sum(len(d.get('likely', [])) + len(d.get('possible', [])) for d in executed_rules['duplicates'].values())} rules, {len(dup_results)} issues")
+            for entity, rule_dict in executed_rules["duplicates"].items():
+                likely = rule_dict.get("likely", [])
+                possible = rule_dict.get("possible", [])
+                if likely:
+                    logger.info(f"  - {entity} (likely): {', '.join(likely)}")
+                if possible:
+                    logger.info(f"  - {entity} (possible): {', '.join(possible)}")
+        else:
+            logger.info(f"Duplicate Rules Executed: 0 rules, {len(dup_results)} issues")
+
+        if executed_rules["relationships"]:
+            logger.info(f"Relationship Rules Executed: {sum(len(r) for r in executed_rules['relationships'].values())} rules, {len(links_results)} issues")
+            for entity, rule_ids in executed_rules["relationships"].items():
+                if rule_ids:
+                    logger.info(f"  - {entity}: {', '.join(rule_ids)}")
+        else:
+            logger.info(f"Relationship Rules Executed: 0 rules, {len(links_results)} issues")
+
+        if executed_rules["required_fields"]:
+            logger.info(f"Required Field Rules Executed: {sum(len(r) for r in executed_rules['required_fields'].values())} rules, {len(req_results)} issues")
+            for entity, rule_ids in executed_rules["required_fields"].items():
+                if rule_ids:
+                    logger.info(f"  - {entity}: {', '.join(rule_ids)}")
+        else:
+            logger.info(f"Required Field Rules Executed: 0 rules, {len(req_results)} issues")
+
+        if attendance_results:
+            logger.info(f"Attendance Rules Executed: 1 rule set, {len(attendance_results)} issues")
+        else:
+            logger.info(f"Attendance Rules Executed: 0 rules, 0 issues")
+
+        logger.info("=" * 80)
+
         return results

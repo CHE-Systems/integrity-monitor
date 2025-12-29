@@ -30,7 +30,7 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 # Now we can import backend modules
-from backend.config.schema_loader import load_schema_config
+from backend.config.schema_loader import load_schema_config, load_schema_from_yaml
 from backend.config.config_loader import load_runtime_config
 from backend.config.settings import FirestoreConfig
 
@@ -56,7 +56,7 @@ class RulesMigrator:
 
         # Load configs from YAML (without Firestore overrides)
         print("Loading YAML configurations...")
-        self.schema_config = load_schema_config(firestore_client=None)
+        self.schema_config = load_schema_from_yaml()
         self.runtime_config = load_runtime_config(firestore_client=None)
 
         # Statistics
@@ -94,6 +94,12 @@ class RulesMigrator:
 
         if self.dry_run:
             print("🔍 DRY RUN MODE - No changes will be made\n")
+
+        # Clean up old format rules first
+        self._cleanup_old_format_rules()
+        
+        # Clean up rules that are no longer in YAML
+        self._cleanup_removed_rules()
 
         # Sync each category
         self._sync_duplicates()
@@ -446,6 +452,164 @@ class RulesMigrator:
     # REQUIRED FIELDS MIGRATION
     # ========================================================================
 
+    def _cleanup_old_format_rules(self) -> None:
+        """Delete required field rules that don't match the new format pattern.
+        
+        New format: required_field.{entity}.{field}
+        Old formats: {entity}_{field}, required.{entity}.{field}, etc.
+        """
+        print("\n🧹 Cleaning up old format required field rules...")
+        
+        # Use dynamic entity list from schema instead of hardcoded
+        entities = list(self.schema_config.entities.keys()) if self.schema_config.entities else []
+        deleted_count = 0
+        
+        for entity in entities:
+            collection_path = f"rules/required_fields/{entity}"
+            try:
+                docs = self.db.collection(collection_path).stream()
+                for doc in docs:
+                    rule_id = doc.id
+                    rule_data = doc.to_dict()
+                    
+                    # Skip if not a YAML rule (preserve user rules)
+                    if rule_data.get("source") != "yaml":
+                        continue
+                    
+                    # Check if rule_id matches new format: required_field.{entity}.{field}
+                    if not rule_id.startswith(f"required_field.{entity}."):
+                        # This is an old format rule, delete it
+                        if self.dry_run:
+                            print(f"      [DRY RUN] Would delete old format rule: {entity}/{rule_id}")
+                        else:
+                            self.db.collection(collection_path).document(rule_id).delete()
+                            print(f"      🗑️  Deleted old format rule: {entity}/{rule_id}")
+                        deleted_count += 1
+                        self.stats["required_fields"]["deleted"] += 1
+            except Exception as exc:
+                print(f"      ⚠️  Error cleaning up {entity}: {exc}")
+        
+        if deleted_count == 0:
+            print("      ✅ No old format rules found")
+        else:
+            print(f"      ✅ Cleaned up {deleted_count} old format rule(s)")
+
+    def _cleanup_removed_rules(self) -> None:
+        """Delete YAML-sourced rules that are no longer in the YAML file.
+        
+        This ensures that when rules are removed from schema.yaml, they are also
+        deleted from Firestore during sync operations.
+        """
+        print("\n🧹 Cleaning up rules removed from YAML...")
+        
+        if not self.schema_config.entities:
+            print("      ⚠️  No entities in schema, skipping cleanup")
+            return
+        
+        deleted_count = 0
+        
+        # Build expected rule IDs from YAML
+        expected_required_field_rules = set()
+        expected_duplicate_rules = set()
+        
+        # Collect expected required field rule IDs
+        for entity_name, entity_def in self.schema_config.entities.items():
+            if entity_def.missing_key_data:
+                for field_req in entity_def.missing_key_data:
+                    if hasattr(field_req, 'rule_id') and field_req.rule_id:
+                        expected_required_field_rules.add((entity_name, field_req.rule_id))
+                    else:
+                        # Generate expected rule_id
+                        field_name = field_req.field.replace("/", "_").replace(" ", "_").lower()
+                        rule_id = f"required_field.{entity_name}.{field_name}"
+                        expected_required_field_rules.add((entity_name, rule_id))
+        
+        # Collect expected duplicate rule IDs
+        if self.schema_config.duplicates:
+            for entity_name, dup_def in self.schema_config.duplicates.items():
+                for rule in dup_def.likely:
+                    if rule.rule_id:
+                        expected_duplicate_rules.add((entity_name, "likely", rule.rule_id))
+                for rule in dup_def.possible:
+                    if rule.rule_id:
+                        expected_duplicate_rules.add((entity_name, "possible", rule.rule_id))
+        
+        # Clean up required field rules
+        for entity_name in self.schema_config.entities.keys():
+            collection_path = f"rules/required_fields/{entity_name}"
+            try:
+                docs = self.db.collection(collection_path).stream()
+                for doc in docs:
+                    rule_id = doc.id
+                    rule_data = doc.to_dict()
+                    
+                    # Skip if not a YAML rule (preserve user rules)
+                    if rule_data.get("source") != "yaml":
+                        continue
+                    
+                    # Check if this rule is expected
+                    if (entity_name, rule_id) not in expected_required_field_rules:
+                        # This rule was removed from YAML, delete it
+                        if self.dry_run:
+                            print(f"      [DRY RUN] Would delete removed rule: {entity_name}/{rule_id}")
+                        else:
+                            self.db.collection(collection_path).document(rule_id).delete()
+                            print(f"      🗑️  Deleted removed rule: {entity_name}/{rule_id}")
+                        deleted_count += 1
+                        self.stats["required_fields"]["deleted"] += 1
+            except Exception as exc:
+                print(f"      ⚠️  Error cleaning up required fields for {entity_name}: {exc}")
+        
+        # Clean up duplicate rules
+        if self.schema_config.duplicates:
+            for entity_name in self.schema_config.duplicates.keys():
+                collection_path = f"rules/duplicates/{entity_name}"
+                try:
+                    # Check likely duplicates
+                    likely_path = f"{collection_path}/likely"
+                    likely_docs = self.db.collection(likely_path).stream()
+                    for doc in likely_docs:
+                        rule_id = doc.id
+                        rule_data = doc.to_dict()
+                        
+                        if rule_data.get("source") != "yaml":
+                            continue
+                        
+                        if (entity_name, "likely", rule_id) not in expected_duplicate_rules:
+                            if self.dry_run:
+                                print(f"      [DRY RUN] Would delete removed duplicate rule: {entity_name}/likely/{rule_id}")
+                            else:
+                                self.db.collection(likely_path).document(rule_id).delete()
+                                print(f"      🗑️  Deleted removed duplicate rule: {entity_name}/likely/{rule_id}")
+                            deleted_count += 1
+                            self.stats["duplicates"]["deleted"] += 1
+                    
+                    # Check possible duplicates
+                    possible_path = f"{collection_path}/possible"
+                    possible_docs = self.db.collection(possible_path).stream()
+                    for doc in possible_docs:
+                        rule_id = doc.id
+                        rule_data = doc.to_dict()
+                        
+                        if rule_data.get("source") != "yaml":
+                            continue
+                        
+                        if (entity_name, "possible", rule_id) not in expected_duplicate_rules:
+                            if self.dry_run:
+                                print(f"      [DRY RUN] Would delete removed duplicate rule: {entity_name}/possible/{rule_id}")
+                            else:
+                                self.db.collection(possible_path).document(rule_id).delete()
+                                print(f"      🗑️  Deleted removed duplicate rule: {entity_name}/possible/{rule_id}")
+                            deleted_count += 1
+                            self.stats["duplicates"]["deleted"] += 1
+                except Exception as exc:
+                    print(f"      ⚠️  Error cleaning up duplicates for {entity_name}: {exc}")
+        
+        if deleted_count == 0:
+            print("      ✅ No removed rules found")
+        else:
+            print(f"      ✅ Cleaned up {deleted_count} removed rule(s)")
+
     def _migrate_required_fields(self) -> None:
         """Migrate required field rules from YAML to Firestore."""
         print("\n📝 Migrating Required Field Rules...")
@@ -461,7 +625,13 @@ class RulesMigrator:
             print(f"\n   Entity: {entity_name}")
 
             for field_req in entity_def.missing_key_data:
-                rule_id = f"{entity_name}_{field_req.field}"
+                # Use rule_id from YAML if provided, otherwise generate in new format
+                if hasattr(field_req, 'rule_id') and field_req.rule_id:
+                    rule_id = field_req.rule_id
+                else:
+                    # Generate in new format: required_field.{entity}.{field_snake_case}
+                    field_name = field_req.field.replace("/", "_").replace(" ", "_").lower()
+                    rule_id = f"required_field.{entity_name}.{field_name}"
                 self._create_required_field_rule(entity_name, rule_id, field_req)
 
     def _create_required_field_rule(
@@ -523,7 +693,13 @@ class RulesMigrator:
             yaml_rule_ids = set()
 
             for field_req in entity_def.missing_key_data:
-                rule_id = f"{entity_name}_{field_req.field}"
+                # Use rule_id from YAML if provided, otherwise generate in new format
+                if hasattr(field_req, 'rule_id') and field_req.rule_id:
+                    rule_id = field_req.rule_id
+                else:
+                    # Generate in new format: required_field.{entity}.{field_snake_case}
+                    field_name = field_req.field.replace("/", "_").replace(" ", "_").lower()
+                    rule_id = f"required_field.{entity_name}.{field_name}"
                 yaml_rule_ids.add(rule_id)
 
                 if rule_id in existing_rules:
@@ -548,6 +724,7 @@ class RulesMigrator:
         collection_path = f"rules/required_fields/{entity}"
 
         update_data = {
+            "rule_id": rule_id,
             "field": field_req.field,
             "message": field_req.message or "",
             "severity": field_req.severity or "warning",

@@ -106,11 +106,31 @@ def _resolve_env_placeholders(value: Any, attempt_discovery: bool = True) -> Any
 
 
 def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
-    """Deep merge override dict into base dict."""
+    """Deep merge override dict into base dict.
+    
+    Filters out table_id from airtable overrides since RuntimeConfig expects
+    base_env and table_env, not table_id. The table_id is metadata only.
+    """
     result = base.copy()
     for key, value in override.items():
         if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-            result[key] = _deep_merge(result[key], value)
+            # Special handling for airtable config: filter out table_id
+            if key == "airtable":
+                filtered_value = {}
+                for entity, entity_config in value.items():
+                    if isinstance(entity_config, dict):
+                        # Copy entity config but exclude table_id
+                        filtered_entity_config = {
+                            k: v for k, v in entity_config.items() if k != "table_id"
+                        }
+                        if filtered_entity_config:  # Only include if there are other fields
+                            filtered_value[entity] = filtered_entity_config
+                    else:
+                        filtered_value[entity] = entity_config
+                if filtered_value:
+                    result[key] = _deep_merge(result[key], filtered_value)
+            else:
+                result[key] = _deep_merge(result[key], value)
         else:
             result[key] = value
     return result

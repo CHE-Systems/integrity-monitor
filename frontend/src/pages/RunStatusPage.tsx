@@ -147,7 +147,7 @@ export function RunStatusPage() {
     fetchScheduleInfo();
   }, [runId, runStatus?.trigger]);
 
-  // Fetch unique rules used in this run (real-time updates during active runs)
+  // Display selected rules from run_config (preferred) or infer from issues (fallback)
   useEffect(() => {
     if (!runId) {
       setRulesUsed([]);
@@ -156,124 +156,213 @@ export function RunStatusPage() {
     }
 
     setLoadingRules(true);
-    const issuesRef = collection(db, "integrity_issues");
-    const q = query(
-      issuesRef,
-      where("run_id", "==", runId),
-      limit(1000) // Get enough issues to find all unique rules
-    );
 
-    const unsubscribe = onSnapshot(
-      q,
-      (snapshot) => {
-        const ruleMap = new Map<
-          string,
-          {
-            rule_id: string;
-            category: string;
-            entity?: string;
-            ruleId: string;
-            displayName: string;
-          }
-        >();
+    // Helper to parse rule_id for navigation
+    const parseRuleId = (ruleId: string) => {
+      let category = "";
+      let entity: string | undefined = undefined;
+      let ruleIdForNav = ruleId;
 
-        snapshot.forEach((doc) => {
-          const issue = doc.data();
-          const ruleId = issue.rule_id;
-          if (!ruleId || ruleMap.has(ruleId)) return;
+      // Entity pluralization mapping
+      const entityPluralMap: Record<string, string> = {
+        student: "students",
+        students: "students",
+        parent: "parents",
+        parents: "parents",
+        contractor: "contractors",
+        contractors: "contractors",
+        class: "classes",
+        classes: "classes",
+        attendance: "attendance",
+        truth: "truth",
+        payment: "payments",
+        payments: "payments",
+        data_issue: "data_issues",
+        data_issues: "data_issues",
+      };
 
-          // Parse rule_id to determine category, entity, and ruleId for navigation
-          let category = "";
-          let entity: string | undefined = undefined;
-          let ruleIdForNav = ruleId;
+      if (ruleId.startsWith("dup.")) {
+        category = "duplicates";
+        const parts = ruleId.split(".");
+        if (parts.length >= 3) {
+          const entitySingular = parts[1];
+          entity = entityPluralMap[entitySingular] || entitySingular;
+          ruleIdForNav = parts[parts.length - 1];
+        }
+      } else if (ruleId.startsWith("link.")) {
+        category = "relationships";
+        const parts = ruleId.split(".");
+        if (parts.length >= 2) {
+          const entitySingular = parts[1];
+          entity = entityPluralMap[entitySingular] || entitySingular;
+          ruleIdForNav = parts.slice(2).join(".") || parts[1];
+        }
+      } else if (ruleId.startsWith("required.")) {
+        category = "required_fields";
+        const parts = ruleId.split(".");
+        if (parts.length >= 3) {
+          const entitySingular = parts[1];
+          entity = entityPluralMap[entitySingular] || entitySingular;
+          const field = parts[2];
+          ruleIdForNav = field;
+        }
+      } else if (
+        ruleId.startsWith("attendance.") ||
+        ruleId.includes("absence") ||
+        ruleId.includes("tardy")
+      ) {
+        category = "attendance_rules";
+        const parts = ruleId.split(".");
+        if (parts.length >= 2) {
+          ruleIdForNav = parts[1] || ruleId.replace("attendance.", "");
+        } else {
+          ruleIdForNav = ruleId.replace("attendance.", "");
+        }
+      }
 
-          // Entity pluralization mapping
-          const entityPluralMap: Record<string, string> = {
-            student: "students",
-            students: "students",
-            parent: "parents",
-            parents: "parents",
-            contractor: "contractors",
-            contractors: "contractors",
-            class: "classes",
-            classes: "classes",
-            attendance: "attendance",
-            truth: "truth",
-            payment: "payments",
-            payments: "payments",
-            data_issue: "data_issues",
-            data_issues: "data_issues",
-          };
+      return { category, entity, ruleIdForNav };
+    };
 
-          if (ruleId.startsWith("dup.")) {
-            category = "duplicates";
-            const parts = ruleId.split(".");
-            if (parts.length >= 3) {
-              const entitySingular = parts[1];
-              entity = entityPluralMap[entitySingular] || entitySingular;
-              // Extract just the field name (last part) for duplicates
-              ruleIdForNav = parts[parts.length - 1];
-            }
-          } else if (ruleId.startsWith("link.")) {
-            category = "relationships";
-            const parts = ruleId.split(".");
-            if (parts.length >= 2) {
-              const entitySingular = parts[1];
-              entity = entityPluralMap[entitySingular] || entitySingular;
-              // For relationships, use the relationship key (everything after entity)
-              ruleIdForNav = parts.slice(2).join(".") || parts[1];
-            }
-          } else if (ruleId.startsWith("required.")) {
-            category = "required_fields";
-            const parts = ruleId.split(".");
-            if (parts.length >= 3) {
-              const entitySingular = parts[1];
-              entity = entityPluralMap[entitySingular] || entitySingular;
-              const field = parts[2];
-              ruleIdForNav = field; // Just the field name for required_fields
-            }
-          } else if (
-            ruleId.startsWith("attendance.") ||
-            ruleId.includes("absence") ||
-            ruleId.includes("tardy")
-          ) {
-            category = "attendance_rules";
-            // Extract metric name from rule_id
-            const parts = ruleId.split(".");
-            if (parts.length >= 2) {
-              ruleIdForNav = parts[1] || ruleId.replace("attendance.", "");
-            } else {
-              // Try to extract from rule_id like "absence_rate_30d" or "consecutive_absences"
-              ruleIdForNav = ruleId.replace("attendance.", "");
-            }
-          }
+    // Check if we have run_config with selected rules
+    if (runStatus?.run_config?.rules) {
+      const ruleMap = new Map<
+        string,
+        {
+          rule_id: string;
+          category: string;
+          entity?: string;
+          ruleId: string;
+          displayName: string;
+        }
+      >();
 
-          if (category) {
+      const { rules } = runStatus.run_config;
+
+      // Process duplicates
+      if (rules.duplicates) {
+        Object.entries(rules.duplicates).forEach(([entity, ruleIds]) => {
+          ruleIds.forEach((ruleId) => {
+            const parsed = parseRuleId(ruleId);
             ruleMap.set(ruleId, {
               rule_id: ruleId,
-              category,
+              category: "duplicates",
               entity,
-              ruleId: ruleIdForNav,
+              ruleId: parsed.ruleIdForNav,
               displayName: formatRuleId(ruleId),
             });
-          }
+          });
         });
-
-        setRulesUsed(
-          Array.from(ruleMap.values()).sort((a, b) =>
-            a.displayName.localeCompare(b.displayName)
-          )
-        );
-        setLoadingRules(false);
-      },
-      (error) => {
-        console.error("Failed to fetch rules:", error);
-        setLoadingRules(false);
       }
-    );
 
-    return () => unsubscribe();
-  }, [runId]);
+      // Process relationships
+      if (rules.relationships) {
+        Object.entries(rules.relationships).forEach(([entity, relKeys]) => {
+          relKeys.forEach((relKey) => {
+            const ruleId = `link.${entity}.${relKey}`;
+            const parsed = parseRuleId(ruleId);
+            ruleMap.set(ruleId, {
+              rule_id: ruleId,
+              category: "relationships",
+              entity,
+              ruleId: parsed.ruleIdForNav,
+              displayName: formatRuleId(ruleId),
+            });
+          });
+        });
+      }
+
+      // Process required fields
+      if (rules.required_fields) {
+        Object.entries(rules.required_fields).forEach(([entity, fieldIds]) => {
+          fieldIds.forEach((fieldId) => {
+            // Handle both formats: "field_name" and "required.entity.field_name"
+            const ruleId = fieldId.startsWith("required.") ? fieldId : `required.${entity}.${fieldId}`;
+            const parsed = parseRuleId(ruleId);
+            ruleMap.set(ruleId, {
+              rule_id: ruleId,
+              category: "required_fields",
+              entity,
+              ruleId: parsed.ruleIdForNav,
+              displayName: formatRuleId(ruleId),
+            });
+          });
+        });
+      }
+
+      // Process attendance rules
+      if (rules.attendance_rules === true) {
+        const ruleId = "attendance.general";
+        ruleMap.set(ruleId, {
+          rule_id: ruleId,
+          category: "attendance_rules",
+          entity: undefined,
+          ruleId: "general",
+          displayName: "Attendance Rules",
+        });
+      }
+
+      setRulesUsed(
+        Array.from(ruleMap.values()).sort((a, b) =>
+          a.displayName.localeCompare(b.displayName)
+        )
+      );
+      setLoadingRules(false);
+    } else {
+      // Fallback: Infer rules from issues (for old runs without run_config)
+      const issuesRef = collection(db, "integrity_issues");
+      const q = query(
+        issuesRef,
+        where("run_id", "==", runId),
+        limit(1000)
+      );
+
+      const unsubscribe = onSnapshot(
+        q,
+        (snapshot) => {
+          const ruleMap = new Map<
+            string,
+            {
+              rule_id: string;
+              category: string;
+              entity?: string;
+              ruleId: string;
+              displayName: string;
+            }
+          >();
+
+          snapshot.forEach((doc) => {
+            const issue = doc.data();
+            const ruleId = issue.rule_id;
+            if (!ruleId || ruleMap.has(ruleId)) return;
+
+            const parsed = parseRuleId(ruleId);
+            if (parsed.category) {
+              ruleMap.set(ruleId, {
+                rule_id: ruleId,
+                category: parsed.category,
+                entity: parsed.entity,
+                ruleId: parsed.ruleIdForNav,
+                displayName: formatRuleId(ruleId),
+              });
+            }
+          });
+
+          setRulesUsed(
+            Array.from(ruleMap.values()).sort((a, b) =>
+              a.displayName.localeCompare(b.displayName)
+            )
+          );
+          setLoadingRules(false);
+        },
+        (error) => {
+          console.error("Failed to fetch rules:", error);
+          setLoadingRules(false);
+        }
+      );
+
+      return () => unsubscribe();
+    }
+  }, [runId, runStatus?.run_config]);
 
   if (loading) {
     return (
@@ -801,7 +890,12 @@ export function RunStatusPage() {
         {/* Rules Used */}
         <div className="mt-6 pt-6 border-t border-[var(--border)]">
           <div className="text-sm font-medium text-[var(--text-main)] mb-3">
-            Rules Used in This Scan
+            Rules Selected for This Scan
+            {runStatus?.run_config?.rules && (
+              <span className="ml-2 text-xs font-normal text-[var(--text-muted)]">
+                ({rulesUsed.length} {rulesUsed.length === 1 ? 'rule' : 'rules'} selected)
+              </span>
+            )}
           </div>
           {loadingRules ? (
             <div className="text-xs text-[var(--text-muted)]">

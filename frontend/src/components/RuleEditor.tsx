@@ -1,4 +1,6 @@
 import { useState, useEffect } from "react";
+import { useAuth } from "../hooks/useAuth";
+import { API_BASE } from "../config/api";
 
 interface RuleEditorProps {
   isOpen: boolean;
@@ -39,6 +41,7 @@ export function RuleEditor({
   mode,
   currentEntity,
 }: RuleEditorProps) {
+  const { getToken } = useAuth();
   const [ruleData, setRuleData] = useState<Record<string, any>>(
     initialRule || {}
   );
@@ -275,58 +278,169 @@ export function RuleEditor({
     </>
   );
 
-  const renderRequiredFieldFields = () => (
-    <>
-      <div>
-        <label className="block text-sm font-medium text-[var(--text-main)] mb-2">
-          Field Name *
-        </label>
-        <input
-          type="text"
-          value={ruleData.field || ""}
-          onChange={(e) => updateField("field", e.target.value)}
-          placeholder="e.g., email, phone, emergency_contact"
-          className={`w-full p-2 border rounded-lg ${
-            errors.field ? "border-red-500" : "border-[var(--border)]"
-          }`}
-        />
-        {errors.field && (
-          <p className="text-red-500 text-xs mt-1">{errors.field}</p>
-        )}
-      </div>
-      <div>
-        <label className="block text-sm font-medium text-[var(--text-main)] mb-2">
-          Message *
-        </label>
-        <textarea
-          value={ruleData.message || ""}
-          onChange={(e) => updateField("message", e.target.value)}
-          placeholder="Error message when field is missing"
-          className={`w-full p-2 border rounded-lg ${
-            errors.message ? "border-red-500" : "border-[var(--border)]"
-          }`}
-          rows={2}
-        />
-        {errors.message && (
-          <p className="text-red-500 text-xs mt-1">{errors.message}</p>
-        )}
-      </div>
-      <div>
-        <label className="block text-sm font-medium text-[var(--text-main)] mb-2">
-          Severity
-        </label>
-        <select
-          value={ruleData.severity || "warning"}
-          onChange={(e) => updateField("severity", e.target.value)}
-          className="w-full p-2 border border-[var(--border)] rounded-lg"
-        >
-          <option value="info">Info</option>
-          <option value="warning">Warning</option>
-          <option value="critical">Critical</option>
-        </select>
-      </div>
-    </>
-  );
+  const renderRequiredFieldFields = () => {
+    const [fieldSearchTerm, setFieldSearchTerm] = useState("");
+    const [fieldOptions, setFieldOptions] = useState<Array<{id: string; name: string}>>([]);
+    const [fieldLookupLoading, setFieldLookupLoading] = useState(false);
+
+    // Lookup fields when search term changes
+    useEffect(() => {
+      if (!selectedEntity || !fieldSearchTerm || fieldSearchTerm.length < 2) {
+        setFieldOptions([]);
+        return;
+      }
+
+      const lookupFields = async () => {
+        setFieldLookupLoading(true);
+        try {
+          const token = await getToken();
+          if (!token) {
+            console.error("Not authenticated");
+            return;
+          }
+          const response = await fetch(
+            `${API_BASE}/airtable/schema/fields/${selectedEntity}?search=${encodeURIComponent(fieldSearchTerm)}`,
+            {
+              headers: {
+                Authorization: `Bearer ${token}`,
+              },
+            }
+          );
+          if (response.ok) {
+            const data = await response.json();
+            setFieldOptions(data.fields || []);
+          }
+        } catch (error) {
+          console.error("Failed to lookup fields:", error);
+        } finally {
+          setFieldLookupLoading(false);
+        }
+      };
+
+      const timeoutId = setTimeout(lookupFields, 300); // Debounce
+      return () => clearTimeout(timeoutId);
+    }, [fieldSearchTerm, selectedEntity]);
+
+    const handleFieldSelect = (fieldId: string, fieldName: string) => {
+      updateField("field", fieldName);
+      updateField("field_id", fieldId);
+      // Auto-populate field_name for rule label, but allow editing
+      if (!ruleData.field_name) {
+        updateField("field_name", fieldName);
+      }
+      setFieldSearchTerm("");
+      setFieldOptions([]);
+    };
+
+    return (
+      <>
+        <div>
+          <label className="block text-sm font-medium text-[var(--text-main)] mb-2">
+            Field Name *
+          </label>
+          <div className="relative">
+            <input
+              type="text"
+              value={ruleData.field || ""}
+              onChange={(e) => {
+                updateField("field", e.target.value);
+                setFieldSearchTerm(e.target.value);
+              }}
+              placeholder="e.g., email, phone, emergency_contact"
+              className={`w-full p-2 border rounded-lg ${
+                errors.field ? "border-red-500" : "border-[var(--border)]"
+              }`}
+            />
+            {fieldOptions.length > 0 && (
+              <div className="absolute z-10 w-full mt-1 bg-white border border-[var(--border)] rounded-lg shadow-lg max-h-60 overflow-y-auto">
+                {fieldOptions.map((field) => (
+                  <button
+                    key={field.id}
+                    type="button"
+                    onClick={() => handleFieldSelect(field.id, field.name)}
+                    className="w-full text-left px-4 py-2 hover:bg-gray-100 border-b border-[var(--border)] last:border-b-0"
+                  >
+                    <div className="font-medium">{field.name}</div>
+                    <div className="text-xs text-gray-500">{field.id}</div>
+                  </button>
+                ))}
+              </div>
+            )}
+            {fieldLookupLoading && (
+              <div className="absolute right-2 top-2 text-gray-400 text-sm">Searching...</div>
+            )}
+          </div>
+          {errors.field && (
+            <p className="text-red-500 text-xs mt-1">{errors.field}</p>
+          )}
+          <p className="text-xs text-[var(--text-muted)] mt-1">
+            Start typing to search for fields. Select a field to auto-fill the Field ID.
+          </p>
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-[var(--text-main)] mb-2">
+            Field ID (optional, recommended)
+          </label>
+          <input
+            type="text"
+            value={ruleData.field_id || ""}
+            onChange={(e) => updateField("field_id", e.target.value)}
+            placeholder="e.g., fldUXiLJmTxJ9aeRp"
+            className="w-full p-2 border border-[var(--border)] rounded-lg font-mono text-sm"
+          />
+          <p className="text-xs text-[var(--text-muted)] mt-1">
+            Airtable field ID (starts with "fld"). More reliable than field name. Auto-filled when selecting a field above.
+          </p>
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-[var(--text-main)] mb-2">
+            Rule Label Name (for display)
+          </label>
+          <input
+            type="text"
+            value={ruleData.field_name || ruleData.field || ""}
+            onChange={(e) => updateField("field_name", e.target.value)}
+            placeholder="e.g., Background Check, Certification, etc."
+            className="w-full p-2 border border-[var(--border)] rounded-lg"
+          />
+          <p className="text-xs text-[var(--text-muted)] mt-1">
+            Customizable name for the rule label. This will appear in the rule list. Auto-filled from field name when selecting a field.
+          </p>
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-[var(--text-main)] mb-2">
+            Message *
+          </label>
+          <textarea
+            value={ruleData.message || ""}
+            onChange={(e) => updateField("message", e.target.value)}
+            placeholder="Error message when field is missing"
+            className={`w-full p-2 border rounded-lg ${
+              errors.message ? "border-red-500" : "border-[var(--border)]"
+            }`}
+            rows={2}
+          />
+          {errors.message && (
+            <p className="text-red-500 text-xs mt-1">{errors.message}</p>
+          )}
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-[var(--text-main)] mb-2">
+            Severity
+          </label>
+          <select
+            value={ruleData.severity || "warning"}
+            onChange={(e) => updateField("severity", e.target.value)}
+            className="w-full p-2 border border-[var(--border)] rounded-lg"
+          >
+            <option value="info">Info</option>
+            <option value="warning">Warning</option>
+            <option value="critical">Critical</option>
+          </select>
+        </div>
+      </>
+    );
+  };
 
   const renderAttendanceFields = () => (
     <div>
