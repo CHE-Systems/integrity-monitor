@@ -29,3 +29,7 @@ backend/data-integrity-service-account.json
 *.backup
 *.bak
 .env.backup
+
+# log fils
+.cursor/debug.log
+.cursor/debug.*.log
