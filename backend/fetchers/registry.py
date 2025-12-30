@@ -9,6 +9,9 @@ from .base import BaseFetcher
 
 ENTITY_KEYS = [
     "contractors",
+    "students",
+    "parents",
+    "absent",
 ]
 
 

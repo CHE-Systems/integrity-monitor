@@ -11,26 +11,11 @@ import ConfirmModal from "../components/ConfirmModal";
 import { RuleSelectionPanel } from "../components/RuleSelectionPanel";
 import type { AirtableSchema, AirtableTable } from "../utils/airtable";
 import { API_BASE } from "../config/api";
+import { ACTIVE_ENTITIES, ENTITY_TABLE_MAPPING, TABLE_ENTITY_MAPPING } from "../config/entities";
 import arrowLeftIcon from "../assets/keyboard_arrow_left.svg";
 import arrowRightIcon from "../assets/keyboard_arrow_right.svg";
 import doubleArrowLeftIcon from "../assets/keyboard_double_arrow_left.svg";
 import doubleArrowRightIcon from "../assets/keyboard_double_arrow_right.svg";
-
-const ENTITY_TABLE_MAPPING: Record<string, string> = {
-  students: "Students",
-  parents: "Parents",
-  contractors: "Contractors/Volunteers",
-  classes: "Classes",
-  attendance: "Attendance",
-  truth: "Truth",
-  payments: "Contractor/Vendor Invoices",
-  data_issues: "Help Tickets",
-};
-
-// Reverse mapping: table name to entity
-const TABLE_ENTITY_MAPPING: Record<string, string> = Object.fromEntries(
-  Object.entries(ENTITY_TABLE_MAPPING).map(([entity, table]) => [table, entity])
-);
 
 const TIMEZONES = [
   { value: "America/Denver", label: "Mountain Time (MT)" },
@@ -1904,36 +1889,18 @@ function CreateScheduleModal({
     return map;
   }, [schema]);
 
-  // Get available entities (those that have tables in schema AND have rules enabled)
+  // Get available entities (all active entities that exist in schema, regardless of rules)
   const availableEntities = useMemo(() => {
     const entitiesFromSchema = Array.from(entityTableMap.keys());
-
-    // Filter to only entities that have rules enabled
-    if (!rules) {
-      return entitiesFromSchema;
-    }
-
+    
+    // Show all active entities that exist in schema, regardless of rules
+    // This ensures entities don't disappear when rules load and allows
+    // users to see and select entities even before rules are created
+    const activeEntitiesSet = new Set(ACTIVE_ENTITIES);
     return entitiesFromSchema
-      .filter((entity) => {
-        // Check if entity has any rules in any category
-        const hasDuplicates =
-          rules.duplicates?.[entity] &&
-          ((rules.duplicates[entity].likely &&
-            rules.duplicates[entity].likely.length > 0) ||
-            (rules.duplicates[entity].possible &&
-              rules.duplicates[entity].possible.length > 0));
-        const hasRelationships =
-          rules.relationships?.[entity] &&
-          Object.keys(rules.relationships[entity]).length > 0;
-        const hasRequiredFields =
-          rules.required_fields?.[entity] &&
-          Array.isArray(rules.required_fields[entity]) &&
-          rules.required_fields[entity].length > 0;
-
-        return hasDuplicates || hasRelationships || hasRequiredFields;
-      })
+      .filter((entity) => activeEntitiesSet.has(entity))
       .sort();
-  }, [entityTableMap, rules]);
+  }, [entityTableMap]);
 
   // Initialize selected entities when schema loads or form changes
   useEffect(() => {
@@ -3084,8 +3051,9 @@ function CreateScheduleModal({
                               );
                             })()}
 
-                            {/* Attendance Rules (global, not per-table) */}
-                            {entity === Array.from(selectedEntities)[0] &&
+                            {/* Attendance Rules (only for attendance table) */}
+                            {entity === "attendance" &&
+                              selectedEntities.has("attendance") &&
                               rules?.attendance_rules && (
                                 <div className="space-y-2">
                                   <div className="text-sm font-medium text-[var(--text-main)]">

@@ -8,6 +8,7 @@ import { useAuth } from "../hooks/useAuth";
 import { getAirtableLinksWithFallback } from "../utils/airtable";
 import { useAirtableSchema } from "../contexts/AirtableSchemaContext";
 import { formatRuleId } from "../utils/ruleFormatter";
+import { ACTIVE_ENTITIES, ENTITY_TABLE_MAPPING } from "../config/entities";
 import ConfirmModal from "./ConfirmModal";
 import openInNewTabIcon from "../assets/open_in_new_tab.svg";
 import arrowLeftIcon from "../assets/keyboard_arrow_left.svg";
@@ -242,14 +243,11 @@ export function IssueList({
           className="rounded-lg border border-[var(--border)] px-3 py-2 text-sm text-[var(--text-main)]"
         >
           <option value="">All Entities</option>
-          <option value="student">Student</option>
-          <option value="students">Students</option>
-          <option value="parent">Parent</option>
-          <option value="parents">Parents</option>
-          <option value="contractor">Contractor</option>
-          <option value="contractors">Contractors</option>
-          <option value="class">Class</option>
-          <option value="classes">Classes</option>
+          {ACTIVE_ENTITIES.map((entity) => (
+            <option key={entity} value={entity}>
+              {ENTITY_TABLE_MAPPING[entity] || entity}
+            </option>
+          ))}
         </select>
       </div>
 

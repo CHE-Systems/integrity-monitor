@@ -155,9 +155,28 @@ class IntegrityRunner:
         # Store selected entities for use in _fetch_records
         # Prefer entities from run_config if provided
         if run_config and run_config.get("entities"):
-            self._selected_entities = run_config["entities"]
+            selected_entities = run_config["entities"]
         else:
-            self._selected_entities = entities
+            selected_entities = entities
+        
+        # Automatically include "absent" entity when attendance check is selected
+        if run_config:
+            checks = run_config.get("checks", {})
+            rules = run_config.get("rules", {})
+            attendance_selected = (
+                checks.get("attendance", False) or 
+                rules.get("attendance_rules", False)
+            )
+            if attendance_selected:
+                # Ensure "absent" is included for attendance checks
+                if selected_entities is None:
+                    # If no entities specified, fetch all (including absent)
+                    selected_entities = None
+                elif isinstance(selected_entities, list) and "absent" not in selected_entities:
+                    # Add "absent" if not already present
+                    selected_entities = selected_entities + ["absent"]
+        
+        self._selected_entities = selected_entities
         
         # Store run_config for use in filtering
         self._run_config = run_config

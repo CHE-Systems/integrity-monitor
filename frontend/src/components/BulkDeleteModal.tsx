@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { ACTIVE_ENTITIES, ENTITY_TABLE_MAPPING } from "../config/entities";
 
 interface BulkDeleteModalProps {
   isOpen: boolean;
@@ -19,9 +20,11 @@ const ISSUE_TYPES = [
   { value: "attendance", label: "Attendance" },
 ];
 
-const ENTITIES = [
-  { value: "contractors", label: "Contractors" },
-];
+// Generate entity options from central config
+const ENTITIES = ACTIVE_ENTITIES.map((entity) => ({
+  value: entity,
+  label: ENTITY_TABLE_MAPPING[entity] || entity,
+}));
 
 export const BulkDeleteModal: React.FC<BulkDeleteModalProps> = ({
   isOpen,

@@ -1,11 +1,16 @@
-import { useState, useEffect } from "react";
+import React, { useState, useEffect } from "react";
 import { useAuth } from "../hooks/useAuth";
 import { API_BASE } from "../config/api";
+import { ACTIVE_ENTITIES, ENTITY_TABLE_MAPPING } from "../config/entities";
 
 interface RuleEditorProps {
   isOpen: boolean;
   onClose: () => void;
-  onSave: (ruleData: Record<string, any>, category: string, entity: string | null) => void;
+  onSave: (
+    ruleData: Record<string, any>,
+    category: string,
+    entity: string | null
+  ) => void;
   category?: string;
   entity?: string;
   initialRule?: Record<string, any>;
@@ -13,18 +18,13 @@ interface RuleEditorProps {
   currentEntity?: string; // Current table being viewed
 }
 
-const ENTITY_OPTIONS = [
-  { value: "students", label: "Students" },
-  { value: "parents", label: "Parents" },
-  { value: "contractors", label: "Contractors" },
-  { value: "classes", label: "Classes" },
-  { value: "attendance", label: "Attendance" },
-  { value: "truth", label: "Truth" },
-  { value: "student_truth", label: "Student Truth" },
-  { value: "payments", label: "Payments" },
-];
+// Generate entity options from central config
+const ENTITY_OPTIONS = ACTIVE_ENTITIES.map((entity) => ({
+  value: entity,
+  label: ENTITY_TABLE_MAPPING[entity] || entity,
+}));
 
-const CATEGORY_OPTIONS = [
+const ALL_CATEGORY_OPTIONS = [
   { value: "duplicates", label: "Duplicate Detection" },
   { value: "relationships", label: "Relationship" },
   { value: "required_fields", label: "Required Field" },
@@ -52,15 +52,47 @@ export function RuleEditor({
     initialEntity || currentEntity || "students"
   );
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [conditionsJson, setConditionsJson] = useState<string>("");
+  const [thresholdsJson, setThresholdsJson] = useState<string>("");
+
+  // Filter category options based on entity - attendance_rules only for attendance table
+  const categoryOptions = React.useMemo(() => {
+    const entity = selectedEntity || currentEntity || "students";
+    if (entity === "attendance") {
+      return ALL_CATEGORY_OPTIONS;
+    }
+    return ALL_CATEGORY_OPTIONS.filter(
+      (option) => option.value !== "attendance_rules"
+    );
+  }, [selectedEntity, currentEntity]);
 
   useEffect(() => {
     if (initialRule) {
       setRuleData(initialRule);
+      setConditionsJson(
+        initialRule.conditions
+          ? JSON.stringify(initialRule.conditions, null, 2)
+          : ""
+      );
+      setThresholdsJson(
+        initialRule.thresholds
+          ? JSON.stringify(initialRule.thresholds, null, 2)
+          : ""
+      );
     } else {
       setRuleData({});
+      setConditionsJson("");
+      setThresholdsJson("");
     }
-    setSelectedCategory(initialCategory || "duplicates");
-    setSelectedEntity(initialEntity || currentEntity || "students");
+    const entity = initialEntity || currentEntity || "students";
+    setSelectedEntity(entity);
+
+    // If attendance_rules is selected but entity is not attendance, reset to duplicates
+    let category = initialCategory || "duplicates";
+    if (category === "attendance_rules" && entity !== "attendance") {
+      category = "duplicates";
+    }
+    setSelectedCategory(category);
     setErrors({});
   }, [initialRule, initialCategory, initialEntity, currentEntity, isOpen]);
 
@@ -74,8 +106,18 @@ export function RuleEditor({
         newErrors.description = "Description is required";
       if (!ruleData.rule_id && mode === "create")
         newErrors.rule_id = "Rule ID is required";
-      if (!ruleData.conditions || ruleData.conditions.length === 0) {
-        newErrors.conditions = "At least one condition is required";
+      // Validate JSON format
+      if (conditionsJson.trim() === "") {
+        newErrors.conditions = "Conditions JSON is required";
+      } else {
+        try {
+          const parsed = JSON.parse(conditionsJson);
+          if (!Array.isArray(parsed) || parsed.length === 0) {
+            newErrors.conditions = "At least one condition is required";
+          }
+        } catch {
+          newErrors.conditionsJson = "Invalid JSON format";
+        }
       }
     } else if (selectedCategory === "relationships") {
       if (!ruleData.target) newErrors.target = "Target entity is required";
@@ -83,6 +125,16 @@ export function RuleEditor({
     } else if (selectedCategory === "required_fields") {
       if (!ruleData.field) newErrors.field = "Field name is required";
       if (!ruleData.message) newErrors.message = "Message is required";
+    } else if (selectedCategory === "attendance_rules") {
+      if (thresholdsJson.trim() === "") {
+        newErrors.thresholds = "Thresholds JSON is required";
+      } else {
+        try {
+          JSON.parse(thresholdsJson);
+        } catch {
+          newErrors.thresholdsJson = "Invalid JSON format";
+        }
+      }
     }
 
     setErrors(newErrors);
@@ -90,6 +142,29 @@ export function RuleEditor({
   };
 
   const handleSave = () => {
+    // Ensure JSON fields are parsed before saving
+    if (selectedCategory === "duplicates" && conditionsJson.trim() !== "") {
+      try {
+        const parsed = JSON.parse(conditionsJson);
+        updateField("conditions", parsed);
+      } catch {
+        // Validation should have caught this, but just in case
+        return;
+      }
+    }
+    if (
+      selectedCategory === "attendance_rules" &&
+      thresholdsJson.trim() !== ""
+    ) {
+      try {
+        const parsed = JSON.parse(thresholdsJson);
+        updateField("thresholds", parsed);
+      } catch {
+        // Validation should have caught this, but just in case
+        return;
+      }
+    }
+
     if (validate()) {
       onSave(ruleData, selectedCategory, selectedEntity);
       handleClose();
@@ -168,22 +243,44 @@ export function RuleEditor({
           Conditions (JSON) *
         </label>
         <textarea
-          value={JSON.stringify(ruleData.conditions || [], null, 2)}
+          value={conditionsJson}
           onChange={(e) => {
-            try {
-              updateField("conditions", JSON.parse(e.target.value));
-            } catch {
-              // Invalid JSON, keep as is
+            const value = e.target.value;
+            setConditionsJson(value);
+            // Try to parse and update ruleData if valid JSON
+            if (value.trim() === "") {
+              updateField("conditions", []);
+            } else {
+              try {
+                const parsed = JSON.parse(value);
+                updateField("conditions", parsed);
+                // Clear JSON error if it exists
+                if (errors.conditionsJson) {
+                  setErrors((prev) => {
+                    const newErrors = { ...prev };
+                    delete newErrors.conditionsJson;
+                    return newErrors;
+                  });
+                }
+              } catch {
+                // Invalid JSON - allow user to continue editing
+                // Don't update ruleData, but don't show error while typing
+              }
             }
           }}
           placeholder='[{"field": "email", "match_type": "exact"}, ...]'
           className={`w-full p-2 border rounded-lg font-mono text-sm ${
-            errors.conditions ? "border-red-500" : "border-[var(--border)]"
+            errors.conditions || errors.conditionsJson
+              ? "border-red-500"
+              : "border-[var(--border)]"
           }`}
           rows={6}
         />
         {errors.conditions && (
           <p className="text-red-500 text-xs mt-1">{errors.conditions}</p>
+        )}
+        {errors.conditionsJson && (
+          <p className="text-red-500 text-xs mt-1">{errors.conditionsJson}</p>
         )}
       </div>
     </>
@@ -280,7 +377,9 @@ export function RuleEditor({
 
   const renderRequiredFieldFields = () => {
     const [fieldSearchTerm, setFieldSearchTerm] = useState("");
-    const [fieldOptions, setFieldOptions] = useState<Array<{id: string; name: string}>>([]);
+    const [fieldOptions, setFieldOptions] = useState<
+      Array<{ id: string; name: string }>
+    >([]);
     const [fieldLookupLoading, setFieldLookupLoading] = useState(false);
 
     // Lookup fields when search term changes
@@ -299,7 +398,9 @@ export function RuleEditor({
             return;
           }
           const response = await fetch(
-            `${API_BASE}/airtable/schema/fields/${selectedEntity}?search=${encodeURIComponent(fieldSearchTerm)}`,
+            `${API_BASE}/airtable/schema/fields/${selectedEntity}?search=${encodeURIComponent(
+              fieldSearchTerm
+            )}`,
             {
               headers: {
                 Authorization: `Bearer ${token}`,
@@ -367,14 +468,17 @@ export function RuleEditor({
               </div>
             )}
             {fieldLookupLoading && (
-              <div className="absolute right-2 top-2 text-gray-400 text-sm">Searching...</div>
+              <div className="absolute right-2 top-2 text-gray-400 text-sm">
+                Searching...
+              </div>
             )}
           </div>
           {errors.field && (
             <p className="text-red-500 text-xs mt-1">{errors.field}</p>
           )}
           <p className="text-xs text-[var(--text-muted)] mt-1">
-            Start typing to search for fields. Select a field to auto-fill the Field ID.
+            Start typing to search for fields. Select a field to auto-fill the
+            Field ID.
           </p>
         </div>
         <div>
@@ -389,7 +493,8 @@ export function RuleEditor({
             className="w-full p-2 border border-[var(--border)] rounded-lg font-mono text-sm"
           />
           <p className="text-xs text-[var(--text-muted)] mt-1">
-            Airtable field ID (starts with "fld"). More reliable than field name. Auto-filled when selecting a field above.
+            Airtable field ID (starts with "fld"). More reliable than field
+            name. Auto-filled when selecting a field above.
           </p>
         </div>
         <div>
@@ -404,7 +509,8 @@ export function RuleEditor({
             className="w-full p-2 border border-[var(--border)] rounded-lg"
           />
           <p className="text-xs text-[var(--text-muted)] mt-1">
-            Customizable name for the rule label. This will appear in the rule list. Auto-filled from field name when selecting a field.
+            Customizable name for the rule label. This will appear in the rule
+            list. Auto-filled from field name when selecting a field.
           </p>
         </div>
         <div>
@@ -448,17 +554,43 @@ export function RuleEditor({
         Thresholds (JSON)
       </label>
       <textarea
-        value={JSON.stringify(ruleData.thresholds || {}, null, 2)}
+        value={thresholdsJson}
         onChange={(e) => {
-          try {
-            updateField("thresholds", JSON.parse(e.target.value));
-          } catch {
-            // Invalid JSON
+          const value = e.target.value;
+          setThresholdsJson(value);
+          // Try to parse and update ruleData if valid JSON
+          if (value.trim() === "") {
+            updateField("thresholds", {});
+          } else {
+            try {
+              const parsed = JSON.parse(value);
+              updateField("thresholds", parsed);
+              // Clear JSON error if it exists
+              if (errors.thresholdsJson) {
+                setErrors((prev) => {
+                  const newErrors = { ...prev };
+                  delete newErrors.thresholdsJson;
+                  return newErrors;
+                });
+              }
+            } catch {
+              // Invalid JSON - allow user to continue editing
+            }
           }
         }}
-        className="w-full p-2 border border-[var(--border)] rounded-lg font-mono text-sm"
+        className={`w-full p-2 border rounded-lg font-mono text-sm ${
+          errors.thresholds || errors.thresholdsJson
+            ? "border-red-500"
+            : "border-[var(--border)]"
+        }`}
         rows={8}
       />
+      {errors.thresholds && (
+        <p className="text-red-500 text-xs mt-1">{errors.thresholds}</p>
+      )}
+      {errors.thresholdsJson && (
+        <p className="text-red-500 text-xs mt-1">{errors.thresholdsJson}</p>
+      )}
     </div>
   );
 
@@ -512,10 +644,12 @@ export function RuleEditor({
                 onChange={(e) => {
                   setSelectedCategory(e.target.value);
                   setRuleData({}); // Reset rule data when changing category
+                  setConditionsJson("");
+                  setThresholdsJson("");
                 }}
                 className="w-full p-2 border border-[var(--border)] rounded-lg"
               >
-                {CATEGORY_OPTIONS.map((option) => (
+                {categoryOptions.map((option) => (
                   <option key={option.value} value={option.value}>
                     {option.label}
                   </option>

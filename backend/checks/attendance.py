@@ -45,44 +45,224 @@ class AttendanceEntry:
 
 
 @dataclass
+class AbsentEntry:
+    """Represents a record from the Absent table."""
+    record_id: str
+    student_id: str
+    date: date
+    created_time: Optional[datetime] = None  # For sorting duplicates
+
+
+@dataclass
 class StudentInfo:
     record_id: str
     enrollment_start: Optional[date]
     classes_per_week: Optional[float]
 
 
-def run(records: Dict[str, list], attendance_rules: AttendanceRules) -> List[IssuePayload]:
-    attendance_entries = _normalize_attendance(records.get("attendance", []))
-    if not attendance_entries:
+def _detect_duplicate_absences(absent_records: List[dict]) -> List[IssuePayload]:
+    """Detect duplicate absence records for the same student on the same day.
+    
+    Groups Absent records by (student_id, date) and flags all but the first
+    record as duplicates. The first record is determined by record_id (lexicographic)
+    or created_time if available.
+    
+    Args:
+        absent_records: List of Airtable record dicts from Absent table
+        
+    Returns:
+        List of IssuePayload for duplicate absence records
+    """
+    if not absent_records:
         return []
-    students = _index_students(records.get("students", []))
-    grouped = defaultdict(list)
-    for entry in attendance_entries:
-        grouped[entry.student_id].append(entry)
+    
+    # Normalize Absent records
+    absent_entries = _normalize_absent(absent_records)
+    if not absent_entries:
+        return []
+    
+    # Group by (student_id, date)
+    grouped: Dict[Tuple[str, date], List[AbsentEntry]] = defaultdict(list)
+    for entry in absent_entries:
+        key = (entry.student_id, entry.date)
+        grouped[key].append(entry)
+    
     issues: List[IssuePayload] = []
-    for student_id, entries in grouped.items():
-        student_info = students.get(student_id)
-        metrics = _calculate_metrics(entries, student_info, attendance_rules)
-        for metric_name, value in metrics.items():
-            severity, threshold = _classify(metric_name, value, attendance_rules.thresholds.get(metric_name))
-            if severity:
-                issues.append(
-                    IssuePayload(
-                        rule_id=f"attendance.{metric_name}",
-                        issue_type="attendance",
-                        entity="student",
-                        record_id=student_id,
-                        severity=severity,
-                        description=_build_description(metric_name, value, threshold),
-                        metadata={
-                            "metric": metric_name,
-                            "observed": value,
-                            "threshold": threshold,
-                            "student_id": student_id,
-                        },
-                    )
+    
+    # Process each group
+    for (student_id, absent_date), entries in grouped.items():
+        if len(entries) <= 1:
+            continue  # No duplicates
+        
+        # Sort entries to determine which one to keep as primary
+        # Prefer created_time if available, otherwise use record_id
+        # Use a far future date for entries without created_time to sort them last
+        max_date = datetime(9999, 12, 31)
+        entries_sorted = sorted(
+            entries,
+            key=lambda e: (
+                e.created_time if e.created_time else max_date,
+                e.record_id
+            )
+        )
+        
+        # Keep the first entry as primary, flag the rest as duplicates
+        primary_entry = entries_sorted[0]
+        duplicate_entries = entries_sorted[1:]
+        
+        for duplicate_entry in duplicate_entries:
+            issues.append(
+                IssuePayload(
+                    rule_id="attendance.duplicate_absence",
+                    issue_type="attendance",
+                    entity="absent",
+                    record_id=duplicate_entry.record_id,
+                    severity="warning",
+                    description=(
+                        f"Duplicate absence record for student on {absent_date.strftime('%Y-%m-%d')}. "
+                        f"Found {len(entries)} absence records for the same student on this date. "
+                        f"Primary record: {primary_entry.record_id}"
+                    ),
+                    metadata={
+                        "student_id": student_id,
+                        "date": absent_date.isoformat(),
+                        "duplicate_count": len(entries),
+                        "primary_record_id": primary_entry.record_id,
+                    },
                 )
+            )
+    
     return issues
+
+
+def run(records: Dict[str, list], attendance_rules: AttendanceRules) -> List[IssuePayload]:
+    """Run attendance anomaly checks.
+    
+    Primary check: Detect duplicate absence records (same student + same date)
+    Secondary check: Pattern-based anomaly detection (rates, consecutive absences, etc.)
+    
+    Args:
+        records: Dict mapping entity names to lists of Airtable records
+        attendance_rules: AttendanceRules configuration
+        
+    Returns:
+        List of IssuePayload for all detected issues
+    """
+    issues: List[IssuePayload] = []
+    
+    # PRIMARY CHECK: Detect duplicate absences from Absent table
+    absent_records = records.get("absent", [])
+    if absent_records:
+        duplicate_issues = _detect_duplicate_absences(absent_records)
+        issues.extend(duplicate_issues)
+    
+    # SECONDARY CHECK: Pattern-based anomaly detection from Attendance table
+    attendance_entries = _normalize_attendance(records.get("attendance", []))
+    if attendance_entries:
+        students = _index_students(records.get("students", []))
+        grouped = defaultdict(list)
+        for entry in attendance_entries:
+            grouped[entry.student_id].append(entry)
+        
+        for student_id, entries in grouped.items():
+            student_info = students.get(student_id)
+            metrics = _calculate_metrics(entries, student_info, attendance_rules)
+            for metric_name, value in metrics.items():
+                severity, threshold = _classify(metric_name, value, attendance_rules.thresholds.get(metric_name))
+                if severity:
+                    issues.append(
+                        IssuePayload(
+                            rule_id=f"attendance.{metric_name}",
+                            issue_type="attendance",
+                            entity="student",
+                            record_id=student_id,
+                            severity=severity,
+                            description=_build_description(metric_name, value, threshold),
+                            metadata={
+                                "metric": metric_name,
+                                "observed": value,
+                                "threshold": threshold,
+                                "student_id": student_id,
+                            },
+                        )
+                    )
+    
+    return issues
+
+
+def _normalize_absent(records: Iterable[dict]) -> List[AbsentEntry]:
+    """Normalize Absent table records to AbsentEntry objects.
+    
+    Args:
+        records: Iterable of Airtable record dicts from Absent table
+        
+    Returns:
+        List of AbsentEntry objects with student_id, date, and record_id
+    """
+    entries: List[AbsentEntry] = []
+    for record in records:
+        record_id = record.get("id")
+        if not record_id:
+            continue
+        fields = record.get("fields", {})
+        
+        # Extract student link
+        student_links = fields.get("Student") or fields.get("student")
+        if isinstance(student_links, list):
+            student_id = student_links[0] if student_links else None
+        else:
+            student_id = student_links or fields.get("student_id")
+        if not student_id:
+            continue
+        
+        # Extract date
+        date_value = fields.get("Date") or fields.get("date")
+        parsed_date = _parse_date(date_value)
+        if not parsed_date:
+            continue
+        
+        # Extract created time for sorting (optional)
+        created_time = None
+        created_time_str = record.get("createdTime")
+        if created_time_str:
+            try:
+                if isinstance(created_time_str, str):
+                    # Airtable createdTime is ISO format: "2024-01-15T10:30:00.000Z"
+                    # Try parsing with datetime.strptime first
+                    try:
+                        # Remove timezone info if present (Z or +HH:MM)
+                        clean_str = created_time_str.replace('Z', '+00:00')
+                        if '+' in clean_str or clean_str.count('-') > 2:
+                            # Has timezone
+                            if '+' in clean_str:
+                                dt_str, tz_str = clean_str.rsplit('+', 1)
+                                created_time = datetime.strptime(dt_str, "%Y-%m-%dT%H:%M:%S.%f")
+                            elif clean_str.endswith('+00:00'):
+                                dt_str = clean_str.replace('+00:00', '')
+                                created_time = datetime.strptime(dt_str.rstrip('Z'), "%Y-%m-%dT%H:%M:%S.%f")
+                        else:
+                            created_time = datetime.strptime(clean_str, "%Y-%m-%dT%H:%M:%S.%f")
+                    except ValueError:
+                        # Try without microseconds
+                        try:
+                            clean_str = created_time_str.replace('Z', '').split('.')[0]
+                            created_time = datetime.strptime(clean_str, "%Y-%m-%dT%H:%M:%S")
+                        except ValueError:
+                            pass
+                elif isinstance(created_time_str, datetime):
+                    created_time = created_time_str
+            except Exception:
+                pass
+        
+        entries.append(
+            AbsentEntry(
+                record_id=record_id,
+                student_id=student_id,
+                date=parsed_date,
+                created_time=created_time,
+            )
+        )
+    return entries
 
 
 def _normalize_attendance(records: Iterable[dict]) -> List[AttendanceEntry]:

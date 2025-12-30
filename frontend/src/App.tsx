@@ -412,6 +412,7 @@ export default function App({ children }: AppProps) {
                 <div className="inline-flex rounded-full border border-[var(--border)] bg-white/80 p-1 text-sm">
                   <NavLink
                     to="/"
+                    end
                     className={({ isActive }) =>
                       `rounded-full px-4 py-1.5 font-medium transition-colors ${
                         isActive
@@ -420,7 +421,19 @@ export default function App({ children }: AppProps) {
                       }`
                     }
                   >
-                    Dashboard
+                    Overview
+                  </NavLink>
+                  <NavLink
+                    to="/admin"
+                    className={({ isActive }) =>
+                      `rounded-full px-4 py-1.5 font-medium transition-colors ${
+                        isActive
+                          ? "bg-[var(--brand)] text-white"
+                          : "text-[var(--text-muted)] hover:text-[var(--text-main)]"
+                      }`
+                    }
+                  >
+                    Admin
                   </NavLink>
                   <NavLink
                     to="/runs"

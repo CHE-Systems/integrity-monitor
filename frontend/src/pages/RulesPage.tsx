@@ -8,20 +8,9 @@ import { AIRuleCreator } from "../components/AIRuleCreator";
 import ConfirmModal from "../components/ConfirmModal";
 import trashIcon from "../assets/trash.svg";
 import { formatRuleId } from "../utils/ruleFormatter";
+import { ACTIVE_ENTITIES, ENTITY_TABLE_MAPPING } from "../config/entities";
 
 type EntityName = string;
-
-// Map of entity names to display names
-const ENTITY_DISPLAY_NAMES: Record<string, string> = {
-  students: "Students",
-  parents: "Parents",
-  contractors: "Contractors",
-  classes: "Classes",
-  attendance: "Attendance",
-  truth: "Truth",
-  student_truth: "Student Truth",
-  payments: "Payments",
-};
 
 // Entity-centric structure
 interface EntityRules {
@@ -193,18 +182,11 @@ export function RulesPage() {
     }
   };
 
-  // Reorganize rules by entity
+  // Get all active entities (show all configured entities, not just those with rules)
   const getEntitiesWithRules = (): EntityName[] => {
-    if (!rules) return [];
-
-    const entities = new Set<string>();
-
-    // Collect entities from all rule types
-    Object.keys(rules.duplicates || {}).forEach((e) => entities.add(e));
-    Object.keys(rules.relationships || {}).forEach((e) => entities.add(e));
-    Object.keys(rules.required_fields || {}).forEach((e) => entities.add(e));
-
-    return Array.from(entities).sort();
+    // Always show all active entities, even if they don't have rules yet
+    // This allows users to see and create rules for all configured tables
+    return Array.from(ACTIVE_ENTITIES).sort();
   };
 
   const getEntityRules = (entity: string): EntityRules => {
@@ -548,7 +530,7 @@ export function RulesPage() {
                   : ""
               }`}
             >
-              {ENTITY_DISPLAY_NAMES[entity] || entity}
+              {ENTITY_TABLE_MAPPING[entity] || entity}
             </button>
           );
         })}

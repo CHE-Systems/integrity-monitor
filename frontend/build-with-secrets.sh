@@ -100,18 +100,25 @@ export npm_config_progress=false
 export npm_config_update_notifier=false
 export npm_config_audit=false
 
-# Check if dist already exists - if so, skip build (allows pre-building)
-if [ -d "dist" ] && [ -n "$(ls -A dist 2>/dev/null)" ]; then
-    echo "Frontend already built, skipping..."
-else
-    # For Firebase predeploy: run npm in a way that handles missing stdin
-    # Use a here-document to provide empty stdin
-    npm run build <<EOF
-EOF
-    BUILD_EXIT=$?
-    if [ $BUILD_EXIT -ne 0 ]; then
-        exit $BUILD_EXIT
-    fi
+# Always rebuild during deployment to ensure latest changes are included
+# Remove old dist folder to ensure clean build
+if [ -d "dist" ]; then
+    echo "Removing old build artifacts..."
+    rm -rf dist
+fi
+
+# For Firebase predeploy: run npm in a way that handles missing stdin
+# Ensure stdin is available by redirecting from /dev/null before npm runs
+echo "Building frontend..."
+# Use a subshell with stdin redirected to prevent npm stdin errors
+# This ensures npm always has a valid stdin stream, even in non-interactive contexts
+(
+    exec 0</dev/null
+    CI=true npm run build
+) 2>&1
+BUILD_EXIT=$?
+if [ $BUILD_EXIT -ne 0 ]; then
+    exit $BUILD_EXIT
 fi
 
 echo ""

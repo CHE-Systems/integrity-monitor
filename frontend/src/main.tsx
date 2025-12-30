@@ -6,7 +6,8 @@ import App from "./App.tsx";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { AuthGuard } from "./components/AuthGuard";
 import { LoginPage } from "./pages/LoginPage";
-import { DashboardPage } from "./pages/DashboardPage";
+import { LeadershipDashboardPage } from "./pages/LeadershipDashboardPage";
+import { AdminDashboardPage } from "./pages/AdminDashboardPage";
 import { SchemaPage } from "./pages/SchemaPage";
 import { RunStatusPage } from "./pages/RunStatusPage";
 import { ReportsPage } from "./pages/ReportsPage";
@@ -28,7 +29,17 @@ createRoot(document.getElementById("root")!).render(
             element={
               <AuthGuard>
                 <App>
-                  <DashboardPage />
+                  <LeadershipDashboardPage />
+                </App>
+              </AuthGuard>
+            }
+          />
+          <Route
+            path="/admin"
+            element={
+              <AuthGuard>
+                <App>
+                  <AdminDashboardPage />
                 </App>
               </AuthGuard>
             }

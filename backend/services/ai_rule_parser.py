@@ -152,45 +152,127 @@ Return only valid JSON, no markdown."""
             }
 
     def _parse_duplicate_rule(self, description: str, entity: str) -> Dict[str, Any]:
-        """Parse duplicate rule from description."""
+        """Parse duplicate rule from description.
+        
+        Performs field lookup for each condition and handles composite fields
+        for name similarity (e.g., legal_first_name + legal_last_name).
+        """
         description_lower = description.lower()
         
-        # Extract field names
-        fields = []
-        if "email" in description_lower:
-            fields.append("email")
-        if "phone" in description_lower:
-            fields.append("phone")
+        # Extract similarity threshold if specified
+        similarity_threshold = 0.8  # Default
+        similarity_match = re.search(r"(\d+)%", description)
+        if similarity_match:
+            similarity_threshold = float(similarity_match.group(1)) / 100.0
+        
+        # Extract field names and determine condition types
+        conditions_data = []
+        
+        # Handle date of birth - always exact match
+        if "dob" in description_lower or "date of birth" in description_lower or "date_of_birth" in description_lower:
+            conditions_data.append({
+                "field": "date_of_birth",
+                "type": "exact_match",
+            })
+        
+        # Handle name - use composite fields for similarity
         if "name" in description_lower:
-            fields.append("name")
-        if "dob" in description_lower or "date of birth" in description_lower:
-            fields.append("date_of_birth")
-        
-        if not fields:
-            fields = ["email"]  # Default
-        
-        # Determine match type
-        match_type = "exact"
-        if "similar" in description_lower or "fuzzy" in description_lower:
-            match_type = "similarity"
-        
-        rule_id = f"dup.{entity}.{fields[0]}"
-        if match_type == "similarity":
-            rule_id += "_similar"
-        
-        conditions = []
-        for field in fields:
-            if match_type == "exact":
-                conditions.append({
-                    "type": "exact_match",
-                    "field": field,
+            # For students, use composite fields (legal_first_name + legal_last_name)
+            if entity == "students":
+                conditions_data.append({
+                    "fields": ["legal_first_name", "legal_last_name"],
+                    "type": "similarity",
+                    "similarity": similarity_threshold,
                 })
             else:
-                conditions.append({
+                # For other entities, use single name field
+                conditions_data.append({
+                    "field": "name",
                     "type": "similarity",
-                    "field": field,
-                    "similarity": 0.8,
+                    "similarity": similarity_threshold,
                 })
+        
+        # Handle email
+        if "email" in description_lower:
+            conditions_data.append({
+                "field": "email",
+                "type": "exact_match",
+            })
+        
+        # Handle phone
+        if "phone" in description_lower:
+            conditions_data.append({
+                "field": "phone",
+                "type": "exact_match",
+            })
+        
+        # Default if no fields found
+        if not conditions_data:
+            conditions_data.append({
+                "field": "email",
+                "type": "exact_match",
+            })
+        
+        # Build conditions with field lookup
+        conditions = []
+        rule_id_parts = []
+        
+        for cond_data in conditions_data:
+            condition = {
+                "type": cond_data["type"],
+            }
+            
+            # Handle composite fields (for name similarity)
+            if "fields" in cond_data:
+                field_names = cond_data["fields"]
+                condition["fields"] = field_names
+                field_ids = []
+                field_names_resolved = []
+                lookup_statuses = []
+                lookup_messages = []
+                
+                # Look up each field ID
+                for field_name in field_names:
+                    lookup_result = self._lookup_field_id(entity, field_name)
+                    if lookup_result["field_id"]:
+                        field_ids.append(lookup_result["field_id"])
+                    field_names_resolved.append(lookup_result["field_name_resolved"])
+                    lookup_statuses.append(lookup_result["field_lookup_status"])
+                    if lookup_result["field_lookup_message"]:
+                        lookup_messages.append(lookup_result["field_lookup_message"])
+                
+                # Add metadata
+                if field_ids:
+                    condition["field_ids"] = field_ids
+                condition["field_names_resolved"] = field_names_resolved
+                condition["field_lookup_status"] = "found" if all(s == "found" for s in lookup_statuses) else lookup_statuses[0]
+                if lookup_messages:
+                    condition["field_lookup_message"] = "; ".join(lookup_messages)
+                
+                # Add similarity threshold if applicable
+                if cond_data["type"] == "similarity" and "similarity" in cond_data:
+                    condition["similarity"] = cond_data["similarity"]
+                
+                rule_id_parts.append("_".join(field_names))
+            else:
+                # Single field
+                field_name = cond_data["field"]
+                condition["field"] = field_name
+                rule_id_parts.append(field_name)
+                
+                # Look up field ID
+                lookup_result = self._lookup_field_id(entity, field_name)
+                if lookup_result["field_id"]:
+                    condition["field_id"] = lookup_result["field_id"]
+                condition["field_name_resolved"] = lookup_result["field_name_resolved"]
+                condition["field_lookup_status"] = lookup_result["field_lookup_status"]
+                if lookup_result["field_lookup_message"]:
+                    condition["field_lookup_message"] = lookup_result["field_lookup_message"]
+            
+            conditions.append(condition)
+        
+        # Generate rule_id
+        rule_id = f"dup.{entity}.{'_'.join(rule_id_parts[:2])}"  # Limit to first 2 parts to keep it reasonable
         
         return {
             "category": "duplicates",
@@ -251,6 +333,124 @@ Return only valid JSON, no markdown."""
             },
         }
 
+    def _lookup_field_id(self, entity: str, field_name: str) -> Dict[str, Any]:
+        """Look up field ID from schema snapshot.
+        
+        Args:
+            entity: Entity name (students, parents, contractors, etc.)
+            field_name: Field name to look up
+            
+        Returns:
+            Dictionary with:
+            - field_id: Field ID if found, None otherwise
+            - field_name_resolved: Resolved field name from schema
+            - field_lookup_status: Status of lookup ("found", "found_partial", "field_not_found", "table_not_found", "schema_not_found", "error")
+            - field_lookup_message: Human-readable message about lookup result
+        """
+        field_id = None
+        field_name_resolved = field_name
+        field_lookup_status = "not_found"
+        field_lookup_message = None
+        
+        try:
+            from pathlib import Path
+            import json
+            from ..utils.records import _normalize_name
+            
+            schema_path = Path(__file__).resolve().parent.parent / "config" / "airtable_schema.json"
+            if not schema_path.exists():
+                field_lookup_status = "schema_not_found"
+                field_lookup_message = "Schema snapshot not found. Run airtable_records_snapshot to generate it."
+                logger.warning(f"Schema snapshot not found at {schema_path}")
+            else:
+                with schema_path.open("r", encoding="utf-8") as f:
+                    schema = json.load(f)
+                
+                # Map entity to table name
+                entity_to_table = {
+                    "contractors": "Contractors/Volunteers",
+                    "students": "Students",
+                    "parents": "Parents",
+                    "classes": "Classes",
+                    "attendance": "Attendance",
+                    "truth": "Truth",
+                    "payments": "Contractor/Vendor Invoices",
+                    "absent": "Absent",
+                }
+                table_name = entity_to_table.get(entity, entity.title())
+                
+                # Find the target table
+                target_table = None
+                for table in schema.get("tables", []):
+                    table_name_lower = table.get("name", "").lower()
+                    if (table.get("name") == table_name or 
+                        entity.lower() in table_name_lower or
+                        table_name_lower in entity.lower()):
+                        target_table = table
+                        break
+                
+                if not target_table:
+                    field_lookup_status = "table_not_found"
+                    field_lookup_message = f"Table not found for entity '{entity}' in schema"
+                    logger.warning(f"Table not found for entity: {entity}")
+                else:
+                    # Try multiple matching strategies
+                    normalized_field = _normalize_name(field_name)
+                    field_variants = [
+                        field_name,  # Original
+                        field_name.replace("_", " "),  # Underscore to space
+                        field_name.replace(" ", "_"),  # Space to underscore
+                        normalized_field,  # Normalized
+                    ]
+                    
+                    # Find field by name (try exact match, then normalized, then contains)
+                    for schema_field in target_table.get("fields", []):
+                        schema_field_name = schema_field.get("name", "")
+                        schema_field_normalized = _normalize_name(schema_field_name)
+                        
+                        # Try exact match first
+                        if (schema_field_name.lower() == field_name.lower() or
+                            schema_field_normalized == normalized_field):
+                            field_id = schema_field.get("id")
+                            field_name_resolved = schema_field_name
+                            field_lookup_status = "found"
+                            field_lookup_message = f"Found field '{schema_field_name}' (ID: {field_id})"
+                            logger.info(f"Found field ID for '{field_name}': {field_id} ({schema_field_name})")
+                            break
+                    
+                    # If not found, try partial/contains match
+                    if not field_id:
+                        for schema_field in target_table.get("fields", []):
+                            schema_field_name = schema_field.get("name", "")
+                            schema_field_normalized = _normalize_name(schema_field_name)
+                            
+                            # Check if field name contains our search term or vice versa
+                            if (normalized_field in schema_field_normalized or
+                                schema_field_normalized in normalized_field):
+                                field_id = schema_field.get("id")
+                                field_name_resolved = schema_field_name
+                                field_lookup_status = "found_partial"
+                                field_lookup_message = f"Found similar field '{schema_field_name}' (ID: {field_id})"
+                                logger.info(f"Found partial match for '{field_name}': {field_id} ({schema_field_name})")
+                                break
+                    
+                    if not field_id:
+                        field_lookup_status = "field_not_found"
+                        field_lookup_message = f"Field '{field_name}' not found in table '{target_table.get('name')}'"
+                        logger.warning(f"Field '{field_name}' not found in table '{target_table.get('name')}' for entity '{entity}'")
+                        
+        except Exception as exc:
+            field_lookup_status = "error"
+            field_lookup_message = f"Error looking up field: {str(exc)}"
+            logger.error(f"Could not look up field ID for {field_name}: {exc}", exc_info=True)
+        
+        return {
+            "field_id": field_id,
+            "field_name_resolved": field_name_resolved,
+            "field_lookup_status": field_lookup_status,
+            "field_lookup_message": field_lookup_message,
+        }
+
     def _parse_required_field_rule(self, description: str, entity: str) -> Dict[str, Any]:
         """Parse required field rule from description.
         
@@ -295,102 +495,41 @@ Return only valid JSON, no markdown."""
                     else:
                         field = "field_name"
         
-        # Always try to look up field ID from schema snapshot
-        field_id = None
-        field_name_resolved = field  # Store the resolved field name
-        field_lookup_status = "not_found"
-        field_lookup_message = None
+        # Look up field ID from schema snapshot
+        lookup_result = self._lookup_field_id(entity, field)
         
-        try:
-            from pathlib import Path
-            import json
-            from ..utils.records import _normalize_name
-            
-            schema_path = Path(__file__).resolve().parent.parent / "config" / "airtable_schema.json"
-            if not schema_path.exists():
-                field_lookup_status = "schema_not_found"
-                field_lookup_message = "Schema snapshot not found. Run airtable_records_snapshot to generate it."
-                logger.warning(f"Schema snapshot not found at {schema_path}")
-            else:
-                with schema_path.open("r", encoding="utf-8") as f:
-                    schema = json.load(f)
-                
-                # Map entity to table name
-                entity_to_table = {
-                    "contractors": "Contractors/Volunteers",
-                    "students": "Students",
-                    "parents": "Parents",
-                    "classes": "Classes",
-                    "attendance": "Attendance",
-                    "truth": "Truth",
-                    "payments": "Contractor/Vendor Invoices",
-                }
-                table_name = entity_to_table.get(entity, entity.title())
-                
-                # Find the target table
-                target_table = None
-                for table in schema.get("tables", []):
-                    table_name_lower = table.get("name", "").lower()
-                    if (table.get("name") == table_name or 
-                        entity.lower() in table_name_lower or
-                        table_name_lower in entity.lower()):
-                        target_table = table
-                        break
-                
-                if not target_table:
-                    field_lookup_status = "table_not_found"
-                    field_lookup_message = f"Table not found for entity '{entity}' in schema"
-                    logger.warning(f"Table not found for entity: {entity}")
-                else:
-                    # Try multiple matching strategies
-                    normalized_field = _normalize_name(field)
-                    field_variants = [
-                        field,  # Original
-                        field.replace("_", " "),  # Underscore to space
-                        field.replace(" ", "_"),  # Space to underscore
-                        normalized_field,  # Normalized
-                    ]
-                    
-                    # Find field by name (try exact match, then normalized, then contains)
-                    for schema_field in target_table.get("fields", []):
-                        schema_field_name = schema_field.get("name", "")
-                        schema_field_normalized = _normalize_name(schema_field_name)
-                        
-                        # Try exact match first
-                        if (schema_field_name.lower() == field.lower() or
-                            schema_field_normalized == normalized_field):
-                            field_id = schema_field.get("id")
-                            field_name_resolved = schema_field_name
-                            field_lookup_status = "found"
-                            field_lookup_message = f"Found field '{schema_field_name}' (ID: {field_id})"
-                            logger.info(f"Found field ID for '{field}': {field_id} ({schema_field_name})")
-                            break
-                    
-                    # If not found, try partial/contains match
-                    if not field_id:
-                        for schema_field in target_table.get("fields", []):
-                            schema_field_name = schema_field.get("name", "")
-                            schema_field_normalized = _normalize_name(schema_field_name)
-                            
-                            # Check if field name contains our search term or vice versa
-                            if (normalized_field in schema_field_normalized or
-                                schema_field_normalized in normalized_field):
-                                field_id = schema_field.get("id")
-                                field_name_resolved = schema_field_name
-                                field_lookup_status = "found_partial"
-                                field_lookup_message = f"Found similar field '{schema_field_name}' (ID: {field_id})"
-                                logger.info(f"Found partial match for '{field}': {field_id} ({schema_field_name})")
-                                break
-                    
-                    if not field_id:
-                        field_lookup_status = "field_not_found"
-                        field_lookup_message = f"Field '{field}' not found in table '{target_table.get('name')}'"
-                        logger.warning(f"Field '{field}' not found in table '{target_table.get('name')}' for entity '{entity}'")
-                        
-        except Exception as exc:
-            field_lookup_status = "error"
-            field_lookup_message = f"Error looking up field: {str(exc)}"
-            logger.error(f"Could not look up field ID for {field}: {exc}", exc_info=True)
+        # Determine severity
+        severity = "warning"
+        if "critical" in description_lower or "must" in description_lower:
+            severity = "critical"
+        elif "info" in description_lower or "optional" in description_lower:
+            severity = "info"
+        
+        rule_data = {
+            "field": lookup_result["field_name_resolved"],  # Use resolved field name
+            "message": description,
+            "severity": severity,
+        }
+        
+        # Always include field lookup information in rule_data
+        if lookup_result["field_id"]:
+            rule_data["field_id"] = lookup_result["field_id"]
+            rule_data["field_lookup_status"] = "found"
+        else:
+            rule_data["field_lookup_status"] = lookup_result["field_lookup_status"]
+        
+        # Include lookup message for user feedback
+        if lookup_result["field_lookup_message"]:
+            rule_data["field_lookup_message"] = lookup_result["field_lookup_message"]
+        
+        # Include field_name for display (same as field for now, but can be edited)
+        rule_data["field_name"] = lookup_result["field_name_resolved"]
+        
+        return {
+            "category": "required_fields",
+            "entity": entity,
+            "rule_data": rule_data,
+        }
         
         # Determine severity
         severity = "warning"
