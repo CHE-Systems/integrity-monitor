@@ -1,7 +1,7 @@
 metadata:
-  description: "Runtime + schedule config - simplified to contractors-only"
-  generated: "2025-11-19"
-  note: "Attendance rules removed, only contractors table configured"
+  description: "Runtime + schedule config for data integrity monitoring"
+  generated: "2025-12-30"
+  note: "Core tables configured: students, parents, contractors, absent"
 
 run_config:
   nightly_cron: "0 2 * * *"
@@ -11,6 +11,12 @@ run_config:
     duplicate_warning_count: 500
 
 airtable:
+  students:
+    base_env: "AT_STUDENTS_BASE"
+    table_env: "AT_STUDENTS_TABLE"
+  parents:
+    base_env: "AT_PARENTS_BASE"
+    table_env: "AT_PARENTS_TABLE"
   contractors:
     base_env: "AT_CONTRACTORS_BASE"
     table_env: "AT_CONTRACTORS_TABLE"
