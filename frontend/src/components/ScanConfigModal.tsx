@@ -1096,33 +1096,55 @@ export function ScanConfigModal({
                               );
                             })()}
 
-                            {/* Attendance Rules (only for attendance table) */}
-                            {entity === "attendance" &&
-                              selectedEntities.has("attendance") &&
-                              rules?.attendance_rules && (
+                            {/* Attendance Rules (for attendance and absent tables) */}
+                            {(entity === "attendance" || entity === "absent") &&
+                              (selectedEntities.has("attendance") || selectedEntities.has("absent")) && (
                                 <div className="space-y-2">
                                   <div className="text-sm font-medium text-[var(--text-main)]">
                                     Attendance Rules
                                   </div>
-                                  <label className="flex items-center gap-2 p-2 rounded-md hover:bg-[var(--bg-mid)]/40 cursor-pointer transition-colors">
-                                    <input
-                                      type="checkbox"
-                                      checked={
-                                        selectedRules.attendance_rules ?? false
-                                      }
-                                      onChange={(e) =>
-                                        handleRulesChange(
-                                          "attendance_rules",
-                                          "",
-                                          e.target.checked
-                                        )
-                                      }
-                                      className="w-3.5 h-3.5"
-                                    />
-                                    <span className="text-xs font-medium text-[var(--text-main)]">
-                                      Attendance Anomalies
-                                    </span>
-                                  </label>
+                                  {entity === "attendance" && (
+                                    <label className="flex items-center gap-2 p-2 rounded-md hover:bg-[var(--bg-mid)]/40 cursor-pointer transition-colors">
+                                      <input
+                                        type="checkbox"
+                                        checked={
+                                          selectedRules.attendance_rules ?? false
+                                        }
+                                        onChange={(e) =>
+                                          handleRulesChange(
+                                            "attendance_rules",
+                                            "",
+                                            e.target.checked
+                                          )
+                                        }
+                                        className="w-3.5 h-3.5"
+                                      />
+                                      <span className="text-xs font-medium text-[var(--text-main)]">
+                                        Attendance Anomalies
+                                      </span>
+                                    </label>
+                                  )}
+                                  {entity === "absent" && (
+                                    <label className="flex items-center gap-2 p-2 rounded-md hover:bg-[var(--bg-mid)]/40 cursor-pointer transition-colors">
+                                      <input
+                                        type="checkbox"
+                                        checked={
+                                          selectedRules.attendance_rules ?? false
+                                        }
+                                        onChange={(e) =>
+                                          handleRulesChange(
+                                            "attendance_rules",
+                                            "",
+                                            e.target.checked
+                                          )
+                                        }
+                                        className="w-3.5 h-3.5"
+                                      />
+                                      <span className="text-xs font-medium text-[var(--text-main)]">
+                                        Duplicate Absence Detection
+                                      </span>
+                                    </label>
+                                  )}
                                 </div>
                               )}
                           </div>

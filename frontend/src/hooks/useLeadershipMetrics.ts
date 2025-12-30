@@ -13,6 +13,12 @@ export type LeadershipCategory = {
   description: string;
 };
 
+export type MonthlyTrendItem = {
+  day: string;
+  total: number;
+  date: Date;
+};
+
 export type LeadershipMetrics = {
   // Overall health
   healthStatus: HealthStatus;
@@ -27,6 +33,10 @@ export type LeadershipMetrics = {
   trend: TrendDirection;
   trendLabel: string;
   trendPercentage: number | null;
+
+  // Monthly trend data for chart
+  monthlyTrend: MonthlyTrendItem[];
+  monthlyTrendLoading: boolean;
 
   // Categories (human-friendly)
   categories: LeadershipCategory[];
@@ -147,6 +157,8 @@ export function useLeadershipMetrics(): LeadershipMetrics {
   const { counts, loading: countsLoading } = useIssueCounts();
   const { data: runs, loading: runsLoading } = useFirestoreRuns(10);
   const { trends, loading: trendsLoading } = useFirestoreMetrics(7);
+  // Get 30 days of data for the monthly trend chart
+  const { trends: monthlyTrends, loading: monthlyTrendsLoading } = useFirestoreMetrics(30);
 
   return useMemo(() => {
     const loading = countsLoading || runsLoading;
@@ -234,6 +246,29 @@ export function useLeadershipMetrics(): LeadershipMetrics {
       });
     }
 
+    // Transform monthly trends into aggregated totals for the chart
+    const monthlyTrend: MonthlyTrendItem[] = monthlyTrends.map((item) => {
+      // Sum all issue types for this day
+      let total = 0;
+      Object.entries(item).forEach(([key, value]) => {
+        if (key !== "day" && typeof value === "number") {
+          total += value;
+        }
+      });
+
+      // Parse the day string to create a Date object
+      // The day format is "Mon D" like "Dec 15"
+      const currentYear = new Date().getFullYear();
+      const dateStr = `${item.day} ${currentYear}`;
+      const parsedDate = new Date(dateStr);
+
+      return {
+        day: item.day,
+        total,
+        date: parsedDate,
+      };
+    });
+
     return {
       healthStatus,
       healthLabel,
@@ -243,10 +278,12 @@ export function useLeadershipMetrics(): LeadershipMetrics {
       trend,
       trendLabel,
       trendPercentage,
+      monthlyTrend,
+      monthlyTrendLoading: monthlyTrendsLoading,
       categories,
       lastCheckDate,
       lastCheckRelative,
       loading,
     };
-  }, [counts, runs, trends, countsLoading, runsLoading, trendsLoading]);
+  }, [counts, runs, trends, monthlyTrends, countsLoading, runsLoading, trendsLoading, monthlyTrendsLoading]);
 }

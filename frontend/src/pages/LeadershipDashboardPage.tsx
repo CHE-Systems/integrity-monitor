@@ -1,4 +1,5 @@
-import { useLeadershipMetrics, type HealthStatus, type TrendDirection } from "../hooks/useLeadershipMetrics";
+import { useLeadershipMetrics, type HealthStatus } from "../hooks/useLeadershipMetrics";
+import { LeadershipTrendChart } from "../components/LeadershipTrendChart";
 
 function HealthIndicator({ status }: { status: HealthStatus }) {
   const config = {
@@ -39,47 +40,6 @@ function HealthIndicator({ status }: { status: HealthStatus }) {
         {status === "attention" && "Review Needed"}
         {status === "critical" && "Action Required"}
       </span>
-    </div>
-  );
-}
-
-function TrendIndicator({ direction, label }: { direction: TrendDirection; label: string }) {
-  const config = {
-    improving: {
-      icon: (
-        <svg className="w-5 h-5 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
-        </svg>
-      ),
-      text: "text-emerald-700",
-      bg: "bg-emerald-50",
-    },
-    stable: {
-      icon: (
-        <svg className="w-5 h-5 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M5 12h14" />
-        </svg>
-      ),
-      text: "text-slate-600",
-      bg: "bg-slate-50",
-    },
-    declining: {
-      icon: (
-        <svg className="w-5 h-5 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M13 17h8m0 0v-8m0 8l-8-8-4 4-6-6" />
-        </svg>
-      ),
-      text: "text-amber-700",
-      bg: "bg-amber-50",
-    },
-  };
-
-  const c = config[direction];
-
-  return (
-    <div className={`flex items-center gap-2 px-4 py-3 rounded-2xl ${c.bg}`}>
-      {c.icon}
-      <span className={`text-sm font-medium ${c.text}`}>{label}</span>
     </div>
   );
 }
@@ -169,12 +129,15 @@ export function LeadershipDashboardPage() {
           </div>
         </div>
 
-        {/* Trend Card */}
+        {/* Monthly Trend Chart */}
         <div className="bg-white rounded-3xl border border-[var(--border)] p-6 mb-6 shadow-sm">
           <p className="text-sm uppercase tracking-widest text-[var(--text-muted)] mb-4">
-            Recent Trend
+            Last 30 Days
           </p>
-          <TrendIndicator direction={metrics.trend} label={metrics.trendLabel} />
+          <LeadershipTrendChart
+            data={metrics.monthlyTrend}
+            loading={metrics.monthlyTrendLoading}
+          />
         </div>
 
         {/* Categories */}

@@ -14,6 +14,9 @@ airtable:
   contractors:
     base_env: "AT_CONTRACTORS_BASE"
     table_env: "AT_CONTRACTORS_TABLE"
+  absent:
+    base_env: "AT_ABSENT_BASE"
+    table_env: "AT_ABSENT_TABLE"
 
 firestore:
   runs_collection: "integrity_runs"

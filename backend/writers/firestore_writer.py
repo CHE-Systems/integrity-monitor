@@ -174,10 +174,28 @@ class FirestoreWriter:
         by_type: Dict[str, int] = {}
         by_severity: Dict[str, int] = {}
         total = 0
+        
+        # Valid severity values for attendance issues
+        valid_severities = {"critical", "warning", "info"}
 
         for key, count in summary.items():
             # Skip special aggregate keys
-            if key in ["duplicate_groups_formed"] or key.startswith("attendance:"):
+            if key == "duplicate_groups_formed":
+                continue
+            
+            # Handle attendance keys specially
+            # Skip metric-specific keys like "attendance:duplicate_absence" or "attendance:duplicate_absence:warning"
+            # But count severity keys like "attendance:warning" and base "attendance"
+            if key.startswith("attendance:"):
+                # Check if this is a severity-only key (attendance:severity)
+                parts = key.split(":", 2)
+                if len(parts) == 2 and parts[1] in valid_severities:
+                    # This is "attendance:warning" or similar - count for severity breakdown only
+                    # Don't add to total here to avoid double-counting with base "attendance" key
+                    issue_type, severity = parts
+                    by_type[issue_type] = by_type.get(issue_type, 0) + count
+                    by_severity[severity] = by_severity.get(severity, 0) + count
+                # Otherwise, it's a metric-specific key like "attendance:duplicate_absence" - skip it
                 continue
 
             # Parse keys like "missing_field:info" or "missing_link"
@@ -190,8 +208,10 @@ class FirestoreWriter:
                 # Add to total
                 total += count
             else:
-                # Keys without severity (like "missing_field") - this is already aggregated by type
+                # Keys without severity (like "missing_field" or "attendance") - this is already aggregated by type
+                # This represents the total count for this issue type
                 by_type[key] = count
+                total += count
 
         return {
             "total": total,
