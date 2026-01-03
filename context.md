@@ -1,6 +1,6 @@
 # Context – CHE Data Integrity Monitor
 
-Last updated: 2025-01-27 (Conditional Check Execution Fix Complete)
+Last updated: 2025-01-27 (Firestore Project Mismatch Fix Complete)
 
 ## Mission & KPI 1
 
@@ -174,6 +174,65 @@ The issue had two parts:
 2. **FastAPI Body parameter** - When using `Body(default=None)`, the request body should be the value directly, not wrapped in another object. FastAPI will extract it as the parameter name.
 
 3. **Default values vs missing keys** - When checking for optional configuration, distinguish between "key missing" (should use default) and "key present with False value" (should respect False). The backend now explicitly checks for key existence before defaulting.
+
+---
+
+### Firestore Project Mismatch Fix (2025-01-27)
+
+**Issue:** Manual scans weren't loading or appearing in the runs list. The frontend would wait for the run document to appear but timeout after 30 seconds, showing "Could not find run" error. Backend logs showed successful document creation, but the frontend's `onSnapshot` listener and polling mechanism never detected the document.
+
+**What We Tried (That Didn't Work):**
+
+1. **Polling fallback mechanism** - Added a `getDoc` polling mechanism in `frontend/src/App.tsx` as a fallback to `onSnapshot`, thinking it was a race condition or real-time listener reliability issue. This didn't work because the document truly didn't exist in the project the frontend was querying.
+
+2. **Increased timeout** - Increased `maxWait` from 10s to 30s in `frontend/src/pages/RunsPage.tsx`, assuming the document creation was just slow. This didn't help because the document was being created in a completely different Firestore project.
+
+3. **Initial run document creation** - Added immediate run document creation at the start of `IntegrityRunner.run()` to ensure the document exists before any processing begins. This worked correctly but didn't solve the visibility issue.
+
+4. **Extensive logging instrumentation** - Added debug logs throughout the backend and frontend to trace document creation and detection. The logs revealed that backend was successfully writing documents, but frontend polling always returned `exists=false`.
+
+**Root Cause:**
+
+Backend and frontend were using **different Firestore projects**:
+- **Backend**: "che-toolkit" (from Application Default Credentials via `gcloud auth application-default login`)
+- **Frontend**: "data-integrity-monitor" (from `VITE_FIREBASE_PROJECT_ID` environment variable and `.firebaserc`)
+
+The backend was successfully writing run documents to the "che-toolkit" project, but the frontend was querying the "data-integrity-monitor" project. Since these are separate Firestore instances, the documents were never visible to the frontend.
+
+**What Worked:**
+
+Updated `backend/clients/firestore.py` to explicitly use the "data-integrity-monitor" project (matching the frontend and `.firebaserc`):
+
+1. **Added project ID resolution** (lines 46-51):
+   ```python
+   # Determine project ID - prefer env vars, fallback to data-integrity-monitor (matches .firebaserc)
+   project_id = (
+       os.getenv("GOOGLE_CLOUD_PROJECT")
+       or os.getenv("GCP_PROJECT_ID")
+       or "data-integrity-monitor"
+   )
+   ```
+
+2. **Explicitly pass project when creating Firestore client** (lines 72, 93, 113):
+   - When using service account credentials: `firestore.Client(credentials=credentials, project=cred_project_id)`
+   - When using Application Default Credentials: `firestore.Client(project=project_id)`
+
+   This ensures the backend always uses the same project as the frontend, regardless of what Application Default Credentials are configured.
+
+**Files Modified:**
+
+- `backend/clients/firestore.py` - Added explicit project ID resolution and passing to Firestore client constructor
+- All debug instrumentation removed after verification
+
+**Impact:** Both backend and frontend now use the same Firestore project ("data-integrity-monitor"), so run documents are immediately visible to the frontend. Manual scans now load correctly and appear in the runs list without timeouts.
+
+**Key Lessons:**
+
+1. **Project ID mismatch** - When debugging Firestore visibility issues, always verify that both backend and frontend are using the same Firestore project. Application Default Credentials can default to a different project than what's configured in environment variables or config files.
+
+2. **Explicit is better than implicit** - Always explicitly pass the project ID when creating Firestore clients rather than relying on Application Default Credentials, which may point to an unexpected project.
+
+3. **Logging reveals the truth** - Adding instrumentation to log project IDs on both sides quickly revealed the mismatch. The backend logs showed "che-toolkit" while frontend logs showed "data-integrity-monitor".
 
 ---
 

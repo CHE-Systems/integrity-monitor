@@ -43,6 +43,13 @@ class FirestoreClient:
                 from google.auth.exceptions import DefaultCredentialsError
                 from google.oauth2 import service_account
                 
+                # Determine project ID - prefer env vars, fallback to data-integrity-monitor (matches .firebaserc)
+                project_id = (
+                    os.getenv("GOOGLE_CLOUD_PROJECT")
+                    or os.getenv("GCP_PROJECT_ID")
+                    or "data-integrity-monitor"
+                )
+                
                 # Try to initialize with explicit credentials path if set
                 cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
                 if cred_path:
@@ -60,8 +67,9 @@ class FirestoreClient:
                     if os.path.exists(cred_path):
                         # Load credentials explicitly
                         credentials = service_account.Credentials.from_service_account_file(cred_path)
-                        self._client = firestore.Client(credentials=credentials, project=credentials.project_id)
-                        
+                        # Use project_id from credentials if available, otherwise use determined project_id
+                        cred_project_id = credentials.project_id if hasattr(credentials, 'project_id') and credentials.project_id else project_id
+                        self._client = firestore.Client(credentials=credentials, project=cred_project_id)
                         logger.info(f"Firestore client initialized with credentials from {cred_path}")
                     else:
                         logger.warning(
@@ -70,10 +78,10 @@ class FirestoreClient:
                             f"To fix: either set up ADC with 'gcloud auth application-default login' "
                             f"or remove GOOGLE_APPLICATION_CREDENTIALS from your environment."
                         )
-                        # Try default credentials
+                        # Try default credentials with explicit project
                         try:
-                            self._client = firestore.Client()
-                            logger.info("Firestore client initialized with Application Default Credentials")
+                            self._client = firestore.Client(project=project_id)
+                            logger.info(f"Firestore client initialized with Application Default Credentials (project: {project_id})")
                         except DefaultCredentialsError:
                             # Re-raise with more helpful message
                             raise RuntimeError(
@@ -84,10 +92,10 @@ class FirestoreClient:
                                 f"or remove/unset GOOGLE_APPLICATION_CREDENTIALS from your environment."
                             ) from None
                 else:
-                    # No explicit path, try default credentials
+                    # No explicit path, try default credentials with explicit project
                     try:
-                        self._client = firestore.Client()
-                        logger.info("Firestore client initialized with Application Default Credentials")
+                        self._client = firestore.Client(project=project_id)
+                        logger.info(f"Firestore client initialized with Application Default Credentials (project: {project_id})")
                     except DefaultCredentialsError:
                         # Re-raise with more helpful message
                         raise RuntimeError(

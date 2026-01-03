@@ -541,6 +541,7 @@ export function SchedulingPage() {
           attendance_rules?: boolean;
         }
       | undefined,
+    notify_slack: false,
     stop_condition_type: "none" as "none" | "max_runs" | "stop_at",
     max_runs: undefined as number | undefined,
     stop_at: undefined as string | undefined,
@@ -669,6 +670,11 @@ export function SchedulingPage() {
         scheduleData.stop_at = Timestamp.fromDate(stopAtDate);
       }
 
+      // Include notify_slack if enabled
+      if (scheduleForm.notify_slack) {
+        scheduleData.notify_slack = true;
+      }
+
       await createSchedule(scheduleData);
 
       setShowScheduleModal(false);
@@ -684,6 +690,7 @@ export function SchedulingPage() {
         times_of_day: undefined,
         entities: [],
         rules: undefined,
+        notify_slack: false,
         stop_condition_type: "none",
         max_runs: undefined,
         stop_at: undefined,
@@ -774,6 +781,9 @@ export function SchedulingPage() {
         updateData.max_runs = deleteField();
       }
 
+      // Include notify_slack setting
+      updateData.notify_slack = scheduleForm.notify_slack;
+
       await updateSchedule(scheduleId, updateData);
 
       setEditingSchedule(null);
@@ -789,6 +799,7 @@ export function SchedulingPage() {
         times_of_day: undefined,
         entities: [],
         rules: undefined,
+        notify_slack: false,
         stop_condition_type: "none",
         max_runs: undefined,
         stop_at: undefined,
@@ -870,6 +881,7 @@ export function SchedulingPage() {
       times_of_day: schedule.times_of_day,
       entities: schedule.run_config.entities || [],
       rules: schedule.run_config.rules,
+      notify_slack: schedule.notify_slack || false,
       stop_condition_type: stopConditionType,
       max_runs: maxRuns,
       stop_at: stopAt,
@@ -992,6 +1004,7 @@ export function SchedulingPage() {
                   times_of_day: undefined,
                   entities: [],
                   rules: undefined,
+                  notify_slack: false,
                   stop_condition_type: "none",
                   max_runs: undefined,
                   stop_at: undefined,
@@ -1299,6 +1312,7 @@ export function SchedulingPage() {
               times_of_day: undefined,
               entities: [],
               rules: undefined,
+              notify_slack: false,
               stop_condition_type: "none",
               max_runs: undefined,
               stop_at: undefined,
@@ -1662,6 +1676,7 @@ function CreateScheduleModal({
       required_fields?: Record<string, string[]>;
       attendance_rules?: boolean;
     };
+    notify_slack: boolean;
     stop_condition_type: "none" | "max_runs" | "stop_at";
     max_runs?: number;
     stop_at?: string;
@@ -3094,6 +3109,21 @@ function CreateScheduleModal({
               )}
             </div>
           </div>
+        </div>
+
+        {/* Slack Notification Toggle */}
+        <div className="mt-4 flex items-center justify-center">
+          <label className="flex items-center gap-2 cursor-pointer p-2 rounded-lg hover:bg-[var(--bg-mid)]/50">
+            <input
+              type="checkbox"
+              checked={form.notify_slack}
+              onChange={(e) => setForm({ ...form, notify_slack: e.target.checked })}
+              className="w-4 h-4"
+            />
+            <span className="text-sm text-[var(--text-main)]">
+              Send Slack notification when scan completes with issues
+            </span>
+          </label>
         </div>
 
         <div className="flex justify-end space-x-3 mt-6">

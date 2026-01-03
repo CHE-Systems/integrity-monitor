@@ -350,12 +350,21 @@ def _run_integrity_background(
     run_config: Optional[Dict[str, Any]] = None
 ):
     """Run integrity scan in background thread."""
+    thread_runner = None
     try:
         # Create a new runner instance for this thread
         if runner is None:
             logger.error("IntegrityRunner not available - cannot start scan", extra={"run_id": run_id})
-            return
-        thread_runner = IntegrityRunner()
+            # Try to create runner anyway for error handling
+            try:
+                thread_runner = IntegrityRunner()
+            except Exception:
+                pass
+            if thread_runner is None:
+                return
+        else:
+            thread_runner = IntegrityRunner()
+        
         result = thread_runner.run(
             run_id=run_id,
             trigger=trigger,
@@ -373,6 +382,20 @@ def _run_integrity_background(
             extra={"run_id": run_id, "error": str(exc)},
             exc_info=True,
         )
+        # Write error status to Firestore so UI can show the failure
+        if thread_runner is not None:
+            try:
+                error_metadata = {
+                    "status": "error",
+                    "ended_at": datetime.now(timezone.utc),
+                    "error_message": str(exc),
+                }
+                thread_runner._firestore_writer.write_run(run_id, {}, error_metadata)
+            except Exception as firestore_exc:
+                logger.warning(
+                    "Failed to write error status to Firestore",
+                    extra={"run_id": run_id, "error": str(firestore_exc)},
+                )
     finally:
         # Clean up running scan tracking
         with running_scans_lock:
@@ -2015,3 +2038,187 @@ def delete_rule(
         )
 
 
+# ============================================================================
+# Slack Webhook Admin Endpoints
+# ============================================================================
+
+
+class SlackWebhookRequest(BaseModel):
+    """Request body for setting Slack webhook URL."""
+    webhook_url: str
+
+
+@app.get("/admin/slack-webhook", dependencies=[Depends(verify_firebase_token)])
+def get_slack_webhook_status_endpoint(request: Request, user: dict = Depends(verify_firebase_token)):
+    """Get the current status of Slack webhook configuration.
+    
+    Only shows whether webhook is configured and a masked URL - does not reveal the actual URL.
+    Requires admin access.
+    
+    Returns:
+        - configured: bool - Whether a webhook URL is set
+        - source: str - Where the webhook is configured ('environment' or 'secret_manager')
+        - masked_url: str - Partially masked URL for confirmation
+    """
+    request_id = getattr(request.state, "request_id", "unknown")
+    
+    # Check if user is admin
+    if not user.get("isAdmin", False):
+        logger.warning(
+            "Non-admin user attempted to access Slack webhook status",
+            extra={"user_id": user.get("uid"), "request_id": request_id},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required",
+        )
+    
+    try:
+        from .services.slack_notifier import get_slack_webhook_status
+        status_info = get_slack_webhook_status()
+        logger.info(
+            "Slack webhook status checked",
+            extra={"configured": status_info.get("configured"), "request_id": request_id},
+        )
+        return status_info
+    except Exception as exc:
+        logger.error(
+            "Failed to get Slack webhook status",
+            extra={"error": str(exc), "request_id": request_id},
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Failed to get Slack webhook status", "message": str(exc)},
+        )
+
+
+@app.post("/admin/slack-webhook", dependencies=[Depends(verify_firebase_token)])
+def set_slack_webhook_endpoint(
+    request: Request,
+    webhook_request: SlackWebhookRequest,
+    user: dict = Depends(verify_firebase_token),
+):
+    """Set the Slack webhook URL in Google Secret Manager.
+    
+    Requires admin access.
+    
+    Args:
+        webhook_request: Request body containing webhook_url
+        
+    Returns:
+        - success: bool
+        - message: str
+    """
+    request_id = getattr(request.state, "request_id", "unknown")
+    
+    # Check if user is admin
+    if not user.get("isAdmin", False):
+        logger.warning(
+            "Non-admin user attempted to set Slack webhook",
+            extra={"user_id": user.get("uid"), "request_id": request_id},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required",
+        )
+    
+    webhook_url = webhook_request.webhook_url
+    
+    # Validate webhook URL format
+    if not webhook_url.startswith("https://hooks.slack.com/"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid Slack webhook URL. Must start with 'https://hooks.slack.com/'",
+        )
+    
+    try:
+        from .services.slack_notifier import set_slack_webhook_secret
+        success = set_slack_webhook_secret(webhook_url)
+        
+        if success:
+            logger.info(
+                "Slack webhook URL updated",
+                extra={"user_id": user.get("uid"), "request_id": request_id},
+            )
+            return {"success": True, "message": "Slack webhook URL saved successfully"}
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to save Slack webhook URL to Secret Manager",
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(
+            "Failed to set Slack webhook",
+            extra={"error": str(exc), "request_id": request_id},
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Failed to set Slack webhook", "message": str(exc)},
+        )
+
+
+@app.post("/admin/slack-webhook/test", dependencies=[Depends(verify_firebase_token)])
+def test_slack_webhook_endpoint(
+    request: Request,
+    user: dict = Depends(verify_firebase_token),
+):
+    """Send a test notification to verify Slack webhook is working.
+    
+    Requires admin access.
+    
+    Returns:
+        - success: bool
+        - message: str
+    """
+    request_id = getattr(request.state, "request_id", "unknown")
+    
+    # Check if user is admin
+    if not user.get("isAdmin", False):
+        logger.warning(
+            "Non-admin user attempted to test Slack webhook",
+            extra={"user_id": user.get("uid"), "request_id": request_id},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required",
+        )
+    
+    try:
+        from .services.slack_notifier import get_slack_notifier
+        notifier = get_slack_notifier()
+        
+        # Create a test notification
+        success = notifier.send_notification(
+            run_id="test-notification",
+            status="warning",  # Use warning to ensure it actually sends
+            issue_counts={"test": 1},
+            trigger="test",
+            duration_ms=1000,
+            error_message=None,
+        )
+        
+        if success:
+            logger.info(
+                "Slack test notification sent",
+                extra={"user_id": user.get("uid"), "request_id": request_id},
+            )
+            return {"success": True, "message": "Test notification sent successfully"}
+        else:
+            return {
+                "success": False,
+                "message": "Webhook not configured or notification failed. Check server logs for details.",
+            }
+    except Exception as exc:
+        logger.error(
+            "Failed to send test notification",
+            extra={"error": str(exc), "request_id": request_id},
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Failed to send test notification", "message": str(exc)},
+        )

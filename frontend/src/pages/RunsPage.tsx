@@ -532,27 +532,41 @@ export function RunsPage() {
   // Wait for Firestore document to be created
   const waitForRunDocument = async (
     runId: string,
-    maxWait = 10000
+    maxWait = 30000
   ): Promise<void> => {
     const { doc, getDoc } = await import("firebase/firestore");
     const { db } = await import("../config/firebase");
     const checkInterval = 500;
     const startTime = Date.now();
 
+    console.log(
+      `[RunsPage] Starting to wait for run document: ${runId} (maxWait: ${maxWait}ms)`
+    );
+
     return new Promise((resolve) => {
       const checkDocument = async () => {
         try {
           const runRef = doc(db, "integrity_runs", runId);
           const snapshot = await getDoc(runRef);
+          const elapsed = Date.now() - startTime;
+          const exists = snapshot.exists();
 
-          if (snapshot.exists()) {
+          console.log(
+            `[RunsPage] Polling check: exists=${exists}, elapsed=${elapsed}ms`
+          );
+
+          if (exists) {
+            console.log(`[RunsPage] Run document found after ${elapsed}ms`);
             resolve();
             return;
           }
 
-          if (Date.now() - startTime >= maxWait) {
+          if (elapsed >= maxWait) {
             // Document still doesn't exist after maxWait, but navigate anyway
             // The useRunStatus hook will handle retrying
+            console.log(
+              `[RunsPage] Timeout reached after ${elapsed}ms, navigating anyway`
+            );
             resolve();
             return;
           }
@@ -560,6 +574,7 @@ export function RunsPage() {
           setTimeout(checkDocument, checkInterval);
         } catch (error) {
           // On error, resolve anyway and let the page handle it
+          console.error("[RunsPage] Error checking for run document:", error);
           resolve();
         }
       };

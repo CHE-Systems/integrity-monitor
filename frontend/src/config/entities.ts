@@ -12,10 +12,10 @@
  * These entities will appear in scan configuration, scheduling, and rules pages.
  */
 export const ACTIVE_ENTITIES = [
-  "contractors",
-  "students",
-  "parents",
   "absent",
+  "contractors",
+  "parents",
+  "students",
 ] as const;
 
 /**

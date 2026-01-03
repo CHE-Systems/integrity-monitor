@@ -36,6 +36,7 @@ export interface Schedule {
   interval_minutes?: number; // for hourly frequency
   times_of_day?: string[]; // for custom_times frequency
   run_config: ScheduleRunConfig;
+  notify_slack?: boolean; // Optional: send Slack notification on completion
   next_run_at: Timestamp;
   last_run_at?: Timestamp;
   last_run_id?: string;
@@ -110,6 +111,7 @@ export function useFirestoreSchedules(groupId?: string) {
     interval_minutes?: number;
     times_of_day?: string[];
     run_config: ScheduleRunConfig;
+    notify_slack?: boolean;
     next_run_at: Timestamp;
     stop_at?: Timestamp;
     max_runs?: number;
@@ -144,6 +146,7 @@ export function useFirestoreSchedules(groupId?: string) {
         | "interval_minutes"
         | "times_of_day"
         | "run_config"
+        | "notify_slack"
         | "next_run_at"
         | "stop_at"
         | "max_runs"

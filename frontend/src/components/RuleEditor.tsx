@@ -54,6 +54,15 @@ export function RuleEditor({
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [conditionsJson, setConditionsJson] = useState<string>("");
   const [thresholdsJson, setThresholdsJson] = useState<string>("");
+  const [editMode, setEditMode] = useState<"form" | "json">("form");
+  const [rawJson, setRawJson] = useState<string>("");
+
+  // Field lookup states (for required fields)
+  const [fieldSearchTerm, setFieldSearchTerm] = useState("");
+  const [fieldOptions, setFieldOptions] = useState<
+    Array<{ id: string; name: string }>
+  >([]);
+  const [fieldLookupLoading, setFieldLookupLoading] = useState(false);
 
   // Filter category options based on entity - attendance_rules only for attendance table
   const categoryOptions = React.useMemo(() => {
@@ -79,10 +88,12 @@ export function RuleEditor({
           ? JSON.stringify(initialRule.thresholds, null, 2)
           : ""
       );
+      setRawJson(JSON.stringify(initialRule, null, 2));
     } else {
       setRuleData({});
       setConditionsJson("");
       setThresholdsJson("");
+      setRawJson("{}");
     }
     const entity = initialEntity || currentEntity || "students";
     setSelectedEntity(entity);
@@ -94,13 +105,70 @@ export function RuleEditor({
     }
     setSelectedCategory(category);
     setErrors({});
+    setEditMode("form"); // Reset to form mode when opening
   }, [initialRule, initialCategory, initialEntity, currentEntity, isOpen]);
+
+  // Lookup fields when search term changes (for required fields)
+  useEffect(() => {
+    if (!selectedEntity || !fieldSearchTerm || fieldSearchTerm.length < 2) {
+      setFieldOptions([]);
+      return;
+    }
+
+    const lookupFields = async () => {
+      setFieldLookupLoading(true);
+      try {
+        const token = await getToken();
+        if (!token) {
+          console.error("Not authenticated");
+          return;
+        }
+        const response = await fetch(
+          `${API_BASE}/airtable/schema/fields/${selectedEntity}?search=${encodeURIComponent(
+            fieldSearchTerm
+          )}`,
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+          }
+        );
+        if (response.ok) {
+          const data = await response.json();
+          setFieldOptions(data.fields || []);
+        }
+      } catch (error) {
+        console.error("Failed to lookup fields:", error);
+      } finally {
+        setFieldLookupLoading(false);
+      }
+    };
+
+    const debounceTimer = setTimeout(lookupFields, 300);
+    return () => clearTimeout(debounceTimer);
+  }, [selectedEntity, fieldSearchTerm, getToken]);
 
   if (!isOpen) return null;
 
   const validate = (): boolean => {
     const newErrors: Record<string, string> = {};
 
+    // JSON mode validation
+    if (editMode === "json") {
+      try {
+        const parsed = JSON.parse(rawJson);
+        // Basic validation - ensure it's an object
+        if (typeof parsed !== "object" || parsed === null) {
+          newErrors.rawJson = "Rule must be a JSON object";
+        }
+      } catch {
+        newErrors.rawJson = "Invalid JSON format";
+      }
+      setErrors(newErrors);
+      return Object.keys(newErrors).length === 0;
+    }
+
+    // Form mode validation
     if (selectedCategory === "duplicates") {
       if (!ruleData.description)
         newErrors.description = "Description is required";
@@ -142,7 +210,24 @@ export function RuleEditor({
   };
 
   const handleSave = () => {
-    // Ensure JSON fields are parsed before saving
+    if (!validate()) {
+      return;
+    }
+
+    // JSON mode - parse and save directly
+    if (editMode === "json") {
+      try {
+        const parsed = JSON.parse(rawJson);
+        onSave(parsed, selectedCategory, selectedEntity);
+        handleClose();
+        return;
+      } catch {
+        // Validation should have caught this
+        return;
+      }
+    }
+
+    // Form mode - ensure JSON fields are parsed before saving
     if (selectedCategory === "duplicates" && conditionsJson.trim() !== "") {
       try {
         const parsed = JSON.parse(conditionsJson);
@@ -165,10 +250,8 @@ export function RuleEditor({
       }
     }
 
-    if (validate()) {
-      onSave(ruleData, selectedCategory, selectedEntity);
-      handleClose();
-    }
+    onSave(ruleData, selectedCategory, selectedEntity);
+    handleClose();
   };
 
   const handleClose = () => {
@@ -375,65 +458,18 @@ export function RuleEditor({
     </>
   );
 
-  const renderRequiredFieldFields = () => {
-    const [fieldSearchTerm, setFieldSearchTerm] = useState("");
-    const [fieldOptions, setFieldOptions] = useState<
-      Array<{ id: string; name: string }>
-    >([]);
-    const [fieldLookupLoading, setFieldLookupLoading] = useState(false);
+  const handleFieldSelect = (fieldId: string, fieldName: string) => {
+    updateField("field", fieldName);
+    updateField("field_id", fieldId);
+    // Auto-populate field_name for rule label, but allow editing
+    if (!ruleData.field_name) {
+      updateField("field_name", fieldName);
+    }
+    setFieldSearchTerm("");
+    setFieldOptions([]);
+  };
 
-    // Lookup fields when search term changes
-    useEffect(() => {
-      if (!selectedEntity || !fieldSearchTerm || fieldSearchTerm.length < 2) {
-        setFieldOptions([]);
-        return;
-      }
-
-      const lookupFields = async () => {
-        setFieldLookupLoading(true);
-        try {
-          const token = await getToken();
-          if (!token) {
-            console.error("Not authenticated");
-            return;
-          }
-          const response = await fetch(
-            `${API_BASE}/airtable/schema/fields/${selectedEntity}?search=${encodeURIComponent(
-              fieldSearchTerm
-            )}`,
-            {
-              headers: {
-                Authorization: `Bearer ${token}`,
-              },
-            }
-          );
-          if (response.ok) {
-            const data = await response.json();
-            setFieldOptions(data.fields || []);
-          }
-        } catch (error) {
-          console.error("Failed to lookup fields:", error);
-        } finally {
-          setFieldLookupLoading(false);
-        }
-      };
-
-      const timeoutId = setTimeout(lookupFields, 300); // Debounce
-      return () => clearTimeout(timeoutId);
-    }, [fieldSearchTerm, selectedEntity]);
-
-    const handleFieldSelect = (fieldId: string, fieldName: string) => {
-      updateField("field", fieldName);
-      updateField("field_id", fieldId);
-      // Auto-populate field_name for rule label, but allow editing
-      if (!ruleData.field_name) {
-        updateField("field_name", fieldName);
-      }
-      setFieldSearchTerm("");
-      setFieldOptions([]);
-    };
-
-    return (
+  const renderRequiredFieldFields = () => (
       <>
         <div>
           <label className="block text-sm font-medium text-[var(--text-main)] mb-2">
@@ -545,8 +581,7 @@ export function RuleEditor({
           </select>
         </div>
       </>
-    );
-  };
+  );
 
   const renderAttendanceFields = () => (
     <div>
@@ -632,9 +667,88 @@ export function RuleEditor({
           </button>
         </div>
 
+        {/* Edit Mode Tabs */}
+        <div className="flex gap-2 mb-4 border-b border-[var(--border)]">
+          <button
+            onClick={() => {
+              // Sync ruleData to rawJson before switching
+              if (editMode === "form") {
+                setRawJson(JSON.stringify(ruleData, null, 2));
+              }
+              setEditMode("form");
+            }}
+            className={`px-4 py-2 font-medium transition-colors ${
+              editMode === "form"
+                ? "text-[var(--cta-blue)] border-b-2 border-[var(--cta-blue)]"
+                : "text-[var(--text-muted)] hover:text-[var(--text-main)]"
+            }`}
+          >
+            Form Editor
+          </button>
+          <button
+            onClick={() => {
+              // Sync ruleData to rawJson before switching
+              setRawJson(JSON.stringify(ruleData, null, 2));
+              setEditMode("json");
+            }}
+            className={`px-4 py-2 font-medium transition-colors ${
+              editMode === "json"
+                ? "text-[var(--cta-blue)] border-b-2 border-[var(--cta-blue)]"
+                : "text-[var(--text-muted)] hover:text-[var(--text-main)]"
+            }`}
+          >
+            Raw JSON
+          </button>
+        </div>
+
         <div className="space-y-4">
-          {/* Rule Type Selection (only for create mode) */}
-          {mode === "create" && (
+          {/* JSON Editor Mode */}
+          {editMode === "json" ? (
+            <div>
+              <label className="block text-sm font-medium text-[var(--text-main)] mb-2">
+                Rule JSON
+              </label>
+              <textarea
+                value={rawJson}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setRawJson(value);
+                  // Try to parse and sync to ruleData for live preview
+                  try {
+                    const parsed = JSON.parse(value);
+                    setRuleData(parsed);
+                    // Clear JSON error if it exists
+                    if (errors.rawJson) {
+                      setErrors((prev) => {
+                        const newErrors = { ...prev };
+                        delete newErrors.rawJson;
+                        return newErrors;
+                      });
+                    }
+                  } catch {
+                    // Invalid JSON - allow user to continue editing
+                  }
+                }}
+                className={`w-full p-3 border rounded-lg font-mono text-sm ${
+                  errors.rawJson
+                    ? "border-red-500"
+                    : "border-[var(--border)]"
+                }`}
+                rows={20}
+                placeholder='{\n  "rule_id": "required_field_rule.parents.students",\n  "entity": "parents",\n  "field": "Student",\n  "message": "Parents must have at least one student linked.",\n  "severity": "warning",\n  "enabled": true\n}'
+              />
+              {errors.rawJson && (
+                <p className="text-red-500 text-xs mt-1">{errors.rawJson}</p>
+              )}
+              <p className="text-xs text-[var(--text-muted)] mt-2">
+                Edit the complete rule definition as JSON. You can change any field including field names, IDs, and messages.
+              </p>
+            </div>
+          ) : (
+            <>
+              {/* Form Editor Mode */}
+              {/* Rule Type Selection (only for create mode) */}
+              {mode === "create" && (
             <div>
               <label className="block text-sm font-medium text-[var(--text-main)] mb-2">
                 Rule Type *
@@ -678,8 +792,10 @@ export function RuleEditor({
             </div>
           )}
 
-          {/* Rule-specific fields */}
-          {renderFields()}
+              {/* Rule-specific fields */}
+              {renderFields()}
+            </>
+          )}
         </div>
 
         <div className="mt-6 flex gap-3">

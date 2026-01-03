@@ -18,6 +18,7 @@ export interface ScanConfig {
     required_fields?: Record<string, string[]>;
     attendance_rules?: boolean;
   };
+  notify_slack?: boolean; // Optional: send Slack notification on completion
 }
 
 interface ScanConfigModalProps {
@@ -56,6 +57,7 @@ export function ScanConfigModal({
   const { getToken } = useAuth();
   const { loadRules } = useRules();
   const [rules, setRules] = useState<any>(null);
+  const [notifySlack, setNotifySlack] = useState(false);
 
   // Reset state when modal closes to ensure clean slate on next open
   useEffect(() => {
@@ -66,6 +68,7 @@ export function ScanConfigModal({
       setRules(null);
       setSchema(null);
       setExpandedTables(new Set());
+      setNotifySlack(false);
     }
   }, [isOpen]);
 
@@ -76,6 +79,13 @@ export function ScanConfigModal({
     const loadRulesData = async () => {
       try {
         const rulesData = await loadRules();
+        console.log("[ScanConfigModal] Loaded rules data:", rulesData);
+        console.log("[ScanConfigModal] Rules structure:", {
+          duplicates: rulesData?.duplicates ? Object.keys(rulesData.duplicates) : [],
+          relationships: rulesData?.relationships ? Object.keys(rulesData.relationships) : [],
+          required_fields: rulesData?.required_fields ? Object.keys(rulesData.required_fields) : [],
+        });
+        console.log("[ScanConfigModal] Full rules structure for debugging:", JSON.stringify(rulesData, null, 2));
         setRules(rulesData);
       } catch (error) {
         console.error("Failed to load rules:", error);
@@ -167,14 +177,64 @@ export function ScanConfigModal({
   // This was causing ALL tables to be auto-selected, leading to unintended scans
   // Users must now explicitly select tables and rules
 
+  // Helper to find matching entity name in rules (handles singular/plural mismatches)
+  const findEntityInRules = (
+    category: "duplicates" | "relationships" | "required_fields",
+    entityName: string
+  ): string | null => {
+    if (!rules || !rules[category]) return null;
+    
+    const availableEntities = Object.keys(rules[category]);
+    
+    // Try exact match first
+    if (availableEntities.includes(entityName)) {
+      return entityName;
+    }
+    
+    // Try singular/plural variations
+    const entityLower = entityName.toLowerCase();
+    const matchingEntity = availableEntities.find(e => {
+      const eLower = e.toLowerCase();
+      return (
+        eLower === entityLower ||
+        eLower === entityLower.slice(0, -1) || // entity is singular of entityName
+        eLower === entityLower + 's' || // entity is plural of entityName
+        entityLower === eLower + 's' || // entityName is plural of entity
+        entityLower === eLower.slice(0, -1) // entityName is singular of entity
+      );
+    });
+    
+    return matchingEntity || null;
+  };
+
   // Get all rule IDs for an entity in a category
   const getAllRuleIds = (
     category: "duplicates" | "relationships" | "required_fields",
     entityName: string
   ): string[] => {
     if (!rules) return [];
-    const categoryRules = rules[category]?.[entityName];
-    if (!categoryRules) return [];
+    
+    // Find the actual entity name in the rules (handles name mismatches)
+    const actualEntityName = findEntityInRules(category, entityName);
+    if (!actualEntityName) {
+      const availableEntities = rules[category] ? Object.keys(rules[category]) : [];
+      console.log(`[ScanConfigModal] No rules found for ${category}.${entityName}`, {
+        category,
+        entityName,
+        availableEntities,
+        rulesStructure: rules[category],
+      });
+      return [];
+    }
+    
+    if (actualEntityName !== entityName) {
+      console.log(`[ScanConfigModal] Using entity name mapping: ${entityName} -> ${actualEntityName} for ${category}`);
+    }
+    
+    const categoryRules = rules[category]?.[actualEntityName];
+    if (!categoryRules) {
+      return [];
+    }
 
     if (category === "duplicates") {
       const dupDef = categoryRules as { likely?: any[]; possible?: any[] };
@@ -582,6 +642,7 @@ export function ScanConfigModal({
       entities:
         selectedEntities.size > 0 ? Array.from(selectedEntities) : undefined,
       rules: hasRules ? selectedRules : undefined,
+      notify_slack: notifySlack,
     };
 
     console.log(
@@ -801,9 +862,13 @@ export function ScanConfigModal({
                           <div className="px-3 pb-3 pt-2 space-y-4 border-t border-[var(--border)] bg-[var(--bg-mid)]/20">
                             {/* Duplicate Detection Rules */}
                             {(() => {
-                              const dupDef = rules.duplicates?.[entity] as
+                              const actualEntityName = findEntityInRules("duplicates", entity);
+                              if (!actualEntityName) return null;
+                              
+                              const dupDef = rules.duplicates?.[actualEntityName] as
                                 | { likely?: any[]; possible?: any[] }
                                 | undefined;
+                              
                               if (!dupDef) return null;
 
                               const likelyRules = dupDef.likely || [];
@@ -939,7 +1004,11 @@ export function ScanConfigModal({
 
                             {/* Relationship Rules */}
                             {(() => {
-                              const relRules = rules.relationships?.[entity];
+                              const actualEntityName = findEntityInRules("relationships", entity);
+                              if (!actualEntityName) return null;
+                              
+                              const relRules = rules.relationships?.[actualEntityName];
+                              
                               if (
                                 !relRules ||
                                 Object.keys(relRules).length === 0
@@ -1016,7 +1085,11 @@ export function ScanConfigModal({
 
                             {/* Required Field Rules */}
                             {(() => {
-                              const reqFields = rules.required_fields?.[entity];
+                              const actualEntityName = findEntityInRules("required_fields", entity);
+                              if (!actualEntityName) return null;
+                              
+                              const reqFields = rules.required_fields?.[actualEntityName];
+                              
                               if (
                                 !reqFields ||
                                 !Array.isArray(reqFields) ||
@@ -1178,6 +1251,21 @@ export function ScanConfigModal({
               </>
             )}
           </div>
+        </div>
+
+        {/* Slack Notification Toggle */}
+        <div className="mt-4 flex items-center justify-center">
+          <label className="flex items-center gap-2 cursor-pointer p-2 rounded-lg hover:bg-[var(--bg-mid)]/50">
+            <input
+              type="checkbox"
+              checked={notifySlack}
+              onChange={(e) => setNotifySlack(e.target.checked)}
+              className="w-4 h-4"
+            />
+            <span className="text-sm text-[var(--text-main)]">
+              Send Slack notification when scan completes with issues
+            </span>
+          </label>
         </div>
 
         {/* Action Buttons */}

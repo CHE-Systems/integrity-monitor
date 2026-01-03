@@ -19,6 +19,7 @@ from google.cloud import firestore
 
 from pathlib import Path
 import json
+import yaml
 from ..config.config_loader import load_runtime_config
 from ..config.models import (
     DuplicateDefinition,
@@ -49,6 +50,42 @@ class RulesService:
             logger.error(f"Failed to initialize Firestore client: {exc}")
             self.db = None
 
+    def _get_entities_from_mapping(self) -> List[str]:
+        """Get list of entities from table_mapping.yaml dynamically."""
+        try:
+            mapping_path = Path(__file__).parent.parent / "config" / "table_mapping.yaml"
+            if not mapping_path.exists():
+                logger.warning(f"Table mapping file not found at {mapping_path}, using default entities")
+                return ["students", "parents", "contractors"]
+            
+            with open(mapping_path, "r") as f:
+                mapping_data = yaml.safe_load(f)
+            
+            entity_mapping = mapping_data.get("entity_table_mapping", {})
+            entities = list(entity_mapping.keys())
+            
+            if entities:
+                logger.info(f"Loaded {len(entities)} entities from table_mapping.yaml: {entities}")
+                return entities
+            else:
+                logger.warning("No entities found in table_mapping.yaml, using default entities")
+                return ["students", "parents", "contractors"]
+        except Exception as exc:
+            logger.warning(f"Failed to load entities from table_mapping.yaml: {exc}, using default entities", exc_info=True)
+            return ["students", "parents", "contractors"]
+
+    def _get_entity_variants(self, entity: str) -> List[str]:
+        """Get both singular and plural variants of an entity name."""
+        variants = [entity]
+        # Common singular/plural mappings
+        if entity.endswith('s'):
+            # Plural -> singular
+            variants.append(entity[:-1])
+        else:
+            # Singular -> plural
+            variants.append(entity + 's')
+        return list(set(variants))  # Remove duplicates
+
     def _load_duplicates_from_firestore(self) -> Dict[str, Any]:
         """Load duplicate rules from rules/duplicates/{entity}/* collections."""
         if not self.db:
@@ -56,54 +93,88 @@ class RulesService:
 
         duplicates = {}
 
-        # Query each entity collection
-        entities = ["students", "parents", "contractors"]
+        # Query each entity collection - dynamically discover entities
+        entities = self._get_entities_from_mapping()
 
         for entity in entities:
-            collection_path = f"rules/duplicates/{entity}"
-            try:
-                docs = self.db.collection(collection_path).where("enabled", "==", True).stream()
+            # Try both singular and plural forms
+            entity_variants = self._get_entity_variants(entity)
+            logger.debug(f"Checking entity '{entity}' with variants: {entity_variants}")
+            
+            for variant in entity_variants:
+                collection_path = f"rules/duplicates/{variant}"
+                try:
+                    logger.info(f"Querying Firestore for duplicates: {collection_path}")
+                    # First check if collection exists by trying to get all docs (no filter)
+                    all_docs = list(self.db.collection(collection_path).stream())
+                    if not all_docs:
+                        logger.debug(f"Collection {collection_path} is empty or doesn't exist")
+                        continue
+                    
+                    logger.info(f"Found {len(all_docs)} total document(s) in {collection_path}")
+                    
+                    # Check enabled status
+                    enabled_docs = [d for d in all_docs if d.to_dict().get("enabled", True)]
+                    disabled_docs = [d for d in all_docs if not d.to_dict().get("enabled", True)]
+                    
+                    if disabled_docs:
+                        logger.warning(f"Found {len(disabled_docs)} disabled rule(s) in {collection_path}")
+                    
+                    # Now query with enabled filter (or include all if enabled field is missing)
+                    docs = self.db.collection(collection_path).where("enabled", "==", True).stream()
 
-                likely = []
-                possible = []
-                likely_rule_ids = []
-                possible_rule_ids = []
+                    likely = []
+                    possible = []
+                    likely_rule_ids = []
+                    possible_rule_ids = []
+                    
+                    doc_count = 0
+                    for doc in docs:
+                        doc_count += 1
+                        rule_data = doc.to_dict()
+                        # Always ensure rule_id is set - use doc.id if missing or empty
+                        if not rule_data.get("rule_id"):
+                            rule_data["rule_id"] = doc.id
+                        # Also store doc.id for reference (in case rule_id was empty and we need it later)
+                        rule_data["_doc_id"] = doc.id
 
-                for doc in docs:
-                    rule_data = doc.to_dict()
-                    # Always ensure rule_id is set - use doc.id if missing or empty
-                    if not rule_data.get("rule_id"):
-                        rule_data["rule_id"] = doc.id
-                    # Also store doc.id for reference (in case rule_id was empty and we need it later)
-                    rule_data["_doc_id"] = doc.id
+                        rule_id = rule_data["rule_id"]
+                        severity = rule_data.get("severity", "likely")
+                        if severity == "likely":
+                            likely.append(rule_data)
+                            likely_rule_ids.append(rule_id)
+                        else:
+                            possible.append(rule_data)
+                            possible_rule_ids.append(rule_id)
 
-                    rule_id = rule_data["rule_id"]
-                    severity = rule_data.get("severity", "likely")
-                    if severity == "likely":
-                        likely.append(rule_data)
-                        likely_rule_ids.append(rule_id)
+                    logger.info(f"Found {doc_count} enabled documents in {collection_path} (likely: {len(likely)}, possible: {len(possible)})")
+                    
+                    if likely or possible:
+                        # Use the canonical entity name (from mapping), not the variant
+                        if entity not in duplicates:
+                            duplicates[entity] = {"likely": [], "possible": []}
+                        duplicates[entity]["likely"].extend(likely)
+                        duplicates[entity]["possible"].extend(possible)
+                        logger.info(
+                            f"✅ Loaded duplicate rules for {entity} from {variant}",
+                            extra={
+                                "category": "duplicates",
+                                "entity": entity,
+                                "variant": variant,
+                                "likely_count": len(likely),
+                                "possible_count": len(possible),
+                            }
+                        )
+                        break  # Found rules, no need to check other variants
                     else:
-                        possible.append(rule_data)
-                        possible_rule_ids.append(rule_id)
-
-                if likely or possible:
-                    duplicates[entity] = {
-                        "likely": likely,
-                        "possible": possible,
-                    }
-                    logger.info(
-                        f"Loaded duplicate rules for {entity}",
-                        extra={
-                            "category": "duplicates",
-                            "entity": entity,
-                            "likely_count": len(likely),
-                            "possible_count": len(possible),
-                            "likely_rule_ids": likely_rule_ids,
-                            "possible_rule_ids": possible_rule_ids,
-                        }
-                    )
-            except Exception as exc:
-                logger.warning(f"Failed to load duplicates for {entity}: {exc}")
+                        logger.debug(f"Collection {collection_path} exists but no enabled rules found")
+                except Exception as exc:
+                    logger.warning(f"❌ Failed to query {collection_path}: {exc}", exc_info=True)
+                    continue
+            
+            # Log if no rules found for this entity
+            if entity not in duplicates:
+                logger.debug(f"No duplicate rules found for {entity} in any variant")
 
         total_likely = sum(len(d.get("likely", [])) for d in duplicates.values())
         total_possible = sum(len(d.get("possible", [])) for d in duplicates.values())
@@ -128,36 +199,54 @@ class RulesService:
 
         relationships = {}
 
-        # Query each entity collection
-        entities = ["students", "parents", "contractors"]
+        # Query each entity collection - dynamically discover entities
+        entities = self._get_entities_from_mapping()
 
         for entity in entities:
-            collection_path = f"rules/relationships/{entity}"
-            try:
-                docs = self.db.collection(collection_path).where("enabled", "==", True).stream()
+            # Try both singular and plural forms
+            entity_variants = self._get_entity_variants(entity)
+            
+            for variant in entity_variants:
+                collection_path = f"rules/relationships/{variant}"
+                try:
+                    logger.debug(f"Querying Firestore for relationships: {collection_path}")
+                    docs = self.db.collection(collection_path).where("enabled", "==", True).stream()
 
-                entity_rels = {}
-                rel_keys = []
-                for doc in docs:
-                    rule_data = doc.to_dict()
-                    # Use document ID as the relationship key
-                    rel_key = doc.id
-                    entity_rels[rel_key] = rule_data
-                    rel_keys.append(rel_key)
+                    entity_rels = {}
+                    rel_keys = []
+                    doc_count = 0
+                    for doc in docs:
+                        doc_count += 1
+                        rule_data = doc.to_dict()
+                        # Use document ID as the relationship key
+                        rel_key = doc.id
+                        entity_rels[rel_key] = rule_data
+                        rel_keys.append(rel_key)
 
-                if entity_rels:
-                    relationships[entity] = entity_rels
-                    logger.info(
-                        f"Loaded relationship rules for {entity}",
-                        extra={
-                            "category": "relationships",
-                            "entity": entity,
-                            "rule_count": len(entity_rels),
-                            "relationship_keys": rel_keys,
-                        }
-                    )
-            except Exception as exc:
-                logger.warning(f"Failed to load relationships for {entity}: {exc}")
+                    logger.debug(f"Found {doc_count} documents in {collection_path}")
+                    
+                    if entity_rels:
+                        # Use the canonical entity name (from mapping), not the variant
+                        if entity not in relationships:
+                            relationships[entity] = {}
+                        relationships[entity].update(entity_rels)
+                        logger.info(
+                            f"Loaded relationship rules for {entity} from {variant}",
+                            extra={
+                                "category": "relationships",
+                                "entity": entity,
+                                "variant": variant,
+                                "rule_count": len(entity_rels),
+                            }
+                        )
+                        break  # Found rules, no need to check other variants
+                except Exception as exc:
+                    logger.debug(f"Failed to query {collection_path}: {exc}")
+                    continue
+            
+            # Log if no rules found for this entity
+            if entity not in relationships:
+                logger.debug(f"No relationship rules found for {entity} in any variant")
 
         total_rules = sum(len(r) for r in relationships.values())
         if relationships:
@@ -180,38 +269,56 @@ class RulesService:
 
         required_fields = {}
 
-        # Query each entity collection
-        entities = ["students", "parents", "contractors"]
+        # Query each entity collection - dynamically discover entities
+        entities = self._get_entities_from_mapping()
 
         for entity in entities:
-            collection_path = f"rules/required_fields/{entity}"
-            try:
-                docs = self.db.collection(collection_path).where("enabled", "==", True).stream()
+            # Try both singular and plural forms
+            entity_variants = self._get_entity_variants(entity)
+            
+            for variant in entity_variants:
+                collection_path = f"rules/required_fields/{variant}"
+                try:
+                    logger.debug(f"Querying Firestore for required_fields: {collection_path}")
+                    docs = self.db.collection(collection_path).where("enabled", "==", True).stream()
 
-                fields = []
-                rule_ids = []
-                for doc in docs:
-                    rule_data = doc.to_dict()
-                    # Always use document ID as rule_id to ensure consistency
-                    # This ensures deletion works correctly
-                    rule_id = doc.id
-                    rule_data["rule_id"] = rule_id
-                    fields.append(rule_data)
-                    rule_ids.append(rule_id)
+                    fields = []
+                    rule_ids = []
+                    doc_count = 0
+                    for doc in docs:
+                        doc_count += 1
+                        rule_data = doc.to_dict()
+                        # Always use document ID as rule_id to ensure consistency
+                        # This ensures deletion works correctly
+                        rule_id = doc.id
+                        rule_data["rule_id"] = rule_id
+                        fields.append(rule_data)
+                        rule_ids.append(rule_id)
 
-                if fields:
-                    required_fields[entity] = fields
-                    logger.info(
-                        f"Loaded required field rules for {entity}",
-                        extra={
-                            "category": "required_fields",
-                            "entity": entity,
-                            "rule_count": len(fields),
-                            "rule_ids": rule_ids,
-                        }
-                    )
-            except Exception as exc:
-                logger.warning(f"Failed to load required fields for {entity}: {exc}")
+                    logger.debug(f"Found {doc_count} documents in {collection_path}")
+                    
+                    if fields:
+                        # Use the canonical entity name (from mapping), not the variant
+                        if entity not in required_fields:
+                            required_fields[entity] = []
+                        required_fields[entity].extend(fields)
+                        logger.info(
+                            f"Loaded required field rules for {entity} from {variant}",
+                            extra={
+                                "category": "required_fields",
+                                "entity": entity,
+                                "variant": variant,
+                                "rule_count": len(fields),
+                            }
+                        )
+                        break  # Found rules, no need to check other variants
+                except Exception as exc:
+                    logger.debug(f"Failed to query {collection_path}: {exc}")
+                    continue
+            
+            # Log if no rules found for this entity
+            if entity not in required_fields:
+                logger.debug(f"No required field rules found for {entity} in any variant")
 
         total_rules = sum(len(r) for r in required_fields.values())
         entity_counts = {entity: len(rules) for entity, rules in required_fields.items()}
@@ -283,12 +390,52 @@ class RulesService:
             Dictionary with rule categories and their rules.
         """
         logger.info("Loading rules from Firestore rules/ collection")
+        
+        # Get entities to query
+        entities = self._get_entities_from_mapping()
+        logger.info(f"Querying rules for entities: {entities}")
+
+        duplicates = self._load_duplicates_from_firestore()
+        relationships = self._load_relationships_from_firestore()
+        required_fields = self._load_required_fields_from_firestore()
+        attendance_rules = self._load_attendance_from_firestore()
+        
+        # Log summary of what was loaded
+        logger.info(
+            "Rules loading summary",
+            extra={
+                "entities_queried": entities,
+                "duplicates_entities": list(duplicates.keys()),
+                "duplicates_counts": {k: {"likely": len(v.get("likely", [])), "possible": len(v.get("possible", []))} for k, v in duplicates.items()},
+                "relationships_entities": list(relationships.keys()),
+                "relationships_counts": {k: len(v) for k, v in relationships.items()},
+                "required_fields_entities": list(required_fields.keys()),
+                "required_fields_counts": {k: len(v) for k, v in required_fields.items()},
+            }
+        )
+        
+        # Also log a warning if we're missing expected entities
+        expected_entities = ["students", "contractors", "parents"]
+        missing_entities = {
+            "duplicates": [e for e in expected_entities if e not in duplicates],
+            "relationships": [e for e in expected_entities if e not in relationships],
+            "required_fields": [e for e in expected_entities if e not in required_fields],
+        }
+        
+        if any(missing_entities.values()):
+            logger.warning(
+                "Some expected entities have no rules",
+                extra={
+                    "missing_entities": missing_entities,
+                    "hint": "Rules may be stored under different entity names or in different collections"
+                }
+            )
 
         return {
-            "duplicates": self._load_duplicates_from_firestore(),
-            "relationships": self._load_relationships_from_firestore(),
-            "required_fields": self._load_required_fields_from_firestore(),
-            "attendance_rules": self._load_attendance_from_firestore(),
+            "duplicates": duplicates,
+            "relationships": relationships,
+            "required_fields": required_fields,
+            "attendance_rules": attendance_rules,
         }
 
     def get_rules_by_category(self, category: str) -> Dict[str, Any]:

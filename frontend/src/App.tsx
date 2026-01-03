@@ -96,48 +96,81 @@ export default function App({ children }: AppProps) {
     runId: string,
     maxWait = 30000
   ): Promise<void> => {
-    const { doc, onSnapshot } = await import("firebase/firestore");
+    const { doc, onSnapshot, getDoc } = await import("firebase/firestore");
     const { db } = await import("./config/firebase");
     const startTime = Date.now();
+    const checkInterval = 500; // Poll every 500ms as fallback
 
     return new Promise((resolve) => {
       const runRef = doc(db, "integrity_runs", runId);
       let unsubscribe: (() => void) | null = null;
+      let pollInterval: NodeJS.Timeout | null = null;
+      let resolved = false;
 
-      // Set up timeout to resolve after maxWait even if document doesn't appear
-      const timeout = setTimeout(() => {
+      const checkAndResolve = (source: string) => {
+        if (resolved) return;
+        resolved = true;
+        clearTimeout(timeout);
         if (unsubscribe) {
           unsubscribe();
         }
+        if (pollInterval) {
+          clearInterval(pollInterval);
+        }
         console.log(
-          `[App] Run document not found after ${maxWait}ms, navigating anyway`
+          `[App] Run document found after ${
+            Date.now() - startTime
+          }ms (${source})`
         );
         resolve();
+      };
+
+      // Set up timeout to resolve after maxWait even if document doesn't appear
+      const timeout = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          if (unsubscribe) {
+            unsubscribe();
+          }
+          if (pollInterval) {
+            clearInterval(pollInterval);
+          }
+          console.log(
+            `[App] Run document not found after ${maxWait}ms, navigating anyway`
+          );
+          resolve();
+        }
       }, maxWait);
+
+      // Polling fallback: check periodically with getDoc
+      const pollDocument = async () => {
+        if (resolved) return;
+        try {
+          const snapshot = await getDoc(runRef);
+          if (snapshot.exists()) {
+            checkAndResolve("polling");
+          }
+        } catch (error) {
+          // Continue polling on error
+          console.error("[App] Error polling for run document:", error);
+        }
+      };
+
+      // Start polling immediately and then every checkInterval
+      pollDocument();
+      pollInterval = setInterval(pollDocument, checkInterval);
 
       // Use onSnapshot for real-time updates - fires immediately when document is created
       unsubscribe = onSnapshot(
         runRef,
         (snapshot) => {
           if (snapshot.exists()) {
-            clearTimeout(timeout);
-            if (unsubscribe) {
-              unsubscribe();
-            }
-            console.log(
-              `[App] Run document found after ${Date.now() - startTime}ms`
-            );
-            resolve();
+            checkAndResolve("onSnapshot");
           }
         },
         (error) => {
-          // On error, resolve anyway and let the page handle it
-          clearTimeout(timeout);
-          if (unsubscribe) {
-            unsubscribe();
-          }
-          console.error("[App] Error waiting for run document:", error);
-          resolve();
+          // On error, continue with polling fallback
+          console.error("[App] Error in onSnapshot listener:", error);
         }
       );
     });

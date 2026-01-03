@@ -29,6 +29,7 @@ from ..services.feedback_analyzer import get_feedback_analyzer
 from ..services.table_id_discovery import discover_table_ids
 from ..services.config_updater import update_config
 from ..services.status_calculator import calculate_result_status
+from ..services.slack_notifier import get_slack_notifier
 
 logger = get_logger(__name__)
 
@@ -151,6 +152,23 @@ class IntegrityRunner:
         
         # Store run_id for use in _fetch_records
         self._current_run_id = run_id
+        
+        # Create initial run document immediately to ensure it exists even if fetch fails
+        try:
+            initial_metadata = {
+                "status": "running",
+                "trigger": trigger,
+                "started_at": start_time,
+            }
+            if run_config:
+                initial_metadata["run_config"] = run_config
+            self._firestore_writer.write_run(run_id, {}, initial_metadata)
+        except Exception as exc:
+            # Non-blocking - log but don't fail the run
+            logger.warning(
+                "Failed to create initial run document",
+                extra={"run_id": run_id, "error": str(exc)},
+            )
         
         # Store selected entities for use in _fetch_records
         # Prefer entities from run_config if provided
@@ -1195,6 +1213,30 @@ class IntegrityRunner:
             except Exception:
                 pass  # Already logged above
 
+            # Send Slack notification if enabled
+            notify_slack = False
+            if hasattr(self, "_run_config") and self._run_config:
+                notify_slack = self._run_config.get("notify_slack", False)
+            
+            if notify_slack:
+                try:
+                    notifier = get_slack_notifier()
+                    issue_summary = summary if "summary" in locals() else {}
+                    notifier.send_notification(
+                        run_id=run_id,
+                        status=status,
+                        issue_counts=issue_summary,
+                        trigger=trigger,
+                        duration_ms=elapsed_ms,
+                        error_message=error_message,
+                    )
+                except Exception as slack_exc:
+                    logger.warning(
+                        "Failed to send Slack notification",
+                        extra={"run_id": run_id, "error": str(slack_exc)},
+                    )
+                pass  # Already logged above
+
         logger.info(
             "Integrity run completed",
             extra={
@@ -1391,7 +1433,19 @@ class IntegrityRunner:
         if errors:
             failed_entity = next(iter(errors.keys()))
             error = errors[failed_entity]
-            raise FetchError(failed_entity, f"Failed to fetch {failed_entity}: {str(error)}", "unknown") from error
+            # Include full error details in message
+            error_msg = str(error)
+            if not error_msg or error_msg == failed_entity:
+                # If error message is just the entity name, try to get more details
+                error_type = type(error).__name__
+                error_repr = repr(error)
+                if error_repr != error_msg:
+                    error_msg = f"{error_type}: {error_repr}"
+                else:
+                    error_msg = f"{error_type}: {error_msg}"
+            # Use current_run_id if available, otherwise None
+            current_run_id = getattr(self, '_current_run_id', None)
+            raise FetchError(failed_entity, error_msg, current_run_id) from error
         
         total_records_fetched = sum(counts.values())
         logger.info(

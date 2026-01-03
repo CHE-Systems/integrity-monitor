@@ -205,13 +205,14 @@ class FirestoreWriter:
                 by_type[issue_type] = by_type.get(issue_type, 0) + count
                 # Aggregate by severity
                 by_severity[severity] = by_severity.get(severity, 0) + count
-                # Add to total
+                # Add to total (only count severity-specific keys to avoid double-counting)
                 total += count
             else:
                 # Keys without severity (like "missing_field" or "attendance") - this is already aggregated by type
                 # This represents the total count for this issue type
+                # Don't add to total here - these are redundant aggregates that would cause double-counting
+                # The actual issues are already counted via the severity-specific keys above
                 by_type[key] = count
-                total += count
 
         return {
             "total": total,
