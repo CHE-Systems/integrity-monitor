@@ -1,4 +1,5 @@
 import { useState, useMemo, Fragment, useRef, useEffect } from "react";
+import type { Dispatch, SetStateAction } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Timestamp, deleteField } from "firebase/firestore";
 import { useFirestoreScheduleGroups } from "../hooks/useFirestoreScheduleGroups";
@@ -11,7 +12,11 @@ import ConfirmModal from "../components/ConfirmModal";
 import { RuleSelectionPanel } from "../components/RuleSelectionPanel";
 import type { AirtableSchema, AirtableTable } from "../utils/airtable";
 import { API_BASE } from "../config/api";
-import { ACTIVE_ENTITIES, ENTITY_TABLE_MAPPING, TABLE_ENTITY_MAPPING } from "../config/entities";
+import {
+  ACTIVE_ENTITIES,
+  ENTITY_TABLE_MAPPING,
+  TABLE_ENTITY_MAPPING,
+} from "../config/entities";
 import arrowLeftIcon from "../assets/keyboard_arrow_left.svg";
 import arrowRightIcon from "../assets/keyboard_arrow_right.svg";
 import doubleArrowLeftIcon from "../assets/keyboard_double_arrow_left.svg";
@@ -1648,6 +1653,29 @@ function ExecutionRow({
   );
 }
 
+type ScheduleForm = {
+  group_id: string;
+  name: string;
+  enabled: boolean;
+  timezone: string;
+  frequency: "daily" | "weekly" | "hourly" | "custom_times";
+  time_of_day: string;
+  days_of_week: number[];
+  interval_minutes?: number;
+  times_of_day?: string[];
+  entities: string[];
+  rules?: {
+    duplicates?: Record<string, string[]>;
+    relationships?: Record<string, string[]>;
+    required_fields?: Record<string, string[]>;
+    attendance_rules?: boolean;
+  };
+  notify_slack: boolean;
+  stop_condition_type: "none" | "max_runs" | "stop_at";
+  max_runs?: number;
+  stop_at?: string;
+};
+
 function CreateScheduleModal({
   isOpen,
   groups,
@@ -1659,29 +1687,8 @@ function CreateScheduleModal({
 }: {
   isOpen: boolean;
   groups: ReturnType<typeof useFirestoreScheduleGroups>["data"];
-  form: {
-    group_id: string;
-    name: string;
-    enabled: boolean;
-    timezone: string;
-    frequency: "daily" | "weekly" | "hourly" | "custom_times";
-    time_of_day: string;
-    days_of_week: number[];
-    interval_minutes?: number;
-    times_of_day?: string[];
-    entities: string[];
-    rules?: {
-      duplicates?: Record<string, string[]>;
-      relationships?: Record<string, string[]>;
-      required_fields?: Record<string, string[]>;
-      attendance_rules?: boolean;
-    };
-    notify_slack: boolean;
-    stop_condition_type: "none" | "max_runs" | "stop_at";
-    max_runs?: number;
-    stop_at?: string;
-  };
-  setForm: (form: typeof form) => void;
+  form: ScheduleForm;
+  setForm: Dispatch<SetStateAction<ScheduleForm>>;
   onConfirm: () => void;
   onCancel: () => void;
   isEditing: boolean;
@@ -1696,6 +1703,7 @@ function CreateScheduleModal({
   const [schema, setSchema] = useState<AirtableSchema | null>(null);
   const [schemaLoading, setSchemaLoading] = useState(false);
   const [rules, setRules] = useState<any>(null);
+  const [rulesError, setRulesError] = useState<string | null>(null);
   const [expandedTables, setExpandedTables] = useState<Set<string>>(
     new Set() // Start empty, expand as tables are selected
   );
@@ -1870,9 +1878,17 @@ function CreateScheduleModal({
     if (!isOpen || authLoading || !authUser) return;
 
     const loadRulesData = async () => {
+      setRulesError(null);
       try {
         const rulesData = await loadRules();
-        setRules(rulesData);
+        setRules(
+          rulesData || {
+            duplicates: {},
+            relationships: {},
+            required_fields: {},
+            attendance_rules: {},
+          }
+        );
 
         // Validate and clean up form rules against current rules
         if (rulesData && form.rules) {
@@ -1883,6 +1899,16 @@ function CreateScheduleModal({
         }
       } catch (error) {
         console.error("Failed to load rules:", error);
+        const errorMessage =
+          error instanceof Error ? error.message : "Failed to load rules";
+        setRulesError(errorMessage);
+        // Set empty rules structure so UI doesn't hang
+        setRules({
+          duplicates: {},
+          relationships: {},
+          required_fields: {},
+          attendance_rules: {},
+        });
       }
     };
 
@@ -1907,7 +1933,7 @@ function CreateScheduleModal({
   // Get available entities (all active entities that exist in schema, regardless of rules)
   const availableEntities = useMemo(() => {
     const entitiesFromSchema = Array.from(entityTableMap.keys());
-    
+
     // Show all active entities that exist in schema, regardless of rules
     // This ensures entities don't disappear when rules load and allows
     // users to see and select entities even before rules are created
@@ -2728,7 +2754,12 @@ function CreateScheduleModal({
                 <div className="text-sm text-[var(--text-muted)] py-8 text-center border border-[var(--border)] rounded-lg">
                   Please select a table to see available rules
                 </div>
-              ) : !rules ? (
+              ) : rulesError ? (
+                <div className="text-sm text-red-600 py-8 text-center border border-red-300 rounded-lg bg-red-50">
+                  <div className="font-medium mb-1">Failed to load rules</div>
+                  <div className="text-xs">{rulesError}</div>
+                </div>
+              ) : rulesLoading || !rules ? (
                 <div className="text-sm text-[var(--text-muted)] py-8 text-center border border-[var(--border)] rounded-lg">
                   Loading rules...
                 </div>
@@ -3117,7 +3148,9 @@ function CreateScheduleModal({
             <input
               type="checkbox"
               checked={form.notify_slack}
-              onChange={(e) => setForm({ ...form, notify_slack: e.target.checked })}
+              onChange={(e) =>
+                setForm({ ...form, notify_slack: e.target.checked })
+              }
               className="w-4 h-4"
             />
             <span className="text-sm text-[var(--text-main)]">

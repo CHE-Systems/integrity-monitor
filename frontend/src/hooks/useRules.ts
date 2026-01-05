@@ -39,14 +39,23 @@ export function useRules() {
         },
       });
 
-      if (!response.ok) {
+      const contentType = response.headers.get("content-type") || "";
+      
+      if (!response.ok || !contentType.includes("application/json")) {
         const errorText = await response.text();
         let errorMessage = `Failed to load rules: ${response.statusText}`;
-        try {
-          const errorData = JSON.parse(errorText);
-          errorMessage = errorData.detail?.message || errorData.detail || errorMessage;
-        } catch {
-          errorMessage = errorText || errorMessage;
+        
+        // Check if we received HTML instead of JSON
+        if (errorText.trim().startsWith("<!") || errorText.trim().startsWith("<html")) {
+          errorMessage = `Expected JSON but received HTML from ${API_BASE}/rules. This usually means:\n1. VITE_API_BASE is not set correctly in production (should point to Cloud Run backend URL)\n2. The backend is not running or not accessible\n3. Firebase Hosting is serving the SPA instead of proxying to the backend\n\nCurrent API_BASE: ${API_BASE}\nVITE_API_BASE env: ${import.meta.env.VITE_API_BASE || "not set"}\n\nTo fix: Rebuild the frontend using frontend/build-with-secrets.sh which will set VITE_API_BASE to the correct Cloud Run URL.`;
+        } else {
+          // Try to parse as JSON for structured error messages
+          try {
+            const errorData = JSON.parse(errorText);
+            errorMessage = errorData.detail?.message || errorData.detail || errorMessage;
+          } catch {
+            errorMessage = errorText || errorMessage;
+          }
         }
         throw new Error(errorMessage);
       }
@@ -77,8 +86,25 @@ export function useRules() {
           },
         });
 
-        if (!response.ok) {
-          throw new Error(`Failed to load rules: ${response.statusText}`);
+        const contentType = response.headers.get("content-type") || "";
+        
+        if (!response.ok || !contentType.includes("application/json")) {
+          const errorText = await response.text();
+          let errorMessage = `Failed to load rules: ${response.statusText}`;
+          
+          // Check if we received HTML instead of JSON
+          if (errorText.trim().startsWith("<!") || errorText.trim().startsWith("<html")) {
+            errorMessage = `Expected JSON but received HTML from ${API_BASE}/rules/${category}. This usually means:\n1. VITE_API_BASE is not set correctly in production (should point to Cloud Run backend URL)\n2. The backend is not running or not accessible\n3. Firebase Hosting is serving the SPA instead of proxying to the backend\n\nCurrent API_BASE: ${API_BASE}\nVITE_API_BASE env: ${import.meta.env.VITE_API_BASE || "not set"}\n\nTo fix: Rebuild the frontend using frontend/build-with-secrets.sh which will set VITE_API_BASE to the correct Cloud Run URL.`;
+          } else {
+            // Try to parse as JSON for structured error messages
+            try {
+              const errorData = JSON.parse(errorText);
+              errorMessage = errorData.detail?.message || errorData.detail || errorMessage;
+            } catch {
+              errorMessage = errorText || errorMessage;
+            }
+          }
+          throw new Error(errorMessage);
         }
 
         const data = await response.json();
@@ -119,11 +145,25 @@ export function useRules() {
           }),
         });
 
-        if (!response.ok) {
-          const errorData = await response.json().catch(() => ({}));
-          throw new Error(
-            errorData.detail?.message || errorData.detail || `Failed to create rule: ${response.statusText}`
-          );
+        const contentType = response.headers.get("content-type") || "";
+        
+        if (!response.ok || !contentType.includes("application/json")) {
+          const errorText = await response.text();
+          let errorMessage = `Failed to create rule: ${response.statusText}`;
+          
+          // Check if we received HTML instead of JSON
+          if (errorText.trim().startsWith("<!") || errorText.trim().startsWith("<html")) {
+            errorMessage = `Expected JSON but received HTML from ${API_BASE}/rules/${category}. This usually means:\n1. VITE_API_BASE is not set correctly in production (should point to Cloud Run backend URL)\n2. The backend is not running or not accessible\n3. Firebase Hosting is serving the SPA instead of proxying to the backend\n\nCurrent API_BASE: ${API_BASE}\nVITE_API_BASE env: ${import.meta.env.VITE_API_BASE || "not set"}\n\nTo fix: Rebuild the frontend using frontend/build-with-secrets.sh which will set VITE_API_BASE to the correct Cloud Run URL.`;
+          } else {
+            // Try to parse as JSON for structured error messages
+            try {
+              const errorData = JSON.parse(errorText);
+              errorMessage = errorData.detail?.message || errorData.detail || errorMessage;
+            } catch {
+              errorMessage = errorText || errorMessage;
+            }
+          }
+          throw new Error(errorMessage);
         }
 
         const data = await response.json();
@@ -165,11 +205,25 @@ export function useRules() {
           }),
         });
 
-        if (!response.ok) {
-          const errorData = await response.json().catch(() => ({}));
-          throw new Error(
-            errorData.detail?.message || errorData.detail || `Failed to update rule: ${response.statusText}`
-          );
+        const contentType = response.headers.get("content-type") || "";
+        
+        if (!response.ok || !contentType.includes("application/json")) {
+          const errorText = await response.text();
+          let errorMessage = `Failed to update rule: ${response.statusText}`;
+          
+          // Check if we received HTML instead of JSON
+          if (errorText.trim().startsWith("<!") || errorText.trim().startsWith("<html")) {
+            errorMessage = `Expected JSON but received HTML from ${API_BASE}/rules/${category}/${ruleId}. This usually means:\n1. VITE_API_BASE is not set correctly in production (should point to Cloud Run backend URL)\n2. The backend is not running or not accessible\n3. Firebase Hosting is serving the SPA instead of proxying to the backend\n\nCurrent API_BASE: ${API_BASE}\nVITE_API_BASE env: ${import.meta.env.VITE_API_BASE || "not set"}\n\nTo fix: Rebuild the frontend using frontend/build-with-secrets.sh which will set VITE_API_BASE to the correct Cloud Run URL.`;
+          } else {
+            // Try to parse as JSON for structured error messages
+            try {
+              const errorData = JSON.parse(errorText);
+              errorMessage = errorData.detail?.message || errorData.detail || errorMessage;
+            } catch {
+              errorMessage = errorText || errorMessage;
+            }
+          }
+          throw new Error(errorMessage);
         }
 
         const data = await response.json();
@@ -205,12 +259,24 @@ export function useRules() {
             Authorization: `Bearer ${token}`,
           },
         });
-
+        
         if (!response.ok) {
-          const errorData = await response.json().catch(() => ({}));
-          throw new Error(
-            errorData.detail?.message || errorData.detail || `Failed to delete rule: ${response.statusText}`
-          );
+          const errorText = await response.text();
+          let errorMessage = `Failed to delete rule: ${response.statusText}`;
+          
+          // Check if we received HTML instead of JSON
+          if (errorText.trim().startsWith("<!") || errorText.trim().startsWith("<html")) {
+            errorMessage = `Expected JSON but received HTML from ${url.toString()}. This usually means:\n1. VITE_API_BASE is not set correctly in production (should point to Cloud Run backend URL)\n2. The backend is not running or not accessible\n3. Firebase Hosting is serving the SPA instead of proxying to the backend\n\nCurrent API_BASE: ${API_BASE}\nVITE_API_BASE env: ${import.meta.env.VITE_API_BASE || "not set"}\n\nTo fix: Rebuild the frontend using frontend/build-with-secrets.sh which will set VITE_API_BASE to the correct Cloud Run URL.`;
+          } else {
+            // Try to parse as JSON for structured error messages
+            try {
+              const errorData = JSON.parse(errorText);
+              errorMessage = errorData.detail?.message || errorData.detail || errorMessage;
+            } catch {
+              errorMessage = errorText || errorMessage;
+            }
+          }
+          throw new Error(errorMessage);
         }
       } catch (err) {
         const errorMessage = err instanceof Error ? err.message : "Failed to delete rule";
@@ -251,12 +317,26 @@ export function useRules() {
 
         console.log('[parseRuleWithAI] Response status:', response.status, response.statusText);
 
-        if (!response.ok) {
-          const errorData = await response.json().catch(() => ({}));
-          console.error('[parseRuleWithAI] Error response:', errorData);
-          throw new Error(
-            errorData.detail?.message || errorData.detail || `Failed to parse rule: ${response.statusText}`
-          );
+        const contentType = response.headers.get("content-type") || "";
+        
+        if (!response.ok || !contentType.includes("application/json")) {
+          const errorText = await response.text();
+          let errorMessage = `Failed to parse rule: ${response.statusText}`;
+          
+          // Check if we received HTML instead of JSON
+          if (errorText.trim().startsWith("<!") || errorText.trim().startsWith("<html")) {
+            errorMessage = `Expected JSON but received HTML from ${API_BASE}/rules/ai-parse. This usually means:\n1. VITE_API_BASE is not set correctly in production (should point to Cloud Run backend URL)\n2. The backend is not running or not accessible\n3. Firebase Hosting is serving the SPA instead of proxying to the backend\n\nCurrent API_BASE: ${API_BASE}\nVITE_API_BASE env: ${import.meta.env.VITE_API_BASE || "not set"}\n\nTo fix: Rebuild the frontend using frontend/build-with-secrets.sh which will set VITE_API_BASE to the correct Cloud Run URL.`;
+          } else {
+            // Try to parse as JSON for structured error messages
+            try {
+              const errorData = JSON.parse(errorText);
+              console.error('[parseRuleWithAI] Error response:', errorData);
+              errorMessage = errorData.detail?.message || errorData.detail || errorMessage;
+            } catch {
+              errorMessage = errorText || errorMessage;
+            }
+          }
+          throw new Error(errorMessage);
         }
 
         const data = await response.json();

@@ -2,7 +2,11 @@ import React, { useState, useEffect } from "react";
 import { useAuth } from "../hooks/useAuth";
 import { useRules } from "../hooks/useRules";
 import type { AirtableSchema, AirtableTable } from "../utils/airtable";
-import { ACTIVE_ENTITIES, ENTITY_TABLE_MAPPING, TABLE_ENTITY_MAPPING } from "../config/entities";
+import {
+  ACTIVE_ENTITIES,
+  ENTITY_TABLE_MAPPING,
+  TABLE_ENTITY_MAPPING,
+} from "../config/entities";
 
 export interface ScanConfig {
   checks: {
@@ -54,9 +58,10 @@ export function ScanConfigModal({
   const [expandedTables, setExpandedTables] = useState<Set<string>>(
     new Set() // Start empty, expand as tables are selected
   );
-  const { getToken } = useAuth();
-  const { loadRules } = useRules();
+  const { getToken, loading: authLoading, user: authUser } = useAuth();
+  const { loadRules, loading: rulesLoading } = useRules();
   const [rules, setRules] = useState<any>(null);
+  const [rulesError, setRulesError] = useState<string | null>(null);
   const [notifySlack, setNotifySlack] = useState(false);
 
   // Reset state when modal closes to ensure clean slate on next open
@@ -66,34 +71,64 @@ export function ScanConfigModal({
       setSelectedEntities(new Set());
       setSelectedRules({});
       setRules(null);
+      setRulesError(null);
       setSchema(null);
       setExpandedTables(new Set());
       setNotifySlack(false);
     }
   }, [isOpen]);
 
-  // Load rules when modal opens
+  // Load rules when modal opens (wait for auth to be ready)
   useEffect(() => {
-    if (!isOpen) return;
+    // Don't load if modal isn't open, auth is loading, or user isn't authenticated
+    if (!isOpen || authLoading || !authUser) return;
 
     const loadRulesData = async () => {
+      setRulesError(null);
       try {
         const rulesData = await loadRules();
         console.log("[ScanConfigModal] Loaded rules data:", rulesData);
         console.log("[ScanConfigModal] Rules structure:", {
-          duplicates: rulesData?.duplicates ? Object.keys(rulesData.duplicates) : [],
-          relationships: rulesData?.relationships ? Object.keys(rulesData.relationships) : [],
-          required_fields: rulesData?.required_fields ? Object.keys(rulesData.required_fields) : [],
+          duplicates: rulesData?.duplicates
+            ? Object.keys(rulesData.duplicates)
+            : [],
+          relationships: rulesData?.relationships
+            ? Object.keys(rulesData.relationships)
+            : [],
+          required_fields: rulesData?.required_fields
+            ? Object.keys(rulesData.required_fields)
+            : [],
         });
-        console.log("[ScanConfigModal] Full rules structure for debugging:", JSON.stringify(rulesData, null, 2));
-        setRules(rulesData);
+        console.log(
+          "[ScanConfigModal] Full rules structure for debugging:",
+          JSON.stringify(rulesData, null, 2)
+        );
+        setRules(
+          rulesData || {
+            duplicates: {},
+            relationships: {},
+            required_fields: {},
+            attendance_rules: {},
+          }
+        );
       } catch (error) {
         console.error("Failed to load rules:", error);
+        const errorMessage =
+          error instanceof Error ? error.message : "Failed to load rules";
+        setRulesError(errorMessage);
+        // Set empty rules structure so UI doesn't hang
+        setRules({
+          duplicates: {},
+          relationships: {},
+          required_fields: {},
+          attendance_rules: {},
+        });
       }
     };
 
     loadRulesData();
-  }, [isOpen, loadRules]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, authLoading, authUser, loadRules]);
 
   // Fetch schema when modal opens - load from local JSON first for instant display
   useEffect(() => {
@@ -163,7 +198,7 @@ export function ScanConfigModal({
   // Get available entities (all active entities that exist in schema, regardless of rules)
   const availableEntities = React.useMemo(() => {
     const entitiesFromSchema = Array.from(entityTableMap.keys());
-    
+
     // Show all active entities that exist in schema, regardless of rules
     // This ensures entities don't disappear when rules load and allows
     // users to see and select entities even before rules are created
@@ -183,27 +218,27 @@ export function ScanConfigModal({
     entityName: string
   ): string | null => {
     if (!rules || !rules[category]) return null;
-    
+
     const availableEntities = Object.keys(rules[category]);
-    
+
     // Try exact match first
     if (availableEntities.includes(entityName)) {
       return entityName;
     }
-    
+
     // Try singular/plural variations
     const entityLower = entityName.toLowerCase();
-    const matchingEntity = availableEntities.find(e => {
+    const matchingEntity = availableEntities.find((e) => {
       const eLower = e.toLowerCase();
       return (
         eLower === entityLower ||
         eLower === entityLower.slice(0, -1) || // entity is singular of entityName
-        eLower === entityLower + 's' || // entity is plural of entityName
-        entityLower === eLower + 's' || // entityName is plural of entity
+        eLower === entityLower + "s" || // entity is plural of entityName
+        entityLower === eLower + "s" || // entityName is plural of entity
         entityLower === eLower.slice(0, -1) // entityName is singular of entity
       );
     });
-    
+
     return matchingEntity || null;
   };
 
@@ -213,24 +248,31 @@ export function ScanConfigModal({
     entityName: string
   ): string[] => {
     if (!rules) return [];
-    
+
     // Find the actual entity name in the rules (handles name mismatches)
     const actualEntityName = findEntityInRules(category, entityName);
     if (!actualEntityName) {
-      const availableEntities = rules[category] ? Object.keys(rules[category]) : [];
-      console.log(`[ScanConfigModal] No rules found for ${category}.${entityName}`, {
-        category,
-        entityName,
-        availableEntities,
-        rulesStructure: rules[category],
-      });
+      const availableEntities = rules[category]
+        ? Object.keys(rules[category])
+        : [];
+      console.log(
+        `[ScanConfigModal] No rules found for ${category}.${entityName}`,
+        {
+          category,
+          entityName,
+          availableEntities,
+          rulesStructure: rules[category],
+        }
+      );
       return [];
     }
-    
+
     if (actualEntityName !== entityName) {
-      console.log(`[ScanConfigModal] Using entity name mapping: ${entityName} -> ${actualEntityName} for ${category}`);
+      console.log(
+        `[ScanConfigModal] Using entity name mapping: ${entityName} -> ${actualEntityName} for ${category}`
+      );
     }
-    
+
     const categoryRules = rules[category]?.[actualEntityName];
     if (!categoryRules) {
       return [];
@@ -820,7 +862,18 @@ export function ScanConfigModal({
                 <div className="text-sm text-[var(--text-muted)] py-8 text-center border border-[var(--border)] rounded-lg">
                   Please select a table to see available rules
                 </div>
-              ) : !rules ? (
+              ) : rulesError ? (
+                <div className="text-sm text-red-600 py-8 px-4 border border-red-300 rounded-lg bg-red-50">
+                  <div className="font-medium mb-2">Failed to load rules</div>
+                  <div className="text-xs space-y-1 text-left">
+                    {rulesError.split('\n').map((line, index) => (
+                      <div key={index} className={line.trim().startsWith('Current') || line.trim().startsWith('VITE') || line.trim().startsWith('To fix') ? 'font-mono text-[10px] text-gray-700' : ''}>
+                        {line || '\u00A0'}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : rulesLoading || !rules ? (
                 <div className="text-sm text-[var(--text-muted)] py-8 text-center border border-[var(--border)] rounded-lg">
                   Loading rules...
                 </div>
@@ -862,13 +915,18 @@ export function ScanConfigModal({
                           <div className="px-3 pb-3 pt-2 space-y-4 border-t border-[var(--border)] bg-[var(--bg-mid)]/20">
                             {/* Duplicate Detection Rules */}
                             {(() => {
-                              const actualEntityName = findEntityInRules("duplicates", entity);
+                              const actualEntityName = findEntityInRules(
+                                "duplicates",
+                                entity
+                              );
                               if (!actualEntityName) return null;
-                              
-                              const dupDef = rules.duplicates?.[actualEntityName] as
+
+                              const dupDef = rules.duplicates?.[
+                                actualEntityName
+                              ] as
                                 | { likely?: any[]; possible?: any[] }
                                 | undefined;
-                              
+
                               if (!dupDef) return null;
 
                               const likelyRules = dupDef.likely || [];
@@ -1004,11 +1062,15 @@ export function ScanConfigModal({
 
                             {/* Relationship Rules */}
                             {(() => {
-                              const actualEntityName = findEntityInRules("relationships", entity);
+                              const actualEntityName = findEntityInRules(
+                                "relationships",
+                                entity
+                              );
                               if (!actualEntityName) return null;
-                              
-                              const relRules = rules.relationships?.[actualEntityName];
-                              
+
+                              const relRules =
+                                rules.relationships?.[actualEntityName];
+
                               if (
                                 !relRules ||
                                 Object.keys(relRules).length === 0
@@ -1085,11 +1147,15 @@ export function ScanConfigModal({
 
                             {/* Required Field Rules */}
                             {(() => {
-                              const actualEntityName = findEntityInRules("required_fields", entity);
+                              const actualEntityName = findEntityInRules(
+                                "required_fields",
+                                entity
+                              );
                               if (!actualEntityName) return null;
-                              
-                              const reqFields = rules.required_fields?.[actualEntityName];
-                              
+
+                              const reqFields =
+                                rules.required_fields?.[actualEntityName];
+
                               if (
                                 !reqFields ||
                                 !Array.isArray(reqFields) ||
@@ -1171,7 +1237,8 @@ export function ScanConfigModal({
 
                             {/* Attendance Rules (for attendance and absent tables) */}
                             {(entity === "attendance" || entity === "absent") &&
-                              (selectedEntities.has("attendance") || selectedEntities.has("absent")) && (
+                              (selectedEntities.has("attendance") ||
+                                selectedEntities.has("absent")) && (
                                 <div className="space-y-2">
                                   <div className="text-sm font-medium text-[var(--text-main)]">
                                     Attendance Rules
@@ -1181,7 +1248,8 @@ export function ScanConfigModal({
                                       <input
                                         type="checkbox"
                                         checked={
-                                          selectedRules.attendance_rules ?? false
+                                          selectedRules.attendance_rules ??
+                                          false
                                         }
                                         onChange={(e) =>
                                           handleRulesChange(
@@ -1202,7 +1270,8 @@ export function ScanConfigModal({
                                       <input
                                         type="checkbox"
                                         checked={
-                                          selectedRules.attendance_rules ?? false
+                                          selectedRules.attendance_rules ??
+                                          false
                                         }
                                         onChange={(e) =>
                                           handleRulesChange(

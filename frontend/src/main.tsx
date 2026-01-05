@@ -74,6 +74,7 @@ createRoot(document.getElementById("root")!).render(
               </AuthGuard>
             }
           />
+          {/* Reports route disabled - uncomment to re-enable
           <Route
             path="/reports"
             element={
@@ -84,6 +85,7 @@ createRoot(document.getElementById("root")!).render(
               </AuthGuard>
             }
           />
+          */}
           <Route
             path="/issues"
             element={
