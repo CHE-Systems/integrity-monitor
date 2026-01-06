@@ -74,8 +74,3 @@ Implement stricter name matching that requires:
 - Exact match on one + <80% on other → NOT duplicate
 
 3. **Email/Phone Override**: Exact email or phone matches still mark as duplicate regardless of name similarity
-4. **Threshold**: Use 0.8 (80%) as the similarity threshold for the non-matching name part
-
-## Testing Considerations
-
-- Test husband/wife case: same last name, different first names → should NOT be duplicate

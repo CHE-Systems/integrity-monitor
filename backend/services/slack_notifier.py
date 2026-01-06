@@ -254,6 +254,8 @@ class SlackNotifier:
             "required_fields": "Required Fields",
             "required_field": "Required Fields",
             "missing_key_data": "Required Fields",
+            "value_checks": "Value Checks",
+            "value_check": "Value Checks",
             "attendance": "Attendance",
         }
 
@@ -282,7 +284,7 @@ class SlackNotifier:
         # Build fields - prioritize new issues
         fields = [
             {
-                "title": "Status",
+                "title": "Run status",
                 "value": f"{emoji} {status_display}",
                 "short": True,
             },
@@ -293,13 +295,7 @@ class SlackNotifier:
             },
         ]
 
-        # Show NEW issues prominently first (this is the priority metric)
-        if new_issues_count is not None and new_issues_count > 0:
-            fields.append({
-                "title": "🆕 New Issues",
-                "value": str(new_issues_count),
-                "short": True,
-            })
+        # Note: New issues will be shown in text, not fields
 
         if duration_ms is not None:
             duration_secs = duration_ms / 1000
@@ -321,7 +317,7 @@ class SlackNotifier:
             if warning_count > 0:
                 severity_parts.append(f"🟡 {warning_count} Warning")
             fields.append({
-                "title": "Severity",
+                "title": "Issue severity breakdown",
                 "value": " | ".join(severity_parts),
                 "short": True,
             })
@@ -376,6 +372,12 @@ class SlackNotifier:
                     for detail in req_details:
                         rules_lines.append(f"    - {detail}")
 
+            if rules.get("value_checks"):
+                value_entities = [e for e, r in rules["value_checks"].items() if r]
+                if value_entities:
+                    entities_str = ", ".join(value_entities)
+                    rules_lines.append(f"• *Value Checks:* {entities_str}")
+
             if rules.get("attendance_rules"):
                 rules_lines.append("• *Attendance:* enabled")
 
@@ -384,14 +386,22 @@ class SlackNotifier:
                 text_parts.extend(rules_lines)
                 text_parts.append("")  # Add spacing
 
+        # Add new issues (always show, even if 0)
+        if new_issues_count is not None:
+            if new_issues_count > 0:
+                text_parts.append(f"*New Issues:* {new_issues_count}")
+            else:
+                text_parts.append("*New Issues:* No new issues found")
+            text_parts.append("")  # Add spacing
+
+        # Add total issues found
+        if total_issues > 0:
+            text_parts.append(f"*Total Issues Found:* {total_issues}")
+            text_parts.append("")  # Add spacing
+
         if issue_lines:
             text_parts.append("*Issues Found:*")
             text_parts.extend(issue_lines)
-
-        # Add total issues as a subtle footer line (not in prominent fields)
-        if total_issues > 0:
-            text_parts.append("")  # spacing
-            text_parts.append(f"_Total issues in database: {total_issues}_")
 
         if error_message:
             text_parts.append(f"\n*Error:* {error_message}")

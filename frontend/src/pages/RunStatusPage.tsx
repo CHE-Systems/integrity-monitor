@@ -783,42 +783,37 @@ export function RunStatusPage() {
           )}
 
         {/* New Issues Count */}
-        {runStatus.new_issues_count !== undefined && runStatus.new_issues_count > 0 && (
-          <div className="mb-6">
-            <div className="text-sm font-medium text-[var(--text-main)] mb-3">
-              New Issues Found
-              <span className="ml-2 text-xs font-normal text-[var(--text-muted)]">
-                (first time detected in this run)
-              </span>
+        <div className="mb-6">
+          <div className="text-sm font-medium text-[var(--text-main)] mb-3">
+            New Issues Found
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="rounded-lg border border-[var(--border)] p-4 bg-[var(--bg-mid)]/30">
+              <div className="text-xs text-[var(--text-muted)] mb-1">Total</div>
+              <div className="text-2xl font-semibold text-[var(--text-main)]">
+                {runStatus.new_issues_count ?? 0}
+              </div>
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div className="rounded-lg border border-[var(--border)] p-4 bg-[var(--bg-mid)]/30">
-                <div className="text-xs text-[var(--text-muted)] mb-1">New Issues</div>
-                <div className="text-2xl font-semibold text-[var(--text-main)]">
-                  {runStatus.new_issues_count}
-                </div>
+            <div className="rounded-lg border border-red-200 p-4 bg-red-50">
+              <div className="text-xs text-red-700 mb-1">Critical</div>
+              <div className="text-2xl font-semibold text-red-800">
+                {runStatus.new_issues_by_severity?.critical || 0}
               </div>
-              <div className="rounded-lg border border-red-200 p-4 bg-red-50">
-                <div className="text-xs text-red-700 mb-1">New Critical</div>
-                <div className="text-2xl font-semibold text-red-800">
-                  {runStatus.new_issues_by_severity?.critical || 0}
-                </div>
-              </div>
-              <div className="rounded-lg border border-yellow-200 p-4 bg-yellow-50">
-                <div className="text-xs text-yellow-700 mb-1">New Warning</div>
-                <div className="text-2xl font-semibold text-yellow-800">
-                  {runStatus.new_issues_by_severity?.warning || 0}
-                </div>
+            </div>
+            <div className="rounded-lg border border-yellow-200 p-4 bg-yellow-50">
+              <div className="text-xs text-yellow-700 mb-1">Warning</div>
+              <div className="text-2xl font-semibold text-yellow-800">
+                {runStatus.new_issues_by_severity?.warning || 0}
               </div>
             </div>
           </div>
-        )}
+        </div>
 
         {/* Issue Counts */}
         {runStatus.counts && (
           <div className="mb-6">
             <div className="text-sm font-medium text-[var(--text-main)] mb-3">
-              Total Issues in This Run
+              Total Issues Found
             </div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div className="rounded-lg border border-[var(--border)] p-4 bg-[var(--bg-mid)]/30">
