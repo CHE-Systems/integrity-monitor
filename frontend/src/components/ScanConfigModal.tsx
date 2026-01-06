@@ -102,9 +102,6 @@ export function ScanConfigModal({
           required_fields: rulesData?.required_fields
             ? Object.keys(rulesData.required_fields)
             : [],
-          value_checks: rulesData?.value_checks
-            ? Object.keys(rulesData.value_checks)
-            : [],
         });
         console.log(
           "[ScanConfigModal] Full rules structure for debugging:",
@@ -115,7 +112,6 @@ export function ScanConfigModal({
             duplicates: {},
             relationships: {},
             required_fields: {},
-            value_checks: {},
             attendance_rules: {},
           }
         );

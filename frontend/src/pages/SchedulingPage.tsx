@@ -1668,8 +1668,6 @@ function ExecutionRow({
   );
 }
 
-
-
 function CreateScheduleModal({
   isOpen,
   groups,
