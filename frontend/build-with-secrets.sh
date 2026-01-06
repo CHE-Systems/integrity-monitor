@@ -40,26 +40,58 @@ echo "Fetching Cloud Run backend URL..."
 REGION=${CLOUD_RUN_REGION:-us-central1}
 SERVICE_NAME="integrity-runner"
 
-# Check if URL is provided via environment variable first
+# Priority order:
+# 1. Environment variable CLOUD_RUN_SERVICE_URL
+# 2. Secret Manager secret CLOUD_RUN_SERVICE_URL
+# 3. gcloud query for service URL
+# Never fall back to localhost in production builds
+
 if [ -n "$CLOUD_RUN_SERVICE_URL" ]; then
   export VITE_API_BASE="$CLOUD_RUN_SERVICE_URL"
-  echo "✅ Set VITE_API_BASE from CLOUD_RUN_SERVICE_URL: $CLOUD_RUN_SERVICE_URL"
+  echo "✅ Set VITE_API_BASE from CLOUD_RUN_SERVICE_URL env var: $CLOUD_RUN_SERVICE_URL"
 else
-  # Try to fetch from gcloud
-  CLOUD_RUN_URL=$(gcloud run services describe "$SERVICE_NAME" \
-    --region="$REGION" \
-    --project="$PROJECT_ID" \
-    --format="value(status.url)" 2>/dev/null || echo "")
-
+  # Try to fetch from Secret Manager
+  CLOUD_RUN_URL=$(gcloud secrets versions access latest --secret="CLOUD_RUN_SERVICE_URL" --project="$PROJECT_ID" 2>/dev/null || echo "")
+  
   if [ -n "$CLOUD_RUN_URL" ]; then
     export VITE_API_BASE="$CLOUD_RUN_URL"
-    echo "✅ Set VITE_API_BASE to: $CLOUD_RUN_URL"
+    echo "✅ Set VITE_API_BASE from Secret Manager: $CLOUD_RUN_URL"
   else
-    echo "⚠️  Warning: Could not fetch Cloud Run URL. VITE_API_BASE will not be set."
-    echo "   Frontend will fall back to window.location.origin (may cause API errors)"
-    echo "   To fix: Set CLOUD_RUN_SERVICE_URL environment variable or ensure gcloud is configured"
+    # Try to fetch from gcloud
+    CLOUD_RUN_URL=$(gcloud run services describe "$SERVICE_NAME" \
+      --region="$REGION" \
+      --project="$PROJECT_ID" \
+      --format="value(status.url)" 2>/dev/null || echo "")
+
+    if [ -n "$CLOUD_RUN_URL" ]; then
+      export VITE_API_BASE="$CLOUD_RUN_URL"
+      echo "✅ Set VITE_API_BASE from gcloud query: $CLOUD_RUN_URL"
+    else
+      echo "❌ Error: Could not determine Cloud Run URL for VITE_API_BASE"
+      echo "   Tried:"
+      echo "     1. CLOUD_RUN_SERVICE_URL environment variable (not set)"
+      echo "     2. Secret Manager secret CLOUD_RUN_SERVICE_URL (not found)"
+      echo "     3. gcloud query for service '$SERVICE_NAME' in region '$REGION' (failed)"
+      echo ""
+      echo "   To fix:"
+      echo "     Option 1: Set CLOUD_RUN_SERVICE_URL environment variable"
+      echo "     Option 2: Create secret: echo -n 'https://your-service.run.app' | gcloud secrets create CLOUD_RUN_SERVICE_URL --data-file=- --project=$PROJECT_ID"
+      echo "     Option 3: Ensure gcloud is configured and service exists"
+      echo ""
+      echo "   Production builds require a valid Cloud Run URL. Exiting."
+      exit 1
+    fi
   fi
 fi
+
+# Validate that we're not using localhost in production
+if [[ "$VITE_API_BASE" == *"localhost"* ]] || [[ "$VITE_API_BASE" == *"127.0.0.1"* ]]; then
+  echo "❌ Error: VITE_API_BASE is set to localhost: $VITE_API_BASE"
+  echo "   This is not allowed for production builds."
+  echo "   Please set CLOUD_RUN_SERVICE_URL to the correct Cloud Run URL."
+  exit 1
+fi
+
 echo ""
 
 # Check if any secrets are missing
@@ -80,12 +112,26 @@ if [ ${#MISSING_SECRETS[@]} -gt 0 ]; then
     echo "Falling back to .env.local if available..."
     echo ""
     
+    # Save VITE_API_BASE before sourcing .env.local to prevent localhost overwrite
+    SAVED_API_BASE="$VITE_API_BASE"
+    
     # Fall back to .env.local if it exists
     if [ -f ".env.local" ]; then
         echo "Loading from .env.local..."
         set -a
         source .env.local
         set +a
+        
+        # Restore VITE_API_BASE if it was already set (from Secret Manager or gcloud)
+        # Never use localhost values from .env.local in production builds
+        if [ -n "$SAVED_API_BASE" ]; then
+            export VITE_API_BASE="$SAVED_API_BASE"
+            echo "✅ Preserved VITE_API_BASE: $VITE_API_BASE (ignoring .env.local value)"
+        elif [ -n "$VITE_API_BASE" ] && ([[ "$VITE_API_BASE" == *"localhost"* ]] || [[ "$VITE_API_BASE" == *"127.0.0.1"* ]]); then
+            echo "⚠️  Warning: .env.local contains localhost VITE_API_BASE, clearing it"
+            unset VITE_API_BASE
+            echo "   This build will fail if CLOUD_RUN_SERVICE_URL is not set elsewhere"
+        fi
     fi
 fi
 

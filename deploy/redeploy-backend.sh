@@ -23,15 +23,6 @@ echo "Project: ${PROJECT_ID}"
 echo "Region: ${REGION}"
 echo ""
 
-# Check for merge conflicts in local code
-echo "Checking for merge conflicts in local code..."
-if grep -r "<<<<<<< HEAD" ../backend/ 2>/dev/null; then
-    echo "❌ Error: Merge conflicts found in local code. Please resolve them first."
-    exit 1
-fi
-echo "✅ No merge conflicts in local code"
-echo ""
-
 # Deploy from source (this will build a new container with current code)
 echo "Deploying from source..."
 cd ..

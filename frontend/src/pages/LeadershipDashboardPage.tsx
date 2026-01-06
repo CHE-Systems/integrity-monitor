@@ -1,4 +1,4 @@
-import { useLeadershipMetrics, type HealthStatus } from "../hooks/useLeadershipMetrics";
+import { useLeadershipMetrics, type HealthStatus, type LeadershipCategory } from "../hooks/useLeadershipMetrics";
 import { LeadershipTrendChart } from "../components/LeadershipTrendChart";
 
 function HealthIndicator({ status }: { status: HealthStatus }) {
@@ -58,6 +58,62 @@ function LoadingSkeleton() {
           <div className="bg-white rounded-2xl p-6 h-32" />
         </div>
       </div>
+    </div>
+  );
+}
+
+import { useState } from "react";
+import { CategoryIssueList } from "../components/CategoryIssueList";
+
+function CategoryCard({ category }: { category: LeadershipCategory }) {
+  const [isExpanded, setIsExpanded] = useState(false);
+
+  return (
+    <div
+      className="group flex flex-col rounded-2xl transition-all duration-300 bg-[var(--bg-mid)]/60 hover:bg-[var(--bg-mid)] p-4 shadow-sm"
+    >
+      <div 
+        className="flex items-center justify-between cursor-pointer select-none"
+        onClick={() => setIsExpanded(!isExpanded)}
+      >
+        <div className="flex-1 min-w-0 pr-4">
+          <p className="font-semibold text-[var(--text-main)] group-hover:text-[var(--brand)] transition-colors">
+            {category.label}
+          </p>
+          <p className="text-sm text-[var(--text-muted)] line-clamp-1">
+            {category.description}
+          </p>
+        </div>
+        <div className="flex items-center gap-6">
+          <div className="text-right">
+            <span
+              className="text-2xl font-bold text-[var(--text-main)] block leading-none"
+              style={{ fontFamily: "Outfit" }}
+            >
+              {category.count}
+            </span>
+            <span className="text-[10px] uppercase tracking-wider text-[var(--text-muted)] font-medium">
+              Items
+            </span>
+          </div>
+          <div className={`flex h-8 w-8 items-center justify-center rounded-full transition-all duration-300 ${!isExpanded ? "-rotate-90" : ""}`}>
+            <svg 
+              className="w-5 h-5 text-[var(--text-muted)] group-hover:text-[var(--brand)] transition-colors duration-300" 
+              fill="none" 
+              viewBox="0 0 24 24" 
+              stroke="currentColor"
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+            </svg>
+          </div>
+        </div>
+      </div>
+      
+      {isExpanded && (
+        <div className="mt-2 pt-2 border-t border-[var(--border)]/40 animate-in fade-in slide-in-from-top-1 duration-200">
+          <CategoryIssueList filter={category.filter} />
+        </div>
+      )}
     </div>
   );
 }
@@ -148,27 +204,7 @@ export function LeadershipDashboardPage() {
             </p>
             <div className="space-y-3">
               {metrics.categories.map((category) => (
-                <div
-                  key={category.label}
-                  className="flex items-center justify-between py-4 px-5 rounded-2xl bg-[var(--bg-mid)]/60"
-                >
-                  <div>
-                    <p className="font-medium text-[var(--text-main)]">
-                      {category.label}
-                    </p>
-                    <p className="text-sm text-[var(--text-muted)]">
-                      {category.description}
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <span
-                      className="text-2xl font-semibold text-[var(--text-main)]"
-                      style={{ fontFamily: "Outfit" }}
-                    >
-                      {category.count}
-                    </span>
-                  </div>
-                </div>
+                <CategoryCard key={category.label} category={category} />
               ))}
             </div>
           </div>

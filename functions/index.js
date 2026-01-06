@@ -265,6 +265,44 @@ exports.runScheduledScans = onSchedule(
           }
           if (rules) {
             requestBody.rules = rules;
+
+            // Build checks object based on which rule categories have selections
+            // This enables the backend to know which check types to run
+            const checks = {};
+
+            // Check if duplicates has any rules selected
+            if (rules.duplicates && typeof rules.duplicates === 'object') {
+              const hasSelectedDuplicates = Object.values(rules.duplicates).some(
+                arr => Array.isArray(arr) && arr.length > 0
+              );
+              checks.duplicates = hasSelectedDuplicates;
+            }
+
+            // Check if relationships has any rules selected
+            if (rules.relationships && typeof rules.relationships === 'object') {
+              const hasSelectedRelationships = Object.values(rules.relationships).some(
+                arr => Array.isArray(arr) && arr.length > 0
+              );
+              checks.links = hasSelectedRelationships;
+            }
+
+            // Check if required_fields has any rules selected
+            if (rules.required_fields && typeof rules.required_fields === 'object') {
+              const hasSelectedRequiredFields = Object.values(rules.required_fields).some(
+                arr => Array.isArray(arr) && arr.length > 0
+              );
+              checks.required_fields = hasSelectedRequiredFields;
+            }
+
+            // Check if attendance_rules is enabled
+            if (rules.attendance_rules === true) {
+              checks.attendance = true;
+            }
+
+            // Only add checks if at least one is enabled
+            if (Object.keys(checks).length > 0) {
+              requestBody.checks = checks;
+            }
           }
           // Include notify_slack if enabled on the schedule
           if (schedule.notify_slack) {
@@ -272,7 +310,15 @@ exports.runScheduledScans = onSchedule(
           }
 
           const url = `${INTEGRITY_RUNNER_URL}/integrity/run?${params.toString()}`;
-          logger.info(`Triggering run for schedule ${scheduleId}`, { url, entities, has_rules: !!rules });
+          logger.info(`Triggering run for schedule ${scheduleId}`, {
+            url,
+            entities,
+            has_rules: !!rules,
+            has_checks: !!requestBody.checks,
+            checks: requestBody.checks,
+            notify_slack: schedule.notify_slack || false,
+            requestBody: JSON.stringify(requestBody)
+          });
 
           let runId = null;
           let timeoutId = null;
@@ -282,12 +328,12 @@ exports.runScheduledScans = onSchedule(
             timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
 
             const response = await fetch(url, {
-              method: "POST",
+              method: 'POST',
               headers: {
-                Authorization: `Bearer ${API_AUTH_TOKEN}`,
-                "Content-Type": "application/json",
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${API_AUTH_TOKEN}`
               },
-              body: Object.keys(requestBody).length > 0 ? JSON.stringify({ run_config: requestBody }) : undefined,
+              body: Object.keys(requestBody).length > 0 ? JSON.stringify(requestBody) : undefined,
               signal: controller.signal,
             });
 

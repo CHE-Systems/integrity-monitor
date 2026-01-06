@@ -10,7 +10,6 @@
         "statusBarItem.remoteBackground": "#972b70",
         "titleBar.activeBackground": "#972b70",
         "titleBar.inactiveBackground": "#972b7099",
-        "tab.activeBorder": "#bf368d",
         "activityBar.foreground": "#e7e7e7",
         "activityBar.inactiveForeground": "#e7e7e799",
         "commandCenter.border": "#e7e7e799",

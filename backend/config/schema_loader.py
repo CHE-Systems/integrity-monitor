@@ -17,6 +17,7 @@ from .models import (
     RelationshipRule,
     SchemaConfig,
     SchemaMetadata,
+    ValueCheck,
 )
 
 logger = logging.getLogger(__name__)
@@ -176,12 +177,14 @@ def _convert_firestore_rules_to_schema_config(rules_data: Dict[str, Any]) -> Sch
     # Build entities dict
     entities: Dict[str, EntitySchema] = {}
 
-    # Get all entity names from relationships and required_fields
+    # Get all entity names from relationships, required_fields, and value_checks
     all_entities = set()
     if "relationships" in rules_data:
         all_entities.update(rules_data["relationships"].keys())
     if "required_fields" in rules_data:
         all_entities.update(rules_data["required_fields"].keys())
+    if "value_checks" in rules_data:
+        all_entities.update(rules_data["value_checks"].keys())
     if "duplicates" in rules_data:
         all_entities.update(rules_data["duplicates"].keys())
 
@@ -224,12 +227,31 @@ def _convert_firestore_rules_to_schema_config(rules_data: Dict[str, Any]) -> Sch
                     rule_id=req_data.get("rule_id"),  # Now part of the model
                 ))
 
+        # Get value checks for this entity
+        value_checks: List[ValueCheck] = []
+        if "value_checks" in rules_data and entity in rules_data["value_checks"]:
+            for check_data in rules_data["value_checks"][entity]:
+                # Prefer field_id over field when both are present (field_id is more reliable)
+                field_reference = check_data.get("field_id") or check_data.get("field", "")
+                
+                # Include rule_id and source_entity in ValueCheck
+                value_checks.append(ValueCheck(
+                    field=field_reference,
+                    message=check_data.get("message", ""),
+                    severity=check_data.get("severity", "info"),
+                    rule_id=check_data.get("rule_id"),
+                    source_entity=check_data.get("source_entity"),
+                    condition_field=check_data.get("condition_field"),
+                    condition_value=check_data.get("condition_value"),
+                ))
+
         entities[entity] = EntitySchema(
             description=f"{entity.capitalize()} entity",
             key_identifiers=[],  # Not stored in Firestore rules
             identity_fields=[],  # Not stored in Firestore rules
             relationships=relationships,
             missing_key_data=missing_key_data,
+            value_checks=value_checks,
         )
 
     # Build duplicates dict

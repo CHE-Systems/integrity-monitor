@@ -350,6 +350,9 @@ def _run_integrity_background(
     run_config: Optional[Dict[str, Any]] = None
 ):
     """Run integrity scan in background thread."""
+    print(f"[BACKGROUND DEBUG] _run_integrity_background called with run_config={run_config}")
+    if run_config:
+        print(f"[BACKGROUND DEBUG] run_config.notify_slack = {run_config.get('notify_slack')}")
     thread_runner = None
     try:
         # Create a new runner instance for this thread
@@ -431,18 +434,17 @@ def run_integrity(
     elif entities:
         final_entities = entities
 
-    # DEBUG LOGGING: Show what was received from frontend
-    logger.info("=" * 80)
-    logger.info("API ENDPOINT: Received Scan Request")
-    logger.info("=" * 80)
-    logger.info(f"Trigger: {trigger}")
-    logger.info(f"Entities (query param): {entities}")
-    logger.info(f"Run config received: {run_config}")
+    # DEBUG LOGGING: Show what was received (using print for guaranteed Cloud Run visibility)
+    print("=" * 80)
+    print("[API DEBUG] Received Scan Request")
+    print(f"[API DEBUG] Trigger: {trigger}")
+    print(f"[API DEBUG] Entities (query param): {entities}")
+    print(f"[API DEBUG] Run config received: {run_config}")
     if run_config:
-        logger.info(f"Run config entities: {run_config.get('entities')}")
-        logger.info(f"Run config rules: {run_config.get('rules')}")
-        logger.info(f"Run config checks: {run_config.get('checks')}")
-    logger.info("=" * 80)
+        print(f"[API DEBUG] notify_slack in run_config: {run_config.get('notify_slack')}")
+    else:
+        print("[API DEBUG] WARNING: run_config is None - no request body received!")
+    print("=" * 80)
 
     logger.info(
         "Integrity run requested",
@@ -1798,7 +1800,7 @@ def get_rules_by_category(category: str, request: Request):
     try:
         request_id = getattr(request.state, "request_id", None)
         
-        valid_categories = ["duplicates", "relationships", "required_fields", "attendance_rules"]
+        valid_categories = ["duplicates", "relationships", "required_fields", "value_checks", "attendance_rules"]
         if category not in valid_categories:
             raise HTTPException(
                 status_code=400,
@@ -1894,7 +1896,7 @@ def create_rule(
     try:
         request_id = getattr(request.state, "request_id", None)
         
-        valid_categories = ["duplicates", "relationships", "required_fields", "attendance_rules"]
+        valid_categories = ["duplicates", "relationships", "required_fields", "value_checks", "attendance_rules"]
         if category not in valid_categories:
             raise HTTPException(
                 status_code=400,
@@ -1951,7 +1953,7 @@ def update_rule(
     try:
         request_id = getattr(request.state, "request_id", None)
         
-        valid_categories = ["duplicates", "relationships", "required_fields", "attendance_rules"]
+        valid_categories = ["duplicates", "relationships", "required_fields", "value_checks", "attendance_rules"]
         if category not in valid_categories:
             raise HTTPException(
                 status_code=400,
@@ -2000,7 +2002,7 @@ def delete_rule(
     try:
         request_id = getattr(request.state, "request_id", None)
         
-        valid_categories = ["duplicates", "relationships", "required_fields", "attendance_rules"]
+        valid_categories = ["duplicates", "relationships", "required_fields", "value_checks", "attendance_rules"]
         if category not in valid_categories:
             raise HTTPException(
                 status_code=400,

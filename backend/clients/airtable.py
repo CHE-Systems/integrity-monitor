@@ -127,14 +127,16 @@ class AirtableClient:
         base_id: str,
         table_id: str,
         progress_callback: Optional[Callable[[str, Optional[Dict[str, Any]]], None]] = None,
+        cancel_check: Optional[Callable[[], None]] = None,
     ) -> List[Dict[str, Any]]:
         """Fetch records with retry logic and rate limiting.
-        
+
         Args:
             key: Entity key (e.g., "students", "parents")
             base_id: Airtable base ID
             table_id: Airtable table ID
             progress_callback: Optional callback function(message, metadata) called during pagination
+            cancel_check: Optional callback that raises an exception if the operation should be cancelled
         """
         self._throttle_request(base_id)
 
@@ -159,8 +161,19 @@ class AirtableClient:
         try:
             # Use iterate() directly so we can throttle between pages
             for page in table.iterate(page_size=100):
+                # Check for cancellation/timeout at the start of each page
+                if cancel_check:
+                    try:
+                        cancel_check()
+                    except Exception:
+                        logger.info(
+                            "Fetch cancelled during pagination",
+                            extra={"entity": key, "pages_fetched": page_count, "records_fetched": total_records}
+                        )
+                        raise
+
                 page_start_time = time.time()
-                
+
                 # Time the actual page fetch from Airtable
                 page_fetch_start = time.time()
                 records.extend(page)
@@ -276,12 +289,14 @@ class AirtableClient:
         self,
         key: str,
         progress_callback: Optional[Callable[[str, Optional[Dict[str, Any]]], None]] = None,
+        cancel_check: Optional[Callable[[], None]] = None,
     ) -> List[Dict[str, Any]]:
         """Fetch records for the given logical entity.
 
         Args:
             key: Entity key (e.g., "students", "parents")
             progress_callback: Optional callback function(message, metadata) called during pagination
+            cancel_check: Optional callback that raises an exception if the operation should be cancelled
 
         Returns:
             List of record dictionaries
@@ -291,7 +306,7 @@ class AirtableClient:
         table_id = table_meta["table_id"]
 
         try:
-            return self._fetch_with_retry(key, base_id, table_id, progress_callback)
+            return self._fetch_with_retry(key, base_id, table_id, progress_callback, cancel_check)
         except Exception as exc:
             logger.error(
                 "Failed to fetch Airtable records after retries",
@@ -305,6 +320,7 @@ class AirtableClient:
         base_id: str,
         table_id: str,
         progress_callback: Optional[Callable[[str, Optional[Dict[str, Any]]], None]] = None,
+        cancel_check: Optional[Callable[[], None]] = None,
     ) -> List[Dict[str, Any]]:
         """Fetch records directly by base_id and table_id.
 
@@ -312,12 +328,13 @@ class AirtableClient:
             base_id: Airtable base ID
             table_id: Airtable table ID
             progress_callback: Optional callback function(message, metadata) called during pagination
+            cancel_check: Optional callback that raises an exception if the operation should be cancelled
 
         Returns:
             List of record dictionaries
         """
         try:
-            return self._fetch_with_retry("direct", base_id, table_id, progress_callback)
+            return self._fetch_with_retry("direct", base_id, table_id, progress_callback, cancel_check)
         except Exception as exc:
             logger.error(
                 "Failed to fetch Airtable records by ID",

@@ -21,6 +21,7 @@ interface EntityRules {
   };
   relationships: Record<string, any>;
   required_fields: any[];
+  value_checks?: any[];
   attendance_rules?: any;
 }
 
@@ -199,6 +200,7 @@ export function RulesPage() {
       },
       relationships: (rules?.relationships?.[entity] as any) || {},
       required_fields: (rules?.required_fields?.[entity] as any[]) || [],
+      value_checks: (rules?.value_checks?.[entity] as any[]) || [],
       attendance_rules:
         entity === "absent"
           ? (rules?.attendance_rules as any) || {}
@@ -214,6 +216,7 @@ export function RulesPage() {
       (entityRules.duplicates.possible?.length || 0) +
       Object.keys(entityRules.relationships).length +
       (entityRules.required_fields?.length || 0) +
+      (entityRules.value_checks?.length || 0) +
       (activeEntity === "absent" && entityRules.attendance_rules ? 1 : 0); // Count duplicate absence rule for absent entity
 
     if (totalRules === 0) {
@@ -453,6 +456,80 @@ export function RulesPage() {
                       onDelete={() =>
                         handleDeleteClick(
                           "required_fields",
+                          activeEntity,
+                          ruleId
+                        )
+                      }
+                    />
+                  );
+                }
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Value Checks */}
+        {entityRules.value_checks && entityRules.value_checks.length > 0 && (
+          <div>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold text-[var(--text-main)]">
+                Value Checks
+              </h3>
+              <button
+                onClick={() => {
+                  setEditingRule({
+                    category: "value_checks",
+                    entity: activeEntity,
+                    ruleId: "",
+                    rule: {},
+                  });
+                  setShowEditor(true);
+                }}
+                className="px-3 py-1.5 text-sm border border-[var(--border)] rounded-lg hover:bg-gray-50"
+              >
+                + Add Value Check
+              </button>
+            </div>
+            <div className="space-y-3">
+              {entityRules.value_checks.map(
+                (checkRule: any, idx: number) => {
+                  const ruleId =
+                    checkRule.rule_id ||
+                    (checkRule.field
+                      ? `${activeEntity}_${checkRule.field}`
+                      : undefined);
+
+                  if (!ruleId) {
+                    console.warn(
+                      "Value check rule missing rule_id and field:",
+                      checkRule
+                    );
+                    return null;
+                  }
+
+                  return (
+                    <RuleCard
+                      key={idx}
+                      rule={checkRule}
+                      entity={activeEntity}
+                      category="value_checks"
+                      ruleId={ruleId}
+                      onView={() =>
+                        navigate(
+                          `/rules/value_checks/${activeEntity}/${ruleId}`
+                        )
+                      }
+                      onEdit={() =>
+                        handleEditClick(
+                          "value_checks",
+                          activeEntity,
+                          ruleId,
+                          checkRule
+                        )
+                      }
+                      onDelete={() =>
+                        handleDeleteClick(
+                          "value_checks",
                           activeEntity,
                           ruleId
                         )

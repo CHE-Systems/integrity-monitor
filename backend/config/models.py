@@ -22,6 +22,16 @@ class FieldRequirement(BaseModel):
     rule_id: Optional[str] = None  # Added to support Firestore rule IDs for filtering
 
 
+class ValueCheck(BaseModel):
+    field: str
+    message: str = ""
+    severity: str = "info"
+    rule_id: Optional[str] = None
+    source_entity: Optional[str] = None  # Entity to check (if different from rule's entity)
+    condition_field: Optional[str] = None
+    condition_value: Optional[str] = None
+
+
 class RelationshipRule(BaseModel):
     target: str
     message: str
@@ -65,6 +75,7 @@ class EntitySchema(BaseModel):
     identity_fields: List[str]
     relationships: Dict[str, RelationshipRule] = Field(default_factory=dict)
     missing_key_data: List[FieldRequirement] = Field(default_factory=list)
+    value_checks: List[ValueCheck] = Field(default_factory=list)
 
 
 class SchemaMetadata(BaseModel):

@@ -919,9 +919,6 @@ export function RunsPage() {
           <div className="space-y-2">
             {paginatedRuns.map((run) => {
               const isExpanded = expandedRun === run.id;
-              const startTime =
-                run.started_at?.toDate?.() ||
-                new Date(run.started_at || Date.now());
               const endTime = run.ended_at?.toDate?.() || null;
               const statusLower = (run.status || "").toLowerCase();
               const isRunning =
@@ -969,6 +966,15 @@ export function RunsPage() {
                               Trigger: {getTriggerLabel(run.trigger || "")}
                             </span>
                             <span>Duration: {run.duration}</span>
+                            {run.counts?.total !== undefined && (
+                              <span className={
+                                (run.counts.by_severity?.critical || 0) > 0 ? "text-red-600 font-medium" :
+                                (run.counts.by_severity?.warning || 0) > 0 ? "text-yellow-600 font-medium" :
+                                "text-green-600"
+                              }>
+                                Issues: {run.counts.total.toLocaleString()}
+                              </span>
+                            )}
                             {run.run_id && (
                               <span className="font-mono text-xs">
                                 ID: {run.run_id.substring(0, 8)}...

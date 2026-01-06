@@ -58,7 +58,7 @@ export function IssueTrendChart({
   const issueTypes = useMemo(() => {
     const types = Array.from(
       new Set(
-        data.flatMap((item) => Object.keys(item).filter((key) => key !== "day"))
+        data.flatMap((item) => Object.keys(item).filter((key) => key !== "day" && key !== "total"))
       )
     );
     return types;

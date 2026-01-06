@@ -336,6 +336,78 @@ class RulesService:
 
         return required_fields
 
+    def _load_value_checks_from_firestore(self) -> Dict[str, Any]:
+        """Load value check rules from rules/value_checks/{entity}/* collections."""
+        if not self.db:
+            return {}
+
+        value_checks = {}
+
+        # Query each entity collection - dynamically discover entities
+        entities = self._get_entities_from_mapping()
+
+        for entity in entities:
+            # Try both singular and plural forms
+            entity_variants = self._get_entity_variants(entity)
+            
+            for variant in entity_variants:
+                collection_path = f"rules/value_checks/{variant}"
+                try:
+                    logger.debug(f"Querying Firestore for value_checks: {collection_path}")
+                    docs = self.db.collection(collection_path).where("enabled", "==", True).stream()
+
+                    fields = []
+                    rule_ids = []
+                    doc_count = 0
+                    for doc in docs:
+                        doc_count += 1
+                        rule_data = doc.to_dict()
+                        # Always use document ID as rule_id to ensure consistency
+                        # This ensures deletion works correctly
+                        rule_id = doc.id
+                        rule_data["rule_id"] = rule_id
+                        fields.append(rule_data)
+                        rule_ids.append(rule_id)
+
+                    logger.debug(f"Found {doc_count} documents in {collection_path}")
+                    
+                    if fields:
+                        # Use the canonical entity name (from mapping), not the variant
+                        if entity not in value_checks:
+                            value_checks[entity] = []
+                        value_checks[entity].extend(fields)
+                        logger.info(
+                            f"Loaded value check rules for {entity} from {variant}",
+                            extra={
+                                "category": "value_checks",
+                                "entity": entity,
+                                "variant": variant,
+                                "rule_count": len(fields),
+                            }
+                        )
+                        break  # Found rules, no need to check other variants
+                except Exception as exc:
+                    logger.debug(f"Failed to query {collection_path}: {exc}")
+                    continue
+            
+            # Log if no rules found for this entity
+            if entity not in value_checks:
+                logger.debug(f"No value check rules found for {entity} in any variant")
+
+        total_rules = sum(len(v) for v in value_checks.values())
+        if value_checks:
+            logger.info(
+                "Loaded value check rules from Firestore",
+                extra={
+                    "category": "value_checks",
+                    "total_entities": len(value_checks),
+                    "total_rules": total_rules,
+                    "entities": list(value_checks.keys()),
+                }
+            )
+
+        return value_checks
+
     def _load_attendance_from_firestore(self) -> Dict[str, Any]:
         """Load attendance rules from rules/attendance/* collections."""
         if not self.db:
@@ -398,6 +470,7 @@ class RulesService:
         duplicates = self._load_duplicates_from_firestore()
         relationships = self._load_relationships_from_firestore()
         required_fields = self._load_required_fields_from_firestore()
+        value_checks = self._load_value_checks_from_firestore()
         attendance_rules = self._load_attendance_from_firestore()
         
         # Log summary of what was loaded
@@ -435,6 +508,7 @@ class RulesService:
             "duplicates": duplicates,
             "relationships": relationships,
             "required_fields": required_fields,
+            "value_checks": value_checks,
             "attendance_rules": attendance_rules,
         }
 
@@ -442,7 +516,7 @@ class RulesService:
         """Get rules for a specific category.
 
         Args:
-            category: One of 'duplicates', 'relationships', 'required_fields', 'attendance_rules'
+            category: One of 'duplicates', 'relationships', 'required_fields', 'value_checks', 'attendance_rules'
 
         Returns:
             Dictionary of rules for that category
@@ -453,6 +527,8 @@ class RulesService:
             return self._load_relationships_from_firestore()
         elif category == "required_fields":
             return self._load_required_fields_from_firestore()
+        elif category == "value_checks":
+            return self._load_value_checks_from_firestore()
         elif category == "attendance_rules":
             return self._load_attendance_from_firestore()
         else:
@@ -584,8 +660,8 @@ class RulesService:
         """Create a new rule in the rules/ collection.
 
         Args:
-            category: Rule category ('duplicates', 'relationships', 'required_fields', 'attendance_rules')
-            entity: Entity name (required for duplicates, relationships, required_fields)
+            category: Rule category ('duplicates', 'relationships', 'required_fields', 'value_checks', 'attendance_rules')
+            entity: Entity name (required for duplicates, relationships, required_fields, value_checks)
             rule_data: Rule data dictionary
             user_id: Optional user ID for audit trail
 
@@ -595,8 +671,8 @@ class RulesService:
         if not self.db:
             raise ValueError("Firestore client not available")
 
-        # Validate and normalize field reference for required_fields rules
-        if category == "required_fields" and entity and "field" in rule_data:
+        # Validate and normalize field reference for required_fields and value_checks rules
+        if category in ("required_fields", "value_checks") and entity and "field" in rule_data:
             field_ref = rule_data.get("field")
             field_id_override = rule_data.get("field_id")  # Allow manual field_id override
             
@@ -705,6 +781,11 @@ class RulesService:
                 raise ValueError("Entity required for required field rules")
             collection_path = f"rules/required_fields/{entity}"
             rule_data["entity"] = entity
+        elif category == "value_checks":
+            if not entity:
+                raise ValueError("Entity required for value check rules")
+            collection_path = f"rules/value_checks/{entity}"
+            rule_data["entity"] = entity
         elif category == "attendance_rules":
             # For attendance, save to thresholds collection
             collection_path = "rules/attendance/thresholds"
@@ -731,7 +812,7 @@ class RulesService:
 
         Args:
             category: Rule category
-            entity: Entity name (required for duplicates, relationships, required_fields)
+            entity: Entity name (required for duplicates, relationships, required_fields, value_checks)
             rule_id: Rule ID to update
             rule_data: Updated rule data
             user_id: Optional user ID for audit trail
@@ -742,9 +823,9 @@ class RulesService:
         if not self.db:
             raise ValueError("Firestore client not available")
 
-        # For required_fields rules, if field_name is updated, regenerate rule_id
+        # For required_fields and value_checks rules, if field_name is updated, regenerate rule_id
         new_rule_id = rule_id
-        if category == "required_fields" and entity and "field_name" in rule_data:
+        if category in ("required_fields", "value_checks") and entity and "field_name" in rule_data:
             # Generate new rule_id based on updated field_name
             new_rule_id = self._generate_rule_id(category, entity, rule_data)
             rule_data["rule_id"] = new_rule_id
@@ -764,6 +845,10 @@ class RulesService:
             if not entity:
                 raise ValueError("Entity required for required field rules")
             collection_path = f"rules/required_fields/{entity}"
+        elif category == "value_checks":
+            if not entity:
+                raise ValueError("Entity required for value check rules")
+            collection_path = f"rules/value_checks/{entity}"
         elif category == "attendance_rules":
             collection_path = "rules/attendance/thresholds"
         else:
@@ -802,7 +887,7 @@ class RulesService:
 
         Args:
             category: Rule category
-            entity: Entity name (required for duplicates, relationships, required_fields)
+            entity: Entity name (required for duplicates, relationships, required_fields, value_checks)
             rule_id: Rule ID to delete
             user_id: Optional user ID for audit trail
         """
@@ -822,6 +907,10 @@ class RulesService:
             if not entity:
                 raise ValueError("Entity required for required field rules")
             collection_path = f"rules/required_fields/{entity}"
+        elif category == "value_checks":
+            if not entity:
+                raise ValueError("Entity required for value check rules")
+            collection_path = f"rules/value_checks/{entity}"
         elif category == "attendance_rules":
             collection_path = "rules/attendance/thresholds"
         else:

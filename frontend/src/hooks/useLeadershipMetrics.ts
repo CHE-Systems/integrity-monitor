@@ -7,10 +7,13 @@ export type HealthStatus = "excellent" | "good" | "attention" | "critical";
 
 export type TrendDirection = "improving" | "stable" | "declining";
 
+import type { IssueFilters } from "./useFirestoreIssues";
+
 export type LeadershipCategory = {
   label: string;
   count: number;
   description: string;
+  filter: IssueFilters;
 };
 
 export type MonthlyTrendItem = {
@@ -201,38 +204,43 @@ export function useLeadershipMetrics(): LeadershipMetrics {
         label: "Urgent Items",
         count: counts.critical,
         description: "Records requiring immediate attention",
+        filter: { severity: "critical", status: "open" },
       });
     }
 
     // We'll derive these from the latest run or trends if available
     const latestTrend = trends[0];
     if (latestTrend) {
-      if (latestTrend.duplicates > 0) {
+      if (Number(latestTrend.duplicates || 0) > 0) {
         categories.push({
           label: "Possible Duplicates",
-          count: latestTrend.duplicates,
+          count: Number(latestTrend.duplicates || 0),
           description: "People who may have multiple records",
+          filter: { type: "duplicate", status: "open" },
         });
       }
-      if (latestTrend.links > 0) {
+      if (Number(latestTrend.links || 0) > 0) {
         categories.push({
           label: "Incomplete Records",
-          count: latestTrend.links,
+          count: Number(latestTrend.links || 0),
           description: "Records missing required connections",
+          filter: { type: "missing_link", status: "open" },
         });
       }
-      if (latestTrend.attendance > 0) {
+      if (Number(latestTrend.attendance || 0) > 0) {
         categories.push({
           label: "Attendance Concerns",
-          count: latestTrend.attendance,
+          count: Number(latestTrend.attendance || 0),
           description: "Students with attendance patterns to review",
+          filter: { type: "attendance", status: "open" },
         });
       }
-      if (latestTrend.missing_field > 0) {
+      if (Number(latestTrend.missing_field || 0) > 0) {
         categories.push({
           label: "Missing Information",
-          count: latestTrend.missing_field,
+          count: Number(latestTrend.missing_field || 0),
           description: "Records with required fields not filled in",
+          filter: { type: "missing_field", status: "open" },
         });
       }
     }
@@ -243,18 +251,15 @@ export function useLeadershipMetrics(): LeadershipMetrics {
         label: "Items to Review",
         count: totalOpenIssues,
         description: "Records that may need attention",
+        filter: { status: "open" },
       });
     }
 
     // Transform monthly trends into aggregated totals for the chart
     const monthlyTrend: MonthlyTrendItem[] = monthlyTrends.map((item) => {
-      // Sum all issue types for this day
-      let total = 0;
-      Object.entries(item).forEach(([key, value]) => {
-        if (key !== "day" && typeof value === "number") {
-          total += value;
-        }
-      });
+      // Use the pre-calculated total from the trend item
+      // This avoids double-counting issues when redundant fields exist
+      const total = typeof item.total === 'number' ? item.total : 0;
 
       // Parse the day string to create a Date object
       // The day format is "Mon D" like "Dec 15"

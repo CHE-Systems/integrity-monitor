@@ -2,13 +2,18 @@ import React, { useState, useEffect } from "react";
 import { useAuth } from "../hooks/useAuth";
 import { useRules } from "../hooks/useRules";
 import type { AirtableSchema, AirtableTable } from "../utils/airtable";
-import { ACTIVE_ENTITIES, ENTITY_TABLE_MAPPING, TABLE_ENTITY_MAPPING } from "../config/entities";
+import {
+  ACTIVE_ENTITIES,
+  ENTITY_TABLE_MAPPING,
+  TABLE_ENTITY_MAPPING,
+} from "../config/entities";
 
 export interface ScanConfig {
   checks: {
     duplicates: boolean;
     links: boolean;
     required_fields: boolean;
+    value_checks: boolean;
     attendance: boolean;
   };
   entities?: string[]; // Optional: selected entity names to scan
@@ -16,6 +21,7 @@ export interface ScanConfig {
     duplicates?: Record<string, string[]>;
     relationships?: Record<string, string[]>;
     required_fields?: Record<string, string[]>;
+    value_checks?: Record<string, string[]>;
     attendance_rules?: boolean;
   };
   notify_slack?: boolean; // Optional: send Slack notification on completion
@@ -38,6 +44,7 @@ export function ScanConfigModal({
     duplicates: true,
     links: true,
     required_fields: true,
+    value_checks: true,
     attendance: true,
   });
   const [schema, setSchema] = useState<AirtableSchema | null>(null);
@@ -49,14 +56,16 @@ export function ScanConfigModal({
     duplicates?: Record<string, string[]>;
     relationships?: Record<string, string[]>;
     required_fields?: Record<string, string[]>;
+    value_checks?: Record<string, string[]>;
     attendance_rules?: boolean;
   }>({});
   const [expandedTables, setExpandedTables] = useState<Set<string>>(
     new Set() // Start empty, expand as tables are selected
   );
-  const { getToken } = useAuth();
-  const { loadRules } = useRules();
+  const { getToken, loading: authLoading, user: authUser } = useAuth();
+  const { loadRules, loading: rulesLoading } = useRules();
   const [rules, setRules] = useState<any>(null);
+  const [rulesError, setRulesError] = useState<string | null>(null);
   const [notifySlack, setNotifySlack] = useState(false);
 
   // Reset state when modal closes to ensure clean slate on next open
@@ -66,34 +75,68 @@ export function ScanConfigModal({
       setSelectedEntities(new Set());
       setSelectedRules({});
       setRules(null);
+      setRulesError(null);
       setSchema(null);
       setExpandedTables(new Set());
       setNotifySlack(false);
     }
   }, [isOpen]);
 
-  // Load rules when modal opens
+  // Load rules when modal opens (wait for auth to be ready)
   useEffect(() => {
-    if (!isOpen) return;
+    // Don't load if modal isn't open, auth is loading, or user isn't authenticated
+    if (!isOpen || authLoading || !authUser) return;
 
     const loadRulesData = async () => {
+      setRulesError(null);
       try {
         const rulesData = await loadRules();
         console.log("[ScanConfigModal] Loaded rules data:", rulesData);
         console.log("[ScanConfigModal] Rules structure:", {
-          duplicates: rulesData?.duplicates ? Object.keys(rulesData.duplicates) : [],
-          relationships: rulesData?.relationships ? Object.keys(rulesData.relationships) : [],
-          required_fields: rulesData?.required_fields ? Object.keys(rulesData.required_fields) : [],
+          duplicates: rulesData?.duplicates
+            ? Object.keys(rulesData.duplicates)
+            : [],
+          relationships: rulesData?.relationships
+            ? Object.keys(rulesData.relationships)
+            : [],
+          required_fields: rulesData?.required_fields
+            ? Object.keys(rulesData.required_fields)
+            : [],
+          value_checks: rulesData?.value_checks
+            ? Object.keys(rulesData.value_checks)
+            : [],
         });
-        console.log("[ScanConfigModal] Full rules structure for debugging:", JSON.stringify(rulesData, null, 2));
-        setRules(rulesData);
+        console.log(
+          "[ScanConfigModal] Full rules structure for debugging:",
+          JSON.stringify(rulesData, null, 2)
+        );
+        setRules(
+          rulesData || {
+            duplicates: {},
+            relationships: {},
+            required_fields: {},
+            value_checks: {},
+            attendance_rules: {},
+          }
+        );
       } catch (error) {
         console.error("Failed to load rules:", error);
+        const errorMessage =
+          error instanceof Error ? error.message : "Failed to load rules";
+        setRulesError(errorMessage);
+        // Set empty rules structure so UI doesn't hang
+        setRules({
+          duplicates: {},
+          relationships: {},
+          required_fields: {},
+          attendance_rules: {},
+        });
       }
     };
 
     loadRulesData();
-  }, [isOpen, loadRules]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, authLoading, authUser, loadRules]);
 
   // Fetch schema when modal opens - load from local JSON first for instant display
   useEffect(() => {
@@ -163,7 +206,7 @@ export function ScanConfigModal({
   // Get available entities (all active entities that exist in schema, regardless of rules)
   const availableEntities = React.useMemo(() => {
     const entitiesFromSchema = Array.from(entityTableMap.keys());
-    
+
     // Show all active entities that exist in schema, regardless of rules
     // This ensures entities don't disappear when rules load and allows
     // users to see and select entities even before rules are created
@@ -179,58 +222,65 @@ export function ScanConfigModal({
 
   // Helper to find matching entity name in rules (handles singular/plural mismatches)
   const findEntityInRules = (
-    category: "duplicates" | "relationships" | "required_fields",
+    category: "duplicates" | "relationships" | "required_fields" | "value_checks",
     entityName: string
   ): string | null => {
     if (!rules || !rules[category]) return null;
-    
+
     const availableEntities = Object.keys(rules[category]);
-    
+
     // Try exact match first
     if (availableEntities.includes(entityName)) {
       return entityName;
     }
-    
+
     // Try singular/plural variations
     const entityLower = entityName.toLowerCase();
-    const matchingEntity = availableEntities.find(e => {
+    const matchingEntity = availableEntities.find((e) => {
       const eLower = e.toLowerCase();
       return (
         eLower === entityLower ||
         eLower === entityLower.slice(0, -1) || // entity is singular of entityName
-        eLower === entityLower + 's' || // entity is plural of entityName
-        entityLower === eLower + 's' || // entityName is plural of entity
+        eLower === entityLower + "s" || // entity is plural of entityName
+        entityLower === eLower + "s" || // entityName is plural of entity
         entityLower === eLower.slice(0, -1) // entityName is singular of entity
       );
     });
-    
+
     return matchingEntity || null;
   };
 
   // Get all rule IDs for an entity in a category
   const getAllRuleIds = (
-    category: "duplicates" | "relationships" | "required_fields",
+    category: "duplicates" | "relationships" | "required_fields" | "value_checks",
     entityName: string
   ): string[] => {
     if (!rules) return [];
-    
+
     // Find the actual entity name in the rules (handles name mismatches)
     const actualEntityName = findEntityInRules(category, entityName);
     if (!actualEntityName) {
-      const availableEntities = rules[category] ? Object.keys(rules[category]) : [];
-      console.log(`[ScanConfigModal] No rules found for ${category}.${entityName}`, {
-        category,
-        entityName,
-        availableEntities,
-        rulesStructure: rules[category],
-      });
+      const availableEntities = rules[category]
+        ? Object.keys(rules[category])
+        : [];
+      console.log(
+        `[ScanConfigModal] No rules found for ${category}.${entityName}`,
+        {
+          category,
+          entityName,
+          availableEntities,
+          rulesStructure: rules[category],
+        }
+      );
       return [];
     }
-    
+
     if (actualEntityName !== entityName) {
-      console.log(`[ScanConfigModal] Using entity name mapping: ${entityName} -> ${actualEntityName} for ${category}`);
+      console.log(
+        `[ScanConfigModal] Using entity name mapping: ${entityName} -> ${actualEntityName} for ${category}`
+      );
     }
-    
+
     const categoryRules = rules[category]?.[actualEntityName];
     if (!categoryRules) {
       return [];
@@ -247,13 +297,17 @@ export function ScanConfigModal({
       return (categoryRules as any[]).map(
         (r: any) => r.rule_id || r.field || `required.${entityName}.${r.field}`
       );
+    } else if (category === "value_checks") {
+      return (categoryRules as any[]).map(
+        (r: any) => r.rule_id || r.field || `value_check.${entityName}.${r.field}`
+      );
     }
     return [];
   };
 
   // Check if all rules are selected for a check type across all entities
   const areAllRulesSelectedForCheckType = (
-    checkType: "duplicates" | "links" | "required_fields" | "attendance"
+    checkType: "duplicates" | "links" | "required_fields" | "value_checks" | "attendance"
   ): boolean => {
     if (checkType === "attendance") {
       return selectedRules.attendance_rules === true;
@@ -264,6 +318,8 @@ export function ScanConfigModal({
         ? "duplicates"
         : checkType === "links"
         ? "relationships"
+        : checkType === "value_checks"
+        ? "value_checks"
         : "required_fields";
 
     if (selectedEntities.size === 0) return false;
@@ -285,7 +341,7 @@ export function ScanConfigModal({
 
   // Check if any rules are selected for a check type (for indeterminate state)
   const areAnyRulesSelectedForCheckType = (
-    checkType: "duplicates" | "links" | "required_fields" | "attendance"
+    checkType: "duplicates" | "links" | "required_fields" | "value_checks" | "attendance"
   ): boolean => {
     if (checkType === "attendance") {
       return selectedRules.attendance_rules === true;
@@ -296,6 +352,8 @@ export function ScanConfigModal({
         ? "duplicates"
         : checkType === "links"
         ? "relationships"
+        : checkType === "value_checks"
+        ? "value_checks"
         : "required_fields";
 
     if (selectedEntities.size === 0) return false;
@@ -311,7 +369,7 @@ export function ScanConfigModal({
   // Check if all rules are selected for a specific table and rule type
   const areAllRulesSelectedForTable = (
     entity: string,
-    category: "duplicates" | "relationships" | "required_fields"
+    category: "duplicates" | "relationships" | "required_fields" | "value_checks"
   ): boolean => {
     if (!rules) return false;
     const allIds = getAllRuleIds(category, entity);
@@ -326,7 +384,7 @@ export function ScanConfigModal({
   // Check if any rules are selected for a specific table and rule type
   const areAnyRulesSelectedForTable = (
     entity: string,
-    category: "duplicates" | "relationships" | "required_fields"
+    category: "duplicates" | "relationships" | "required_fields" | "value_checks"
   ): boolean => {
     if (!rules) return false;
     const selectedIds = selectedRules[category]?.[entity] || [];
@@ -336,7 +394,7 @@ export function ScanConfigModal({
   // Toggle all rules for a specific table and rule type
   const toggleTableRuleType = (
     entity: string,
-    category: "duplicates" | "relationships" | "required_fields"
+    category: "duplicates" | "relationships" | "required_fields" | "value_checks"
   ) => {
     const allSelected = areAllRulesSelectedForTable(entity, category);
     const allIds = getAllRuleIds(category, entity);
@@ -362,6 +420,7 @@ export function ScanConfigModal({
         next.links = areAllRulesSelectedForCheckType("links");
         next.required_fields =
           areAllRulesSelectedForCheckType("required_fields");
+        next.value_checks = areAllRulesSelectedForCheckType("value_checks");
       }
       next.attendance = areAllRulesSelectedForCheckType("attendance");
       return next;
@@ -372,7 +431,7 @@ export function ScanConfigModal({
   if (!isOpen) return null;
 
   const toggleCheckType = (checkName: keyof typeof checks) => {
-    const allSelected = areAllRulesSelectedForCheckType(checkName);
+    const allSelected = areAllRulesSelectedForCheckType(checkName as "duplicates" | "links" | "required_fields" | "value_checks" | "attendance");
     const newValue = !allSelected;
 
     // When toggling a check type, select/deselect all its rules
@@ -399,6 +458,13 @@ export function ScanConfigModal({
             handleRulesChange("required_fields", entity, ruleIds);
           }
         });
+      } else if (checkName === "value_checks") {
+        selectedEntities.forEach((entity) => {
+          const ruleIds = getAllRuleIds("value_checks", entity);
+          if (ruleIds.length > 0) {
+            handleRulesChange("value_checks", entity, ruleIds);
+          }
+        });
       } else if (checkName === "attendance") {
         handleRulesChange("attendance_rules", "", true);
       }
@@ -420,6 +486,10 @@ export function ScanConfigModal({
       } else if (checkName === "required_fields") {
         selectedEntities.forEach((entity) => {
           handleRulesChange("required_fields", entity, []);
+        });
+      } else if (checkName === "value_checks") {
+        selectedEntities.forEach((entity) => {
+          handleRulesChange("value_checks", entity, []);
         });
       } else if (checkName === "attendance") {
         handleRulesChange("attendance_rules", "", false);
@@ -476,6 +546,13 @@ export function ScanConfigModal({
         next.required_fields[entity] = [];
       }
 
+      if (!next.value_checks) {
+        next.value_checks = {};
+      }
+      if (!next.value_checks[entity]) {
+        next.value_checks[entity] = [];
+      }
+
       return next;
     });
   };
@@ -492,6 +569,9 @@ export function ScanConfigModal({
       }
       if (next.required_fields) {
         delete next.required_fields[entity];
+      }
+      if (next.value_checks) {
+        delete next.value_checks[entity];
       }
       return next;
     });
@@ -527,6 +607,7 @@ export function ScanConfigModal({
       | "duplicates"
       | "relationships"
       | "required_fields"
+      | "value_checks"
       | "attendance_rules",
     entity: string,
     ruleIds: string[] | boolean
@@ -558,6 +639,7 @@ export function ScanConfigModal({
       areAllRulesSelectedForCheckType("duplicates") &&
       areAllRulesSelectedForCheckType("links") &&
       areAllRulesSelectedForCheckType("required_fields") &&
+      areAllRulesSelectedForCheckType("value_checks") &&
       areAllRulesSelectedForCheckType("attendance");
 
     if (allSelected) {
@@ -576,6 +658,9 @@ export function ScanConfigModal({
       }
       if (!areAllRulesSelectedForCheckType("required_fields")) {
         toggleCheckType("required_fields");
+      }
+      if (!areAllRulesSelectedForCheckType("value_checks")) {
+        toggleCheckType("value_checks");
       }
       if (!areAllRulesSelectedForCheckType("attendance")) {
         toggleCheckType("attendance");
@@ -619,6 +704,14 @@ export function ScanConfigModal({
         )
     );
 
+    // Check if we have any value check rules selected
+    const hasValueCheckRules = Boolean(
+      selectedRules.value_checks &&
+        Object.values(selectedRules.value_checks).some(
+          (ruleIds) => ruleIds.length > 0
+        )
+    );
+
     // Check if attendance rules are selected
     const hasAttendanceRules = selectedRules.attendance_rules === true;
 
@@ -627,6 +720,7 @@ export function ScanConfigModal({
       duplicates: hasDuplicateRules,
       links: hasRelationshipRules,
       required_fields: hasRequiredFieldRules,
+      value_checks: hasValueCheckRules,
       attendance: hasAttendanceRules,
     };
 
@@ -635,6 +729,7 @@ export function ScanConfigModal({
       hasDuplicateRules ||
       hasRelationshipRules ||
       hasRequiredFieldRules ||
+      hasValueCheckRules ||
       hasAttendanceRules;
 
     const configToSend = {
@@ -705,6 +800,13 @@ export function ScanConfigModal({
     if (selectedRules.required_fields) {
       for (const entity in selectedRules.required_fields) {
         count += selectedRules.required_fields[entity].length;
+      }
+    }
+
+    // Count value check rules
+    if (selectedRules.value_checks) {
+      for (const entity in selectedRules.value_checks) {
+        count += selectedRules.value_checks[entity].length;
       }
     }
 
@@ -820,7 +922,18 @@ export function ScanConfigModal({
                 <div className="text-sm text-[var(--text-muted)] py-8 text-center border border-[var(--border)] rounded-lg">
                   Please select a table to see available rules
                 </div>
-              ) : !rules ? (
+              ) : rulesError ? (
+                <div className="text-sm text-red-600 py-8 px-4 border border-red-300 rounded-lg bg-red-50">
+                  <div className="font-medium mb-2">Failed to load rules</div>
+                  <div className="text-xs space-y-1 text-left">
+                    {rulesError.split('\n').map((line, index) => (
+                      <div key={index} className={line.trim().startsWith('Current') || line.trim().startsWith('VITE') || line.trim().startsWith('To fix') ? 'font-mono text-[10px] text-gray-700' : ''}>
+                        {line || '\u00A0'}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : rulesLoading || !rules ? (
                 <div className="text-sm text-[var(--text-muted)] py-8 text-center border border-[var(--border)] rounded-lg">
                   Loading rules...
                 </div>
@@ -862,13 +975,18 @@ export function ScanConfigModal({
                           <div className="px-3 pb-3 pt-2 space-y-4 border-t border-[var(--border)] bg-[var(--bg-mid)]/20">
                             {/* Duplicate Detection Rules */}
                             {(() => {
-                              const actualEntityName = findEntityInRules("duplicates", entity);
+                              const actualEntityName = findEntityInRules(
+                                "duplicates",
+                                entity
+                              );
                               if (!actualEntityName) return null;
-                              
-                              const dupDef = rules.duplicates?.[actualEntityName] as
+
+                              const dupDef = rules.duplicates?.[
+                                actualEntityName
+                              ] as
                                 | { likely?: any[]; possible?: any[] }
                                 | undefined;
-                              
+
                               if (!dupDef) return null;
 
                               const likelyRules = dupDef.likely || [];
@@ -1004,11 +1122,15 @@ export function ScanConfigModal({
 
                             {/* Relationship Rules */}
                             {(() => {
-                              const actualEntityName = findEntityInRules("relationships", entity);
+                              const actualEntityName = findEntityInRules(
+                                "relationships",
+                                entity
+                              );
                               if (!actualEntityName) return null;
-                              
-                              const relRules = rules.relationships?.[actualEntityName];
-                              
+
+                              const relRules =
+                                rules.relationships?.[actualEntityName];
+
                               if (
                                 !relRules ||
                                 Object.keys(relRules).length === 0
@@ -1085,11 +1207,15 @@ export function ScanConfigModal({
 
                             {/* Required Field Rules */}
                             {(() => {
-                              const actualEntityName = findEntityInRules("required_fields", entity);
+                              const actualEntityName = findEntityInRules(
+                                "required_fields",
+                                entity
+                              );
                               if (!actualEntityName) return null;
-                              
-                              const reqFields = rules.required_fields?.[actualEntityName];
-                              
+
+                              const reqFields =
+                                rules.required_fields?.[actualEntityName];
+
                               if (
                                 !reqFields ||
                                 !Array.isArray(reqFields) ||
@@ -1169,9 +1295,99 @@ export function ScanConfigModal({
                               );
                             })()}
 
+                            {/* Value Checks */}
+                            {(() => {
+                              const actualEntityName = findEntityInRules(
+                                "value_checks",
+                                entity
+                              );
+                              if (!actualEntityName) return null;
+
+                              const valueChecks =
+                                rules.value_checks?.[actualEntityName];
+
+                              if (
+                                !valueChecks ||
+                                valueChecks.length === 0
+                              )
+                                return null;
+
+                              const selectedIds =
+                                selectedRules.value_checks?.[entity] || [];
+
+                              return (
+                                <div className="space-y-2">
+                                  <div className="flex items-center justify-between">
+                                    <div className="text-sm font-medium text-[var(--text-main)]">
+                                      Value Checks
+                                    </div>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        toggleTableRuleType(
+                                          entity,
+                                          "value_checks"
+                                        )
+                                      }
+                                      className="text-xs text-[var(--brand)] hover:underline"
+                                    >
+                                      {areAllRulesSelectedForTable(
+                                        entity,
+                                        "value_checks"
+                                      )
+                                        ? "Deselect All"
+                                        : "Select All"}
+                                    </button>
+                                  </div>
+                                  <div className="ml-2 space-y-1">
+                                    {valueChecks.map((check: any) => {
+                                      const ruleId =
+                                        check.rule_id ||
+                                        check.field ||
+                                        `value_check.${entity}.${check.field}`;
+                                      return (
+                                        <label
+                                          key={ruleId}
+                                          className="flex items-center gap-2 p-2 rounded-md hover:bg-[var(--bg-mid)]/40 cursor-pointer transition-colors"
+                                        >
+                                          <input
+                                            type="checkbox"
+                                            checked={selectedIds.includes(
+                                              ruleId
+                                            )}
+                                            onChange={() =>
+                                              handleRulesChange(
+                                                "value_checks",
+                                                entity,
+                                                selectedIds.includes(ruleId)
+                                                  ? selectedIds.filter(
+                                                      (id) => id !== ruleId
+                                                    )
+                                                  : [...selectedIds, ruleId]
+                                              )
+                                            }
+                                            className="w-3.5 h-3.5"
+                                          />
+                                          <div className="flex-1 min-w-0">
+                                            <div className="text-xs font-medium text-[var(--text-main)]">
+                                              {check.field || ruleId}
+                                            </div>
+                                            <div className="text-xs text-[var(--text-muted)] truncate">
+                                              {check.message || ""}
+                                            </div>
+                                          </div>
+                                        </label>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+                              );
+                            })()}
+
                             {/* Attendance Rules (for attendance and absent tables) */}
                             {(entity === "attendance" || entity === "absent") &&
-                              (selectedEntities.has("attendance") || selectedEntities.has("absent")) && (
+                              (selectedEntities.has("attendance") ||
+                                selectedEntities.has("absent")) && (
                                 <div className="space-y-2">
                                   <div className="text-sm font-medium text-[var(--text-main)]">
                                     Attendance Rules
@@ -1181,7 +1397,8 @@ export function ScanConfigModal({
                                       <input
                                         type="checkbox"
                                         checked={
-                                          selectedRules.attendance_rules ?? false
+                                          selectedRules.attendance_rules ??
+                                          false
                                         }
                                         onChange={(e) =>
                                           handleRulesChange(
@@ -1202,7 +1419,8 @@ export function ScanConfigModal({
                                       <input
                                         type="checkbox"
                                         checked={
-                                          selectedRules.attendance_rules ?? false
+                                          selectedRules.attendance_rules ??
+                                          false
                                         }
                                         onChange={(e) =>
                                           handleRulesChange(

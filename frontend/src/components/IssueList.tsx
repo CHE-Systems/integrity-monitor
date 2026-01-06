@@ -10,6 +10,7 @@ import { useAirtableSchema } from "../contexts/AirtableSchemaContext";
 import { formatRuleId } from "../utils/ruleFormatter";
 import { ACTIVE_ENTITIES, ENTITY_TABLE_MAPPING } from "../config/entities";
 import ConfirmModal from "./ConfirmModal";
+import { Pagination } from "./Pagination";
 import openInNewTabIcon from "../assets/open_in_new_tab.svg";
 import arrowLeftIcon from "../assets/keyboard_arrow_left.svg";
 import arrowRightIcon from "../assets/keyboard_arrow_right.svg";
@@ -21,11 +22,15 @@ const ITEMS_PER_PAGE = 50;
 interface IssueListProps {
   filters?: IssueFilters;
   onClose?: () => void;
+  totalItems?: number;
+  itemsPerPage?: number;
 }
 
 export function IssueList({
   filters: initialFilters = {},
   onClose,
+  totalItems,
+  itemsPerPage = ITEMS_PER_PAGE,
 }: IssueListProps) {
   const navigate = useNavigate();
   const { schema } = useAirtableSchema();
@@ -36,6 +41,11 @@ export function IssueList({
   );
   const [search, setSearch] = useState("");
   const [pageInput, setPageInput] = useState("");
+
+  // Track if we're filtering by run_id (from RunStatusPage)
+  const isRunSpecificView = Boolean(initialFilters?.run_id);
+  // When totalItems is provided, use default pagination
+  const useDefaultPagination = totalItems !== undefined;
 
   // Sync filters when initialFilters change (from parent component like DashboardContent or RunStatusPage)
   useEffect(() => {
@@ -58,6 +68,17 @@ export function IssueList({
     initialFilters?.first_seen_in_run,
   ]);
 
+  // Helper to update filters while preserving run_id and first_seen_in_run from initial filters
+  const updateFilter = (key: keyof IssueFilters, value: string | undefined) => {
+    setFilters((prev) => ({
+      ...prev,
+      // Always preserve run_id and first_seen_in_run from initialFilters if present
+      run_id: initialFilters?.run_id,
+      first_seen_in_run: initialFilters?.first_seen_in_run,
+      [key]: value,
+    }));
+  };
+
   // Get counts for total pages calculation
   const { counts } = useIssueCounts();
 
@@ -72,16 +93,35 @@ export function IssueList({
     prevPage,
     goToPage,
     goToLastPage,
-  } = useFirestoreIssues({ ...filters, search }, ITEMS_PER_PAGE);
+  } = useFirestoreIssues({ ...filters, search }, itemsPerPage);
 
   // Calculate total pages based on filtered count
+  // When viewing run-specific issues, we can't use global counts - pagination is based on query results
   const getFilteredCount = () => {
+    // For run-specific views with totalItems provided, use that
+    if (useDefaultPagination && totalItems !== undefined) {
+      return totalItems;
+    }
+    // For run-specific views without totalItems, we don't have accurate total counts
+    if (isRunSpecificView) {
+      // Return a placeholder - the actual count will be shown from query results
+      return -1;
+    }
     if (filters.status === "open") return counts.open;
     if (filters.status === "closed") return counts.closed;
     if (filters.status === "resolved") return counts.resolved;
     return counts.all;
   };
-  const totalPages = Math.ceil(getFilteredCount() / ITEMS_PER_PAGE) || 1;
+  const filteredCount = getFilteredCount();
+  const totalPages = filteredCount > 0 ? Math.ceil(filteredCount / itemsPerPage) : 1;
+
+  // Calculate pagination values for default pagination component
+  const startIndex = useDefaultPagination && totalItems !== undefined 
+    ? (currentPage - 1) * itemsPerPage 
+    : 0;
+  const endIndex = useDefaultPagination && totalItems !== undefined
+    ? Math.min(startIndex + itemsPerPage, totalItems)
+    : 0;
 
   const {
     markResolved,
@@ -202,7 +242,7 @@ export function IssueList({
         />
         <select
           value={filters.status || "all"}
-          onChange={(e) => setFilters({ ...filters, status: e.target.value })}
+          onChange={(e) => updateFilter("status", e.target.value)}
           className="rounded-lg border border-[var(--border)] px-3 py-2 text-sm text-[var(--text-main)]"
         >
           <option value="all">All Statuses</option>
@@ -212,9 +252,7 @@ export function IssueList({
         </select>
         <select
           value={filters.type || ""}
-          onChange={(e) =>
-            setFilters({ ...filters, type: e.target.value || undefined })
-          }
+          onChange={(e) => updateFilter("type", e.target.value || undefined)}
           className="rounded-lg border border-[var(--border)] px-3 py-2 text-sm text-[var(--text-main)]"
         >
           <option value="">All Types</option>
@@ -225,9 +263,7 @@ export function IssueList({
         </select>
         <select
           value={filters.severity || ""}
-          onChange={(e) =>
-            setFilters({ ...filters, severity: e.target.value || undefined })
-          }
+          onChange={(e) => updateFilter("severity", e.target.value || undefined)}
           className="rounded-lg border border-[var(--border)] px-3 py-2 text-sm text-[var(--text-main)]"
         >
           <option value="">All Severities</option>
@@ -237,9 +273,7 @@ export function IssueList({
         </select>
         <select
           value={filters.entity || ""}
-          onChange={(e) =>
-            setFilters({ ...filters, entity: e.target.value || undefined })
-          }
+          onChange={(e) => updateFilter("entity", e.target.value || undefined)}
           className="rounded-lg border border-[var(--border)] px-3 py-2 text-sm text-[var(--text-main)]"
         >
           <option value="">All Entities</option>
@@ -251,114 +285,143 @@ export function IssueList({
         </select>
       </div>
 
-      {/* Pagination Header */}
+      {/* Pagination */}
       {!loading && !error && issues.length > 0 && (
-        <div className="flex items-center justify-between text-sm py-2">
-          <div className="text-[var(--text-muted)]">
-            {issues.length} issues shown · {getFilteredCount()} total
-          </div>
-          <div className="flex items-center gap-1">
-            <button
-              onClick={() => goToPage(1)}
-              disabled={currentPage === 1 || loading}
-              className={`rounded-lg border border-[var(--text-main)] p-1.5 hover:bg-[var(--bg-mid)] ${
-                currentPage === 1 || loading
-                  ? "cursor-not-allowed opacity-40"
-                  : ""
-              }`}
-              title="First page"
-            >
-              <img
-                src={doubleArrowLeftIcon}
-                alt="First"
-                className="w-5 h-5"
-                style={{
-                  filter:
-                    "brightness(0) saturate(100%) invert(12%) sepia(30%) saturate(1200%) hue-rotate(140deg) brightness(0.31) contrast(1.2)",
-                }}
-              />
-            </button>
-            <button
-              onClick={prevPage}
-              disabled={!hasPrev || loading}
-              className={`rounded-lg border border-[var(--text-main)] p-1.5 hover:bg-[var(--bg-mid)] ${
-                !hasPrev || loading ? "cursor-not-allowed opacity-40" : ""
-              }`}
-              title="Previous page"
-            >
-              <img
-                src={arrowLeftIcon}
-                alt="Previous"
-                className="w-5 h-5"
-                style={{
-                  filter:
-                    "brightness(0) saturate(100%) invert(12%) sepia(30%) saturate(1200%) hue-rotate(140deg) brightness(0.31) contrast(1.2)",
-                }}
-              />
-            </button>
-            <div className="flex items-center gap-1 mx-1">
-              <span className="text-[var(--text-muted)]">Page</span>
-              <input
-                type="number"
-                min={1}
-                max={totalPages}
-                value={pageInput !== "" ? pageInput : currentPage}
-                onChange={(e) => setPageInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    const page = parseInt(pageInput, 10);
-                    if (!isNaN(page) && page >= 1 && page <= totalPages) {
-                      goToPage(page, totalPages);
-                      setPageInput("");
-                    }
-                  }
-                }}
-                onBlur={() => setPageInput("")}
-                className="w-14 rounded-lg border border-[var(--text-main)] px-2 py-1 text-sm text-center text-[var(--text-main)]"
-              />
-              <span className="text-[var(--text-muted)]">of {totalPages}</span>
+        <>
+          {useDefaultPagination && totalItems !== undefined ? (
+            <Pagination
+              currentPage={currentPage}
+              totalPages={totalPages}
+              totalItems={totalItems}
+              itemsPerPage={itemsPerPage}
+              startIndex={startIndex}
+              endIndex={endIndex}
+              onPageChange={(page) => goToPage(page, totalPages)}
+              itemLabel="issues"
+            />
+          ) : (
+            <div className="flex items-center justify-between text-sm py-2">
+              <div className="text-[var(--text-muted)]">
+                {issues.length} issues shown
+                {!isRunSpecificView && ` · ${filteredCount} total`}
+                {isRunSpecificView && hasMore && " · more available"}
+              </div>
+              <div className="flex items-center gap-1">
+                {!isRunSpecificView && (
+                  <button
+                    onClick={() => goToPage(1)}
+                    disabled={currentPage === 1 || loading}
+                    className={`rounded-lg border border-[var(--text-main)] p-1.5 hover:bg-[var(--bg-mid)] ${
+                      currentPage === 1 || loading
+                        ? "cursor-not-allowed opacity-40"
+                        : ""
+                    }`}
+                    title="First page"
+                  >
+                    <img
+                      src={doubleArrowLeftIcon}
+                      alt="First"
+                      className="w-5 h-5"
+                      style={{
+                        filter:
+                          "brightness(0) saturate(100%) invert(12%) sepia(30%) saturate(1200%) hue-rotate(140deg) brightness(0.31) contrast(1.2)",
+                      }}
+                    />
+                  </button>
+                )}
+                <button
+                  onClick={prevPage}
+                  disabled={!hasPrev || loading}
+                  className={`rounded-lg border border-[var(--text-main)] p-1.5 hover:bg-[var(--bg-mid)] ${
+                    !hasPrev || loading ? "cursor-not-allowed opacity-40" : ""
+                  }`}
+                  title="Previous page"
+                >
+                  <img
+                    src={arrowLeftIcon}
+                    alt="Previous"
+                    className="w-5 h-5"
+                    style={{
+                      filter:
+                        "brightness(0) saturate(100%) invert(12%) sepia(30%) saturate(1200%) hue-rotate(140deg) brightness(0.31) contrast(1.2)",
+                    }}
+                  />
+                </button>
+                <div className="flex items-center gap-1 mx-1">
+                  <span className="text-[var(--text-muted)]">Page</span>
+                  {isRunSpecificView ? (
+                    <span className="px-2 py-1 text-sm text-[var(--text-main)]">
+                      {currentPage}
+                    </span>
+                  ) : (
+                    <>
+                      <input
+                        type="number"
+                        min={1}
+                        max={totalPages}
+                        value={pageInput !== "" ? pageInput : currentPage}
+                        onChange={(e) => setPageInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            const page = parseInt(pageInput, 10);
+                            if (!isNaN(page) && page >= 1 && page <= totalPages) {
+                              goToPage(page, totalPages);
+                              setPageInput("");
+                            }
+                          }
+                        }}
+                        onBlur={() => setPageInput("")}
+                        className="w-14 rounded-lg border border-[var(--text-main)] px-2 py-1 text-sm text-center text-[var(--text-main)]"
+                      />
+                      <span className="text-[var(--text-muted)]">of {totalPages}</span>
+                    </>
+                  )}
+                </div>
+                <button
+                  onClick={nextPage}
+                  disabled={!hasMore || loading}
+                  className={`rounded-lg border border-[var(--text-main)] p-1.5 hover:bg-[var(--bg-mid)] ${
+                    !hasMore || loading ? "cursor-not-allowed opacity-40" : ""
+                  }`}
+                  title="Next page"
+                >
+                  <img
+                    src={arrowRightIcon}
+                    alt="Next"
+                    className="w-5 h-5"
+                    style={{
+                      filter:
+                        "brightness(0) saturate(100%) invert(12%) sepia(30%) saturate(1200%) hue-rotate(140deg) brightness(0.31) contrast(1.2)",
+                    }}
+                  />
+                </button>
+                {!isRunSpecificView && (
+                  <button
+                    onClick={() => goToLastPage(totalPages)}
+                    disabled={currentPage === totalPages || !hasMore || loading}
+                    className={`rounded-lg border border-[var(--text-main)] p-1.5 hover:bg-[var(--bg-mid)] ${
+                      currentPage === totalPages || !hasMore || loading
+                        ? "cursor-not-allowed opacity-40"
+                        : ""
+                    }`}
+                    title="Last page"
+                  >
+                    <img
+                      src={doubleArrowRightIcon}
+                      alt="Last"
+                      className="w-5 h-5"
+                      style={{
+                        filter:
+                          "brightness(0) saturate(100%) invert(12%) sepia(30%) saturate(1200%) hue-rotate(140deg) brightness(0.31) contrast(1.2)",
+                      }}
+                    />
+                  </button>
+                )}
+              </div>
             </div>
-            <button
-              onClick={nextPage}
-              disabled={!hasMore || loading}
-              className={`rounded-lg border border-[var(--text-main)] p-1.5 hover:bg-[var(--bg-mid)] ${
-                !hasMore || loading ? "cursor-not-allowed opacity-40" : ""
-              }`}
-              title="Next page"
-            >
-              <img
-                src={arrowRightIcon}
-                alt="Next"
-                className="w-5 h-5"
-                style={{
-                  filter:
-                    "brightness(0) saturate(100%) invert(12%) sepia(30%) saturate(1200%) hue-rotate(140deg) brightness(0.31) contrast(1.2)",
-                }}
-              />
-            </button>
-            <button
-              onClick={() => goToLastPage(totalPages)}
-              disabled={currentPage === totalPages || !hasMore || loading}
-              className={`rounded-lg border border-[var(--text-main)] p-1.5 hover:bg-[var(--bg-mid)] ${
-                currentPage === totalPages || !hasMore || loading
-                  ? "cursor-not-allowed opacity-40"
-                  : ""
-              }`}
-              title="Last page"
-            >
-              <img
-                src={doubleArrowRightIcon}
-                alt="Last"
-                className="w-5 h-5"
-                style={{
-                  filter:
-                    "brightness(0) saturate(100%) invert(12%) sepia(30%) saturate(1200%) hue-rotate(140deg) brightness(0.31) contrast(1.2)",
-                }}
-              />
-            </button>
-          </div>
-        </div>
+          )}
+        </>
       )}
 
       {loading && (

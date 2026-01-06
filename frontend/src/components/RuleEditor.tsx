@@ -28,6 +28,7 @@ const ALL_CATEGORY_OPTIONS = [
   { value: "duplicates", label: "Duplicate Detection" },
   { value: "relationships", label: "Relationship" },
   { value: "required_fields", label: "Required Field" },
+  { value: "value_checks", label: "Value Check" },
   { value: "attendance_rules", label: "Attendance Rule" },
 ];
 
@@ -629,6 +630,133 @@ export function RuleEditor({
     </div>
   );
 
+  const renderValueCheckFields = () => (
+    <>
+      <div>
+        <label className="block text-sm font-medium text-[var(--text-main)] mb-2">
+          Source Entity (Entity to Check)
+        </label>
+        <select
+          value={ruleData.source_entity || ""}
+          onChange={(e) => updateField("source_entity", e.target.value || undefined)}
+          className="w-full p-2 border border-[var(--border)] rounded-lg"
+        >
+          <option value="">Same as rule entity (default)</option>
+          {ENTITY_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+        <p className="text-xs text-[var(--text-muted)] mt-1">
+          The entity/table to check records from. If empty, checks the same entity where the rule is stored.
+        </p>
+      </div>
+      <div className="relative">
+        <label className="block text-sm font-medium text-[var(--text-main)] mb-2">
+          Field Name or ID *
+        </label>
+        <input
+          type="text"
+          value={fieldSearchTerm}
+          onChange={(e) => {
+            const value = e.target.value;
+            setFieldSearchTerm(value);
+            updateField("field", value);
+            if (value.length >= 2) {
+              lookupFields(value);
+            } else {
+              setFieldOptions([]);
+            }
+          }}
+          placeholder="Start typing field name or ID..."
+          className={`w-full p-2 border rounded-lg ${
+            errors.field ? "border-red-500" : "border-[var(--border)]"
+          }`}
+        />
+        {fieldOptions.length > 0 && (
+          <div className="absolute z-10 w-full mt-1 bg-white border border-[var(--border)] rounded-lg shadow-lg max-h-60 overflow-y-auto">
+            {fieldOptions.map((field) => (
+              <button
+                key={field.id}
+                type="button"
+                onClick={() => {
+                  setFieldSearchTerm(field.name);
+                  updateField("field", field.name);
+                  updateField("field_id", field.id);
+                  setFieldOptions([]);
+                }}
+                className="w-full text-left p-2 hover:bg-gray-100 border-b border-[var(--border)] last:border-b-0"
+              >
+                <div className="font-medium">{field.name}</div>
+                <div className="text-xs text-gray-500">{field.id}</div>
+              </button>
+            ))}
+          </div>
+        )}
+        {fieldLookupLoading && (
+          <div className="absolute right-2 top-2 text-gray-400 text-sm">
+            Searching...
+          </div>
+        )}
+      </div>
+      {errors.field && (
+        <p className="text-red-500 text-xs mt-1">{errors.field}</p>
+      )}
+      <p className="text-xs text-[var(--text-muted)] mt-1">
+        Start typing to search for fields. Select a field to auto-fill the
+        Field ID.
+      </p>
+      <div>
+        <label className="block text-sm font-medium text-[var(--text-main)] mb-2">
+          Field ID (optional, recommended)
+        </label>
+        <input
+          type="text"
+          value={ruleData.field_id || ""}
+          onChange={(e) => updateField("field_id", e.target.value)}
+          placeholder="e.g., fldUXiLJmTxJ9aeRp"
+          className="w-full p-2 border border-[var(--border)] rounded-lg font-mono text-sm"
+        />
+        <p className="text-xs text-[var(--text-muted)] mt-1">
+          Airtable field ID (starts with "fld"). More reliable than field
+          name. Auto-filled when selecting a field above.
+        </p>
+      </div>
+      <div>
+        <label className="block text-sm font-medium text-[var(--text-main)] mb-2">
+          Message *
+        </label>
+        <textarea
+          value={ruleData.message || ""}
+          onChange={(e) => updateField("message", e.target.value)}
+          placeholder="Message when field has a value"
+          className={`w-full p-2 border rounded-lg ${
+            errors.message ? "border-red-500" : "border-[var(--border)]"
+          }`}
+          rows={2}
+        />
+        {errors.message && (
+          <p className="text-red-500 text-xs mt-1">{errors.message}</p>
+        )}
+      </div>
+      <div>
+        <label className="block text-sm font-medium text-[var(--text-main)] mb-2">
+          Severity
+        </label>
+        <select
+          value={ruleData.severity || "info"}
+          onChange={(e) => updateField("severity", e.target.value)}
+          className="w-full p-2 border border-[var(--border)] rounded-lg"
+        >
+          <option value="info">Info</option>
+          <option value="warning">Warning</option>
+          <option value="critical">Critical</option>
+        </select>
+      </div>
+    </>
+  );
+
   const renderFields = () => {
     switch (selectedCategory) {
       case "duplicates":
@@ -637,6 +765,8 @@ export function RuleEditor({
         return renderRelationshipFields();
       case "required_fields":
         return renderRequiredFieldFields();
+      case "value_checks":
+        return renderValueCheckFields();
       case "attendance_rules":
         return renderAttendanceFields();
       default:

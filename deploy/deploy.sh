@@ -21,12 +21,16 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
 
 # Configuration
-PROJECT_ID=${GCP_PROJECT_ID:-$(gcloud config get-value project 2>/dev/null || echo "")}
+# Priority: 1) GCP_PROJECT_ID env var, 2) .firebaserc, 3) gcloud config
+if [ -n "$GCP_PROJECT_ID" ]; then
+    PROJECT_ID="$GCP_PROJECT_ID"
+elif [ -f "$PROJECT_ROOT/.firebaserc" ]; then
+    PROJECT_ID=$(grep -o '"default":\s*"[^"]*"' "$PROJECT_ROOT/.firebaserc" | cut -d'"' -f4)
+fi
+
+# Fallback to gcloud config if still not set
 if [ -z "$PROJECT_ID" ]; then
-    # Try to get from .firebaserc
-    if [ -f "$PROJECT_ROOT/.firebaserc" ]; then
-        PROJECT_ID=$(grep -o '"default":\s*"[^"]*"' "$PROJECT_ROOT/.firebaserc" | cut -d'"' -f4)
-    fi
+    PROJECT_ID=$(gcloud config get-value project 2>/dev/null || echo "")
 fi
 
 if [ -z "$PROJECT_ID" ]; then
@@ -196,18 +200,81 @@ if [ "$DEPLOY_BACKEND" = true ]; then
         "OPENAI_API_KEY"
     )
     
+    # Test gcloud connectivity first with a quick command
+    print_status "Verifying gcloud access..."
+    set +e  # Temporarily disable exit on error to capture output
+    TEST_OUTPUT=$(gcloud config get-value project 2>&1)
+    TEST_EXIT=$?
+    set -e  # Re-enable exit on error
+    
+    if [ $TEST_EXIT -ne 0 ]; then
+        print_error "gcloud is not working properly. Error details:"
+        echo "$TEST_OUTPUT" | head -20
+        echo ""
+        print_warning "Please fix gcloud installation before continuing."
+        print_warning "Common fixes:"
+        echo "  - Reinstall gcloud: https://cloud.google.com/sdk/docs/install"
+        echo "  - Check Python: gcloud may need Python 3.9-3.14"
+        echo "  - Try: gcloud components reinstall"
+        exit 1
+    fi
+    
     MISSING_SECRETS=()
+    GCLOUD_ERRORS=()
     for secret in "${REQUIRED_SECRETS[@]}"; do
-        if ! gcloud secrets describe "$secret" --project="$PROJECT_ID" &>/dev/null; then
-            MISSING_SECRETS+=("$secret")
+        echo -n "  Checking ${secret}... "
+        set +e  # Temporarily disable exit on error
+        ERROR_OUTPUT=$(gcloud secrets describe "$secret" --project="$PROJECT_ID" 2>&1)
+        EXIT_CODE=$?
+        set -e  # Re-enable exit on error
+        
+        if [ $EXIT_CODE -ne 0 ]; then
+            # Check if it's a "not found" error or a gcloud failure
+            if echo "$ERROR_OUTPUT" | grep -qi "NOT_FOUND\|does not exist\|not found\|was not found"; then
+                echo "NOT FOUND"
+                # Show the actual error for debugging
+                echo "    Error: $(echo "$ERROR_OUTPUT" | head -1)"
+                MISSING_SECRETS+=("$secret")
+            else
+                echo "ERROR"
+                # Show first line of error for diagnosis
+                ERROR_FIRST_LINE=$(echo "$ERROR_OUTPUT" | head -1)
+                echo "    Error: $ERROR_FIRST_LINE"
+                GCLOUD_ERRORS+=("$secret: $ERROR_FIRST_LINE")
+                MISSING_SECRETS+=("$secret")
+            fi
+        else
+            echo "OK"
         fi
     done
+    
+    echo ""
+    
+    if [ ${#GCLOUD_ERRORS[@]} -gt 0 ]; then
+        print_error "gcloud command failed while checking secrets:"
+        for error in "${GCLOUD_ERRORS[@]}"; do
+            echo "  $error"
+        done
+        echo ""
+        print_warning "The secrets may exist, but gcloud cannot access them."
+        print_warning "This usually indicates a gcloud configuration or permission issue."
+        print_warning ""
+        print_warning "To diagnose, run manually:"
+        echo "  gcloud secrets describe OPENAI_API_KEY --project=${PROJECT_ID}"
+        echo ""
+        exit 1
+    fi
     
     if [ ${#MISSING_SECRETS[@]} -gt 0 ]; then
         print_error "Missing secrets in Secret Manager:"
         for secret in "${MISSING_SECRETS[@]}"; do
             echo "  - ${secret}"
         done
+        echo ""
+        print_warning "If the secret exists in the UI, verify:"
+        echo "  1. Secret name matches exactly (case-sensitive)"
+        echo "  2. Secret is in project: ${PROJECT_ID}"
+        echo "  3. List all secrets: gcloud secrets list --project=${PROJECT_ID}"
         echo ""
         print_warning "Create the missing secrets using:"
         echo "  ./deploy/create-secrets.sh"

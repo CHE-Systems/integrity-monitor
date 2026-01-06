@@ -172,10 +172,13 @@ class FirestoreWriter:
             Structured counts with total, by_type, and by_severity
         """
         by_type: Dict[str, int] = {}
-        by_severity: Dict[str, int] = {}
-        total = 0
+        by_severity: Dict[str, int] = {
+            "critical": 0,
+            "warning": 0,
+            "info": 0
+        }
         
-        # Valid severity values for attendance issues
+        # Valid severity values
         valid_severities = {"critical", "warning", "info"}
 
         for key, count in summary.items():
@@ -183,36 +186,42 @@ class FirestoreWriter:
             if key == "duplicate_groups_formed":
                 continue
             
-            # Handle attendance keys specially
-            # Skip metric-specific keys like "attendance:duplicate_absence" or "attendance:duplicate_absence:warning"
-            # But count severity keys like "attendance:warning" and base "attendance"
+            # Handle attendance keys
             if key.startswith("attendance:"):
-                # Check if this is a severity-only key (attendance:severity)
-                parts = key.split(":", 2)
+                parts = key.split(":")
+                # Case: "attendance:severity" (already aggregated by severity)
                 if len(parts) == 2 and parts[1] in valid_severities:
-                    # This is "attendance:warning" or similar - count for severity breakdown only
-                    # Don't add to total here to avoid double-counting with base "attendance" key
-                    issue_type, severity = parts
-                    by_type[issue_type] = by_type.get(issue_type, 0) + count
-                    by_severity[severity] = by_severity.get(severity, 0) + count
-                # Otherwise, it's a metric-specific key like "attendance:duplicate_absence" - skip it
+                    severity = parts[1]
+                    by_severity[severity] += count
+                    # Don't add to by_type here to avoid double-counting "attendance"
+                
+                # Case: "attendance:metric:severity" (detailed attendance issue)
+                elif len(parts) == 3 and parts[2] in valid_severities:
+                    # We don't add these to severity counts here because "attendance:severity"
+                    # already carries the aggregate. But we do want to ensure they aren't
+                    # double-counted in total if we were to sum by_type.
+                    pass
                 continue
 
-            # Parse keys like "missing_field:info" or "missing_link"
+            # Parse regular issue keys like "missing_field:info" or "missing_link"
             if ":" in key:
-                issue_type, severity = key.split(":", 1)
+                parts = key.split(":", 1)
+                issue_type, severity = parts
+                
+                # Aggregate by severity
+                if severity in valid_severities:
+                    by_severity[severity] += count
+                
                 # Aggregate by type
                 by_type[issue_type] = by_type.get(issue_type, 0) + count
-                # Aggregate by severity
-                by_severity[severity] = by_severity.get(severity, 0) + count
-                # Add to total (only count severity-specific keys to avoid double-counting)
-                total += count
             else:
-                # Keys without severity (like "missing_field" or "attendance") - this is already aggregated by type
-                # This represents the total count for this issue type
-                # Don't add to total here - these are redundant aggregates that would cause double-counting
-                # The actual issues are already counted via the severity-specific keys above
+                # Keys without severity (like "missing_field" or "attendance")
+                # These are type-level aggregates
                 by_type[key] = count
+
+        # Calculate total as the sum of Critical and Warning issues only
+        # Info issues are excluded from the main "Total Issues to Review" count
+        total = by_severity["critical"] + by_severity["warning"]
 
         return {
             "total": total,

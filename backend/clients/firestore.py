@@ -130,8 +130,14 @@ class FirestoreClient:
             # Ensure timestamps are present
             data = payload.copy()
             # Only set started_at if it doesn't exist and we're not cancelling
-            # This prevents overwriting the original start time when cancelling
+            # WARNING: This fallback can cause bugs if called during updates without started_at
+            # All callers should include started_at explicitly to avoid incorrect timestamps
             if "started_at" not in data and data.get("status") != "cancelled":
+                logger.warning(
+                    "started_at not in data for record_run - using current time as fallback. "
+                    "This may cause incorrect timestamps. Caller should include started_at explicitly.",
+                    extra={"run_id": run_id, "status": data.get("status")},
+                )
                 data["started_at"] = datetime.now(timezone.utc)
             if "ended_at" not in data and "status" in data and data["status"] != "running":
                 data["ended_at"] = datetime.now(timezone.utc)

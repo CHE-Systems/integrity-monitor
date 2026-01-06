@@ -782,11 +782,43 @@ export function RunStatusPage() {
             </div>
           )}
 
+        {/* New Issues Count */}
+        {runStatus.new_issues_count !== undefined && runStatus.new_issues_count > 0 && (
+          <div className="mb-6">
+            <div className="text-sm font-medium text-[var(--text-main)] mb-3">
+              New Issues Found
+              <span className="ml-2 text-xs font-normal text-[var(--text-muted)]">
+                (first time detected in this run)
+              </span>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="rounded-lg border border-[var(--border)] p-4 bg-[var(--bg-mid)]/30">
+                <div className="text-xs text-[var(--text-muted)] mb-1">New Issues</div>
+                <div className="text-2xl font-semibold text-[var(--text-main)]">
+                  {runStatus.new_issues_count}
+                </div>
+              </div>
+              <div className="rounded-lg border border-red-200 p-4 bg-red-50">
+                <div className="text-xs text-red-700 mb-1">New Critical</div>
+                <div className="text-2xl font-semibold text-red-800">
+                  {runStatus.new_issues_by_severity?.critical || 0}
+                </div>
+              </div>
+              <div className="rounded-lg border border-yellow-200 p-4 bg-yellow-50">
+                <div className="text-xs text-yellow-700 mb-1">New Warning</div>
+                <div className="text-2xl font-semibold text-yellow-800">
+                  {runStatus.new_issues_by_severity?.warning || 0}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Issue Counts */}
         {runStatus.counts && (
           <div className="mb-6">
             <div className="text-sm font-medium text-[var(--text-main)] mb-3">
-              Issues Found
+              Total Issues in This Run
             </div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div className="rounded-lg border border-[var(--border)] p-4 bg-[var(--bg-mid)]/30">
@@ -887,15 +919,32 @@ export function RunStatusPage() {
           </div>
         )}
 
-        {/* Rules Used */}
+        {/* Slack Notifications & Rules Used */}
         <div className="mt-6 pt-6 border-t border-[var(--border)]">
-          <div className="text-sm font-medium text-[var(--text-main)] mb-3">
-            Rules Selected for This Scan
-            {runStatus?.run_config?.rules && (
-              <span className="ml-2 text-xs font-normal text-[var(--text-muted)]">
-                ({rulesUsed.length} {rulesUsed.length === 1 ? 'rule' : 'rules'} selected)
-              </span>
-            )}
+          <div className="flex items-center justify-between mb-3">
+            <div className="text-sm font-medium text-[var(--text-main)]">
+              Rules Selected for This Scan
+              {runStatus?.run_config?.rules && (
+                <span className="ml-2 text-xs font-normal text-[var(--text-muted)]">
+                  ({rulesUsed.length} {rulesUsed.length === 1 ? 'rule' : 'rules'} selected)
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-1.5 text-xs">
+              <span className="text-[var(--text-muted)]">Slack:</span>
+              {runStatus?.run_config?.notify_slack ? (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-green-100 text-green-700 font-medium">
+                  <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                    <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                  </svg>
+                  Enabled
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-gray-100 text-gray-500 font-medium">
+                  Disabled
+                </span>
+              )}
+            </div>
           </div>
           {loadingRules ? (
             <div className="text-xs text-[var(--text-muted)]">
@@ -1115,11 +1164,15 @@ export function RunStatusPage() {
                   first_seen_in_run: runId,
                   status: "all",
                 }}
+                totalItems={runStatus.new_issues_count || 0}
+                itemsPerPage={50}
               />
             ) : (
               <IssueList
                 key={`all-issues-${runId}`}
                 filters={{ run_id: runId, status: "all" }}
+                totalItems={runStatus.counts?.total || 0}
+                itemsPerPage={50}
               />
             )}
             {/* Debug info */}
