@@ -1201,7 +1201,7 @@ class IntegrityRunner:
                 except: pass
                 # #endregion agent log
                 try:
-                    notifier = get_slack_notifier()
+                    notifier = get_slack_notifier(firestore_client=self._firestore_client)
                     issue_summary = summary if "summary" in locals() else {}
                     print(f"[SLACK DEBUG] Calling send_notification with issue_summary={issue_summary}, status={status}")
                     logger.info(f"[SLACK DEBUG] Calling send_notification with issue_summary={issue_summary}")
@@ -1222,6 +1222,7 @@ class IntegrityRunner:
                         error_message=error_message,
                         run_config=self._run_config,
                         new_issues_count=new_count,
+                        started_at=start_time,
                     )
                     print(f"[SLACK DEBUG] send_notification returned: {result}")
                     logger.info(f"[SLACK DEBUG] send_notification returned: {result}")

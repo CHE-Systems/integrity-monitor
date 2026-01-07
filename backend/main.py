@@ -1786,6 +1786,7 @@ def get_all_rules(request: Request):
             "duplicates": {},
             "relationships": {},
             "required_fields": {},
+            "value_checks": {},
             "attendance_rules": {
                 "onboarding_grace_days": 7,
                 "limited_schedule_threshold": 3,

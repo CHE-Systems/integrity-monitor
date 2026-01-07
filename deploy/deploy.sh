@@ -193,11 +193,14 @@ if [ "$DEPLOY_BACKEND" = true ]; then
     print_status "Building and deploying backend container..."
 
     # Check for required secrets
+    # Note: slack-webhook-url is NOT in this list - it's managed separately via API
+    # and should never be created/updated by deployment scripts
     print_status "Checking for required secrets in Secret Manager..."
     REQUIRED_SECRETS=(
         "AIRTABLE_PAT"
         "API_AUTH_TOKEN"
         "OPENAI_API_KEY"
+        "SLACK_WEBHOOK_URL"
     )
     
     # Test gcloud connectivity first with a quick command
@@ -345,6 +348,7 @@ if [ "$DEPLOY_BACKEND" = true ]; then
         "--set-secrets" "AIRTABLE_PAT=AIRTABLE_PAT:latest"
         "--set-secrets" "API_AUTH_TOKEN=API_AUTH_TOKEN:latest"
         "--set-secrets" "OPENAI_API_KEY=OPENAI_API_KEY:latest"
+        "--set-secrets" "SLACK_WEBHOOK_URL=SLACK_WEBHOOK_URL:latest"
         "--project" "$PROJECT_ID"
     )
 
@@ -379,6 +383,7 @@ if [ "$DEPLOY_BACKEND" = true ]; then
             "--set-secrets" "AIRTABLE_PAT=AIRTABLE_PAT:latest"
             "--set-secrets" "API_AUTH_TOKEN=API_AUTH_TOKEN:latest"
             "--set-secrets" "OPENAI_API_KEY=OPENAI_API_KEY:latest"
+            "--set-secrets" "SLACK_WEBHOOK_URL=SLACK_WEBHOOK_URL:latest"
             "--project" "$PROJECT_ID"
         )
         "${DEPLOY_CMD[@]}"

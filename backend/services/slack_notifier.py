@@ -6,6 +6,7 @@ Sends formatted Slack messages when scans complete with issues or errors.
 import os
 import time
 from typing import Any, Dict, Optional
+from datetime import datetime, timezone
 import json
 
 from ..clients.logging import get_logger
@@ -20,6 +21,7 @@ class SlackNotifier:
         self,
         webhook_url: Optional[str] = None,
         frontend_url: Optional[str] = None,
+        firestore_client=None,
     ):
         """Initialize SlackNotifier.
         
@@ -28,10 +30,12 @@ class SlackNotifier:
                         environment variable SLACK_WEBHOOK_URL or Secret Manager.
             frontend_url: Base URL for the frontend app (for generating links).
                          If not provided, reads from FRONTEND_URL env var.
+            firestore_client: Optional FirestoreClient for querying total open issues.
         """
         self._webhook_url = webhook_url
         self._frontend_url = frontend_url or os.getenv("FRONTEND_URL", "")
         self._cached_secret_webhook: Optional[str] = None
+        self._firestore_client = firestore_client
 
     def _get_webhook_url(self) -> Optional[str]:
         """Get webhook URL from configured source.
@@ -187,6 +191,33 @@ class SlackNotifier:
         }
         return status_emojis.get(status.lower(), "ℹ️")
 
+    def _get_total_open_issues(self) -> int:
+        """Get total count of open issues from Firestore.
+        
+        Returns:
+            Total number of issues with status='open'
+        """
+        if not self._firestore_client:
+            return 0
+        
+        try:
+            client = self._firestore_client._get_client()
+            issues_ref = client.collection(self._firestore_client._config.issues_collection)
+            query = issues_ref.where("status", "==", "open")
+            
+            # Stream and count (more reliable than count aggregation)
+            count = 0
+            for _ in query.stream():
+                count += 1
+            return count
+        except Exception as exc:
+            logger.warning(
+                "Failed to get total open issues count",
+                extra={"error": str(exc)},
+                exc_info=True
+            )
+            return 0
+
     def _get_status_color(self, status: str) -> str:
         """Get Slack attachment color for status."""
         status_colors = {
@@ -210,6 +241,7 @@ class SlackNotifier:
         error_message: Optional[str] = None,
         run_config: Optional[Dict[str, Any]] = None,
         new_issues_count: Optional[int] = None,
+        started_at: Optional[datetime] = None,
     ) -> Dict[str, Any]:
         """Build Slack message payload.
 
@@ -222,6 +254,7 @@ class SlackNotifier:
             error_message: Error message if status is error/timeout
             run_config: Optional run configuration with rules info
             new_issues_count: Number of new issues found (vs previously existing)
+            started_at: Optional datetime when the run started
 
         Returns:
             Slack message payload dict
@@ -230,16 +263,84 @@ class SlackNotifier:
         color = self._get_status_color(status)
 
         # Build header
-        header_text = f"{emoji} Data Integrity Scan Complete"
+        header_text = f"⛭ Data Integrity Scan Complete"
 
-        # Build status line
-        status_display = status.title()
+        # Format run info line
+        trigger_display = trigger.title()
+        
+        # Format duration
+        duration_str = ""
+        if duration_ms is not None:
+            duration_secs = duration_ms / 1000
+            if duration_secs >= 60:
+                duration_str = f"{int(duration_secs // 60)}m {int(duration_secs % 60)}s"
+            else:
+                duration_str = f"{duration_secs:.1f}s"
+        
+        # Format started time
+        started_str = ""
+        if started_at:
+            if isinstance(started_at, datetime):
+                start_dt = started_at
+            else:
+                # Try to convert from Firestore timestamp
+                try:
+                    start_dt = started_at.to_datetime() if hasattr(started_at, 'to_datetime') else datetime.fromisoformat(str(started_at))
+                except:
+                    start_dt = datetime.now(timezone.utc)
+            
+            # Format as "Today 4:25 PM" or "Yesterday 4:25 PM" or date
+            now = datetime.now(timezone.utc)
+            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            from datetime import timedelta
+            yesterday_start = today_start - timedelta(days=1)
+            
+            # Format time (remove leading zero from hour)
+            hour_str = str(start_dt.hour % 12 or 12)
+            time_str = f"{hour_str}:{start_dt.strftime('%M %p')}"
+            
+            if start_dt >= today_start:
+                started_str = f"Today {time_str}"
+            elif start_dt >= yesterday_start:
+                started_str = f"Yesterday {time_str}"
+            else:
+                day_str = str(start_dt.day)
+                started_str = f"{start_dt.strftime('%b')} {day_str}, {time_str}"
+        
+        # Build run URL - try multiple sources
+        run_url = None
+        frontend_url = self._frontend_url or os.getenv("FRONTEND_URL", "")
+        if not frontend_url and run_config:
+            # Try to get from run_config if available
+            frontend_url = run_config.get("frontend_url", "")
+        
+        # Try to construct from Firebase project if we have project ID
+        if not frontend_url:
+            project_id = os.getenv("GCP_PROJECT_ID") or os.getenv("GOOGLE_CLOUD_PROJECT")
+            if project_id:
+                # Default Firebase hosting pattern
+                frontend_url = f"https://{project_id}.web.app"
+        
+        if frontend_url:
+            base_url = frontend_url.rstrip("/")
+            run_url = f"{base_url}/run/{run_id}"
 
-        # Build issue summary - only count base keys (without severity suffix)
-        # to avoid double counting since issue_counts contains both
-        # "duplicate": 5 AND "duplicate:high": 2, "duplicate:medium": 3
-        issue_lines = []
-        total_issues = 0
+        # Build run info line with hyperlinked runId
+        if run_url:
+            # Slack link format: <url|text>
+            run_info_line = f"Run: <{run_url}|{run_id}> • Trigger: {trigger_display}"
+        else:
+            run_info_line = f"Run: {run_id} • Trigger: {trigger_display}"
+        if duration_str:
+            run_info_line += f" • Duration: {duration_str}"
+        if started_str:
+            run_info_line += f" • Started: {started_str}"
+
+        # Get total open issues
+        total_open_issues = self._get_total_open_issues()
+
+        # Parse issue counts to get types and severity
+        issue_type_counts: Dict[str, int] = {}
         critical_count = 0
         warning_count = 0
 
@@ -252,180 +353,149 @@ class SlackNotifier:
             "links": "Links",
             "link": "Links",
             "required_fields": "Required Fields",
-            "required_field": "Required Fields",
-            "missing_key_data": "Required Fields",
+            "required_field": "Missing required field",
+            "missing_key_data": "Missing required field",
             "value_checks": "Value Checks",
             "value_check": "Value Checks",
             "attendance": "Attendance",
         }
 
-        # Only count base keys (those without ":" in them) to avoid double counting
-        aggregated: Dict[str, int] = {}
+        # Track which base keys we've seen with severity-specific versions
+        base_keys_with_severity = set()
+        
+        # First pass: Identify all base keys that have severity-specific versions
+        for key, count in issue_counts.items():
+            if count > 0 and ":" in key:
+                issue_type, _ = key.split(":", 1)
+                base_key = issue_type.lower()
+                base_keys_with_severity.add(base_key)
+        
+        # Second pass: Count issues, prioritizing severity-specific keys over base keys
         for key, count in issue_counts.items():
             if count > 0:
                 if ":" in key:
-                    # This is a severity-specific key like "duplicate:high"
-                    # Use these for severity breakdown
-                    severity = key.split(":")[1].lower()
+                    # Severity-specific key like "duplicate:critical"
+                    issue_type, severity = key.split(":", 1)
+                    severity = severity.lower()
                     if severity in ("critical", "high"):
                         critical_count += count
                     elif severity in ("warning", "medium", "low"):
                         warning_count += count
-                else:
-                    # This is a base key like "duplicate" - use for total count
-                    base_key = key.lower()
+                    
+                    # Track by type (only count severity-specific keys to avoid double counting)
+                    base_key = issue_type.lower()
                     display_name = display_names.get(base_key, base_key.replace("_", " ").title())
-                    aggregated[display_name] = aggregated.get(display_name, 0) + count
-                    total_issues += count
+                    issue_type_counts[display_name] = issue_type_counts.get(display_name, 0) + count
+                else:
+                    # Base key like "duplicate" - only count if we haven't seen severity-specific versions
+                    base_key = key.lower()
+                    if base_key not in base_keys_with_severity:
+                        display_name = display_names.get(base_key, base_key.replace("_", " ").title())
+                        issue_type_counts[display_name] = issue_type_counts.get(display_name, 0) + count
 
-        for display_name, count in sorted(aggregated.items()):
-            issue_lines.append(f"• {display_name}: {count}")
-
-        # Build fields - prioritize new issues
-        fields = [
-            {
-                "title": "Run status",
-                "value": f"{emoji} {status_display}",
-                "short": True,
-            },
-            {
-                "title": "Trigger",
-                "value": trigger.title(),
-                "short": True,
-            },
-        ]
-
-        # Note: New issues will be shown in text, not fields
-
-        if duration_ms is not None:
-            duration_secs = duration_ms / 1000
-            if duration_secs >= 60:
-                duration_str = f"{int(duration_secs // 60)}m {int(duration_secs % 60)}s"
-            else:
-                duration_str = f"{duration_secs:.1f}s"
-            fields.append({
-                "title": "Duration",
-                "value": duration_str,
-                "short": True,
-            })
-
-        # Add severity breakdown if we have issues
-        if critical_count > 0 or warning_count > 0:
-            severity_parts = []
-            if critical_count > 0:
-                severity_parts.append(f"🔴 {critical_count} Critical")
-            if warning_count > 0:
-                severity_parts.append(f"🟡 {warning_count} Warning")
-            fields.append({
-                "title": "Issue severity breakdown",
-                "value": " | ".join(severity_parts),
-                "short": True,
-            })
-
-        # Build message text
-        text_parts = []
-
-        # Add rules summary if available
-        if run_config and run_config.get("rules"):
-            rules = run_config["rules"]
-            rules_lines = []
-
-            if rules.get("duplicates"):
-                dup_entities = [e for e, r in rules["duplicates"].items() if r]
-                if dup_entities:
-                    entities_str = ", ".join(dup_entities)
-                    rules_lines.append(f"• *Duplicates:* {entities_str}")
-
-            if rules.get("relationships"):
-                rel_entities = [e for e, r in rules["relationships"].items() if r]
-                if rel_entities:
-                    entities_str = ", ".join(rel_entities)
-                    rules_lines.append(f"• *Relationships:* {entities_str}")
-
+        # Build scope section
+        scope_lines = []
+        if run_config:
+            entities = run_config.get("entities", [])
+            if entities:
+                scope_lines.append(f"• Table: {entities[0]}")
+            
+            rules = run_config.get("rules", {})
+            rule_set_name = None
+            rule_name = None
+            
             if rules.get("required_fields"):
-                req_details = []
+                rule_set_name = "Required Fields"
                 for entity, rule_ids in rules["required_fields"].items():
                     if rule_ids:
-                        # Extract field names from rule_ids
-                        # Rule IDs can be: "field_name" or "required.entity.field_name"
-                        field_names = []
-                        for rule_id in rule_ids:
-                            if rule_id.startswith("required."):
-                                # Format: required.entity.field_name
-                                parts = rule_id.split(".")
-                                if len(parts) >= 3:
-                                    field_names.append(parts[2])
-                            else:
-                                field_names.append(rule_id)
-                        # Remove duplicates while preserving order
-                        seen = set()
-                        unique_fields = []
-                        for f in field_names:
-                            if f not in seen:
-                                seen.add(f)
-                                unique_fields.append(f)
-                        if unique_fields:
-                            fields_str = ", ".join(unique_fields)
-                            req_details.append(f"{entity}: {fields_str}")
-                if req_details:
-                    rules_lines.append(f"• *Required Fields:*")
-                    for detail in req_details:
-                        rules_lines.append(f"    - {detail}")
+                        # Get first rule ID
+                        rule_id = rule_ids[0]
+                        if rule_id.startswith("required."):
+                            parts = rule_id.split(".")
+                            if len(parts) >= 3:
+                                rule_name = f"required_field_rule.{parts[1]}.{parts[2]}"
+                        else:
+                            rule_name = f"required_field_rule.{entity}.{rule_id}"
+                        break
+            elif rules.get("duplicates"):
+                rule_set_name = "Duplicates"
+                for entity, rule_ids in rules["duplicates"].items():
+                    if rule_ids:
+                        rule_name = rule_ids[0]
+                        break
+            elif rules.get("relationships"):
+                rule_set_name = "Relationships"
+                for entity, rule_ids in rules["relationships"].items():
+                    if rule_ids:
+                        rule_name = rule_ids[0]
+                        break
+            elif rules.get("attendance_rules"):
+                rule_set_name = "Attendance Rules"
+                rule_name = "attendance.general"
+            
+            if rule_set_name:
+                scope_lines.append(f"• Rule set: {rule_set_name}")
+            if rule_name:
+                scope_lines.append(f"• Rule: {rule_name}")
 
-            if rules.get("value_checks"):
-                value_entities = [e for e, r in rules["value_checks"].items() if r]
-                if value_entities:
-                    entities_str = ", ".join(value_entities)
-                    rules_lines.append(f"• *Value Checks:* {entities_str}")
+        # Build results section
+        results_lines = []
+        
+        # New issues
+        new_issues_display = new_issues_count if new_issues_count is not None else 0
+        results_lines.append(f"• New issues: {new_issues_display}")
+        
+        # Total open issues
+        results_lines.append(f"• Total open issues: {total_open_issues}")
+        
+        # Issue types
+        if issue_type_counts:
+            type_parts = []
+            for issue_type, count in sorted(issue_type_counts.items()):
+                type_parts.append(f"{issue_type} ({count})")
+            results_lines.append(f"• Issue types: {', '.join(type_parts)}")
+        
+        # Severity
+        severity_parts = []
+        if warning_count > 0:
+            severity_parts.append(f"Warning ({warning_count})")
+        if critical_count > 0:
+            severity_parts.append(f":red_circle: Critical ({critical_count})")
+        if severity_parts:
+            results_lines.append(f"• Severity: {' '.join(severity_parts)}")
+        
+        # Run status
+        status_emoji = emoji
+        status_display = status.title()
+        results_lines.append(f"• Run status: {status_emoji} {status_display}")
 
-            if rules.get("attendance_rules"):
-                rules_lines.append("• *Attendance:* enabled")
-
-            if rules_lines:
-                text_parts.append("*Rules Checked:*")
-                text_parts.extend(rules_lines)
-                text_parts.append("")  # Add spacing
-
-        # Add new issues (always show, even if 0)
-        if new_issues_count is not None:
-            if new_issues_count > 0:
-                text_parts.append(f"*New Issues:* {new_issues_count}")
-            else:
-                text_parts.append("*New Issues:* No new issues found")
-            text_parts.append("")  # Add spacing
-
-        # Add total issues found
-        if total_issues > 0:
-            text_parts.append(f"*Total Issues Found:* {total_issues}")
-            text_parts.append("")  # Add spacing
-
-        if issue_lines:
-            text_parts.append("*Issues Found:*")
-            text_parts.extend(issue_lines)
+        # Build message text
+        text_parts = [run_info_line]
+        text_parts.append("")
+        
+        if scope_lines:
+            text_parts.append("Scope")
+            text_parts.extend(scope_lines)
+            text_parts.append("")
+        
+        if results_lines:
+            text_parts.append("Results")
+            text_parts.extend(results_lines)
 
         if error_message:
             text_parts.append(f"\n*Error:* {error_message}")
 
-        # Build run details link
-        run_url = None
-        if self._frontend_url:
-            # Remove trailing slash if present
-            base_url = self._frontend_url.rstrip("/")
-            run_url = f"{base_url}/run/{run_id}"
-
-        # Build actions/footer
-        footer_text = f"Run ID: {run_id[:8]}..."
+        # Add literal link at bottom as fallback
+        if run_url:
+            text_parts.append("")
+            text_parts.append(f"View run: {run_url}")
 
         # Construct message
         attachment = {
             "color": color,
-            "fields": fields,
-            "footer": footer_text,
+            "text": "\n".join(text_parts),
             "ts": int(time.time()),
         }
-
-        if text_parts:
-            attachment["text"] = "\n".join(text_parts)
 
         if run_url:
             attachment["actions"] = [
@@ -471,6 +541,7 @@ class SlackNotifier:
         error_message: Optional[str] = None,
         run_config: Optional[Dict[str, Any]] = None,
         new_issues_count: Optional[int] = None,
+        started_at: Optional[datetime] = None,
     ) -> bool:
         """Send a Slack notification for a completed scan.
 
@@ -561,6 +632,7 @@ class SlackNotifier:
                 error_message=error_message,
                 run_config=run_config,
                 new_issues_count=new_issues_count,
+                started_at=started_at,
             )
 
             # Log the full message payload
@@ -622,17 +694,19 @@ class SlackNotifier:
 def get_slack_notifier(
     webhook_url: Optional[str] = None,
     frontend_url: Optional[str] = None,
+    firestore_client=None,
 ) -> SlackNotifier:
     """Factory function to create a SlackNotifier instance.
     
     Args:
         webhook_url: Optional webhook URL override
         frontend_url: Optional frontend URL override
+        firestore_client: Optional FirestoreClient for querying total open issues
         
     Returns:
         Configured SlackNotifier instance
     """
-    return SlackNotifier(webhook_url=webhook_url, frontend_url=frontend_url)
+    return SlackNotifier(webhook_url=webhook_url, frontend_url=frontend_url, firestore_client=firestore_client)
 
 
 def set_slack_webhook_secret(webhook_url: str, project_id: Optional[str] = None) -> bool:

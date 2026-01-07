@@ -34,6 +34,7 @@ export interface RunStatus {
       required_fields?: Record<string, string[]>;
       attendance_rules?: boolean;
     };
+    notify_slack?: boolean;
   };
 }
 

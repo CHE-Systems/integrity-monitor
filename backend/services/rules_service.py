@@ -338,13 +338,16 @@ class RulesService:
 
     def _load_value_checks_from_firestore(self) -> Dict[str, Any]:
         """Load value check rules from rules/value_checks/{entity}/* collections."""
+        logger.info("🔍 Starting _load_value_checks_from_firestore")
         if not self.db:
+            logger.warning("❌ Firestore client not available in _load_value_checks_from_firestore")
             return {}
 
         value_checks = {}
 
         # Query each entity collection - dynamically discover entities
         entities = self._get_entities_from_mapping()
+        logger.info(f"📋 Entities to query for value_checks: {entities}")
 
         for entity in entities:
             # Try both singular and plural forms
@@ -353,23 +356,41 @@ class RulesService:
             for variant in entity_variants:
                 collection_path = f"rules/value_checks/{variant}"
                 try:
-                    logger.debug(f"Querying Firestore for value_checks: {collection_path}")
-                    docs = self.db.collection(collection_path).where("enabled", "==", True).stream()
-
+                    logger.info(f"Querying Firestore for value_checks: {collection_path}")
+                    # First check if collection exists by trying to get all docs (no filter)
+                    all_docs = list(self.db.collection(collection_path).stream())
+                    if not all_docs:
+                        logger.debug(f"Collection {collection_path} is empty or doesn't exist")
+                        continue
+                    
+                    logger.info(f"Found {len(all_docs)} total document(s) in {collection_path}")
+                    
+                    # Process documents and filter by enabled status
                     fields = []
                     rule_ids = []
-                    doc_count = 0
-                    for doc in docs:
-                        doc_count += 1
+                    enabled_count = 0
+                    disabled_count = 0
+                    
+                    for doc in all_docs:
                         rule_data = doc.to_dict()
-                        # Always use document ID as rule_id to ensure consistency
-                        # This ensures deletion works correctly
-                        rule_id = doc.id
-                        rule_data["rule_id"] = rule_id
-                        fields.append(rule_data)
-                        rule_ids.append(rule_id)
-
-                    logger.debug(f"Found {doc_count} documents in {collection_path}")
+                        # Check if enabled (default to True if not specified)
+                        is_enabled = rule_data.get("enabled", True)
+                        
+                        if is_enabled:
+                            enabled_count += 1
+                            # Always use document ID as rule_id to ensure consistency
+                            # This ensures deletion works correctly
+                            rule_id = doc.id
+                            rule_data["rule_id"] = rule_id
+                            fields.append(rule_data)
+                            rule_ids.append(rule_id)
+                        else:
+                            disabled_count += 1
+                    
+                    if disabled_count > 0:
+                        logger.warning(f"Found {disabled_count} disabled value check rule(s) in {collection_path}")
+                    
+                    logger.info(f"Found {enabled_count} enabled document(s) in {collection_path} (total: {len(all_docs)}, disabled: {disabled_count})")
                     
                     if fields:
                         # Use the canonical entity name (from mapping), not the variant
@@ -377,34 +398,45 @@ class RulesService:
                             value_checks[entity] = []
                         value_checks[entity].extend(fields)
                         logger.info(
-                            f"Loaded value check rules for {entity} from {variant}",
+                            f"✅ Loaded value check rules for {entity} from {variant}",
                             extra={
                                 "category": "value_checks",
                                 "entity": entity,
                                 "variant": variant,
                                 "rule_count": len(fields),
+                                "rule_ids": rule_ids,
                             }
                         )
                         break  # Found rules, no need to check other variants
+                    else:
+                        logger.warning(
+                            f"Collection {collection_path} exists with {len(all_docs)} document(s) but none are enabled",
+                            extra={
+                                "entity": entity,
+                                "variant": variant,
+                                "total_docs": len(all_docs),
+                                "enabled_docs": len(enabled_docs),
+                            }
+                        )
                 except Exception as exc:
-                    logger.debug(f"Failed to query {collection_path}: {exc}")
+                    logger.warning(f"❌ Failed to query {collection_path}: {exc}", exc_info=True)
                     continue
             
             # Log if no rules found for this entity
             if entity not in value_checks:
-                logger.debug(f"No value check rules found for {entity} in any variant")
+                logger.info(f"No value check rules found for {entity} in any variant")
 
         total_rules = sum(len(v) for v in value_checks.values())
-        if value_checks:
-            logger.info(
-                "Loaded value check rules from Firestore",
-                extra={
-                    "category": "value_checks",
-                    "total_entities": len(value_checks),
-                    "total_rules": total_rules,
-                    "entities": list(value_checks.keys()),
-                }
-            )
+        logger.info(
+            f"✅ Completed _load_value_checks_from_firestore: {total_rules} total rules across {len(value_checks)} entities",
+            extra={
+                "category": "value_checks",
+                "total_entities": len(value_checks),
+                "total_rules": total_rules,
+                "entities": list(value_checks.keys()),
+                "entity_details": {k: len(v) for k, v in value_checks.items()},
+            }
+        )
 
         return value_checks
 
@@ -484,6 +516,8 @@ class RulesService:
                 "relationships_counts": {k: len(v) for k, v in relationships.items()},
                 "required_fields_entities": list(required_fields.keys()),
                 "required_fields_counts": {k: len(v) for k, v in required_fields.items()},
+                "value_checks_entities": list(value_checks.keys()),
+                "value_checks_counts": {k: len(v) for k, v in value_checks.items()},
             }
         )
         
