@@ -34,16 +34,16 @@ def create_habitually_truant_rule():
         
         # Rule data
         rule_data = {
-            "field": "HABITUALLY_TRUANT_STATUS",
-            "field_id": "fldbmntK4Df5TgD50",  # From schema
+            "field": "Habitually Truant Status",  # Field name
+            "field_id": "fldbmntK4Df5TgD50",  # Field ID from Student Truth table
             "message": "Student is marked as habitually truant",
             "severity": "info",
-            "source_entity": "students",  # Check students table
+            "source_entity": "student_truth",  # Check Student Truth table
             "enabled": True,
         }
-        
+
         # Create the rule using the rules service
-        # Entity is "absent" (where rule is displayed), but source_entity is "students" (what to check)
+        # Entity is "absent" (where rule is displayed), but source_entity is "student_truth" (what to check)
         created_rule = rules_service.create_rule(
             category="value_checks",
             entity="absent",

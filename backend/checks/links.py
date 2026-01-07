@@ -62,8 +62,9 @@ def run(records: Dict[str, list], schema_config: SchemaConfig) -> List[IssuePayl
             }
         )
         
-        # Initialize issues_by_relationship for ALL relationships (set to 0)
-        issues_by_relationship = {rel_key: 0 for rel_key in rel_keys}
+        # Initialize issues_by_relationship using defaultdict to avoid KeyError
+        # Track issues by relationship key and issue type (e.g., "rel_key.min", "rel_key.orphan")
+        issues_by_relationship = defaultdict(int)
         for record in entity_records:
             record_id = record.get("id")
             fields = record.get("fields", {})
@@ -72,12 +73,33 @@ def run(records: Dict[str, list], schema_config: SchemaConfig) -> List[IssuePayl
                     continue
                 
                 # Resolve links and get actual record objects
-                link_records = _resolve_and_validate_links(
-                    fields, rel_key, rel_rule.target, record_index
-                )
+                # Note: If target entity not in record_index, we can still check min_links
+                # but skip orphan detection
+                target_index = record_index.get(rel_rule.target, {})
+                link_ids = _resolve_links(fields, rel_key)
                 
-                # Detect orphaned links
-                orphaned_ids = _detect_orphans(link_records)
+                # Only validate links exist if target entity was fetched
+                if target_index:
+                    link_records = _resolve_and_validate_links(
+                        fields, rel_key, rel_rule.target, record_index
+                    )
+                    # Detect orphaned links
+                    orphaned_ids = _detect_orphans(link_records)
+                    # Filter out orphans for further validation
+                    valid_links = [(lid, rec) for lid, rec in link_records if rec is not None]
+                else:
+                    # Target entity not fetched - skip orphan detection, just check link count
+                    orphaned_ids = []
+                    valid_links = [(lid, None) for lid in link_ids]
+                    logger.debug(
+                        f"Target entity '{rel_rule.target}' not in record_index, skipping orphan detection for {entity_name}.{rel_key}",
+                        extra={
+                            "entity": entity_name,
+                            "relationship": rel_key,
+                            "target_entity": rel_rule.target,
+                            "available_entities": list(record_index.keys()),
+                        }
+                    )
                 if orphaned_ids:
                     rule_id = f"link.{entity_name}.{rel_key}.orphan"
                     issue_key = f"{rule_id}:{record_id}"
@@ -100,23 +122,28 @@ def run(records: Dict[str, list], schema_config: SchemaConfig) -> List[IssuePayl
                         )
                         issues_by_relationship[f"{rel_key}.orphan"] += 1
                 
-                # Filter out orphans for further validation
-                valid_links = [(lid, rec) for lid, rec in link_records if rec is not None]
-                
-                # Validate active status if required
-                active_ids, inactive_ids = _validate_active_links(
-                    valid_links, rel_rule.require_active
-                )
-                
-                # Count active links (or all links if require_active is False)
-                if rel_rule.require_active:
+                # Validate active status if required (only if target entity was fetched)
+                if target_index and rel_rule.require_active:
+                    active_ids, inactive_ids = _validate_active_links(
+                        valid_links, rel_rule.require_active
+                    )
                     count = len(active_ids)
                     valid_count = len(valid_links)
                 else:
+                    # If target not fetched or require_active is False, count all links
                     count = len(valid_links)
                     valid_count = count
                     active_ids = [lid for lid, _ in valid_links]
                     inactive_ids = []
+                    if rel_rule.require_active and not target_index:
+                        logger.debug(
+                            f"Cannot validate active status for {entity_name}.{rel_key} - target entity '{rel_rule.target}' not fetched",
+                            extra={
+                                "entity": entity_name,
+                                "relationship": rel_key,
+                                "target_entity": rel_rule.target,
+                            }
+                        )
                 
                 # Check min_links requirement
                 if rel_rule.min_links and count < rel_rule.min_links:
@@ -368,16 +395,33 @@ def _validate_cross_entity(
 
 
 def _resolve_links(fields: Dict[str, Any], rel_key: str) -> List[str]:
-    """Extract link IDs from record fields (backward compatibility)."""
+    """Extract link IDs from record fields (backward compatibility).
+    
+    Handles relationship keys from Firestore (e.g., "classes_Student") by also trying
+    the extracted field name (e.g., "Student") if the key contains an underscore.
+    """
+    # Build candidate list - try relationship key as-is first
     candidates = [rel_key, f"{rel_key}_id", f"{rel_key}_ids", f"{rel_key}_links", f"{rel_key}s"]
+    
+    # If relationship key contains underscore (e.g., "classes_Student"), also try the field name part
+    # This handles Firestore document IDs that use format "entity_fieldname"
+    if "_" in rel_key:
+        # Extract field name part (everything after the last underscore)
+        field_name = rel_key.split("_")[-1]
+        # Add field name variants to candidates (but after the full key variants)
+        candidates.extend([field_name, f"{field_name}_id", f"{field_name}_ids", f"{field_name}_links", f"{field_name}s"])
+    
     seen = set()
     values: List[str] = []
     for candidate in candidates:
-        links = get_list_field(fields, candidate)
-        for value in links:
-            if value not in seen:
-                values.append(value)
-                seen.add(value)
+        try:
+            links = get_list_field(fields, candidate)
+            for value in links:
+                if value not in seen:
+                    values.append(value)
+                    seen.add(value)
+        except Exception:
+            continue
     return values
 
 

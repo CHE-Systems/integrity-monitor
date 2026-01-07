@@ -12,6 +12,7 @@ The field ID/name resolution system must be understood to avoid rule failures.
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -45,7 +46,14 @@ class RulesService:
             firestore_client: Optional FirestoreClient instance (not used, for backward compatibility)
         """
         try:
-            self.db = firestore.Client()
+            # Determine project ID - prefer env vars, fallback to data-integrity-monitor (matches .firebaserc)
+            project_id = (
+                os.getenv("GOOGLE_CLOUD_PROJECT")
+                or os.getenv("GCP_PROJECT_ID")
+                or "data-integrity-monitor"
+            )
+            self.db = firestore.Client(project=project_id)
+            logger.info(f"RulesService initialized with Firestore project: {project_id}")
         except Exception as exc:
             logger.error(f"Failed to initialize Firestore client: {exc}")
             self.db = None

@@ -219,9 +219,9 @@ class FirestoreWriter:
                 # These are type-level aggregates
                 by_type[key] = count
 
-        # Calculate total as the sum of Critical and Warning issues only
-        # Info issues are excluded from the main "Total Issues to Review" count
-        total = by_severity["critical"] + by_severity["warning"]
+        # Calculate total as the sum of all issues including info-level
+        # This ensures total count is never less than any individual severity count
+        total = by_severity["critical"] + by_severity["warning"] + by_severity["info"]
 
         return {
             "total": total,

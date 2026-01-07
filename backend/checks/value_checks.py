@@ -59,13 +59,25 @@ def run(records: Dict[str, list], schema_config: SchemaConfig) -> List[IssuePayl
     # Process each source entity
     for source_entity, check_list in checks_by_source.items():
         source_records = records.get(source_entity, [])
-        
+
         if not source_records:
-            logger.debug(
-                f"Value checks: No records found for source entity {source_entity}",
+            # Build rule IDs for logging
+            rule_ids = []
+            rule_entities = []
+            for rule_entity, check in check_list:
+                rule_id = check.rule_id or f"value_check.{rule_entity}.{check.field}"
+                rule_ids.append(rule_id)
+                rule_entities.append(rule_entity)
+
+            logger.warning(
+                f"Value checks: No {source_entity} records fetched - {len(check_list)} rule(s) could not be applied",
                 extra={
                     "category": "value_checks",
                     "source_entity": source_entity,
+                    "rule_count": len(check_list),
+                    "rule_ids": rule_ids,
+                    "rule_entities": list(set(rule_entities)),
+                    "hint": f"To apply these rules, include '{source_entity}' entity in your scan configuration"
                 }
             )
             continue

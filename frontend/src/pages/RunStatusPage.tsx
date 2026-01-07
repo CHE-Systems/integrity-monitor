@@ -787,11 +787,17 @@ export function RunStatusPage() {
           <div className="text-sm font-medium text-[var(--text-main)] mb-3">
             New Issues Found
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <div className="rounded-lg border border-[var(--border)] p-4 bg-[var(--bg-mid)]/30">
               <div className="text-xs text-[var(--text-muted)] mb-1">Total</div>
               <div className="text-2xl font-semibold text-[var(--text-main)]">
-                {runStatus.new_issues_count ?? 0}
+                {(() => {
+                  // Calculate total from severity counts to ensure it matches displayed values
+                  const critical = runStatus.new_issues_by_severity?.critical || 0;
+                  const warning = runStatus.new_issues_by_severity?.warning || 0;
+                  const info = runStatus.new_issues_by_severity?.info || 0;
+                  return critical + warning + info;
+                })()}
               </div>
             </div>
             <div className="rounded-lg border border-red-200 p-4 bg-red-50">
@@ -806,6 +812,12 @@ export function RunStatusPage() {
                 {runStatus.new_issues_by_severity?.warning || 0}
               </div>
             </div>
+            <div className="rounded-lg border border-blue-200 p-4 bg-blue-50">
+              <div className="text-xs text-blue-700 mb-1">Info</div>
+              <div className="text-2xl font-semibold text-blue-800">
+                {runStatus.new_issues_by_severity?.info || 0}
+              </div>
+            </div>
           </div>
         </div>
 
@@ -815,13 +827,19 @@ export function RunStatusPage() {
             <div className="text-sm font-medium text-[var(--text-main)] mb-3">
               Total Issues Found
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               <div className="rounded-lg border border-[var(--border)] p-4 bg-[var(--bg-mid)]/30">
                 <div className="text-xs text-[var(--text-muted)] mb-1">
                   Total
                 </div>
                 <div className="text-2xl font-semibold text-[var(--text-main)]">
-                  {runStatus.counts.total || 0}
+                  {(() => {
+                    // Calculate total from severity counts to ensure it matches displayed values
+                    const critical = runStatus.counts.by_severity?.critical || 0;
+                    const warning = runStatus.counts.by_severity?.warning || 0;
+                    const info = runStatus.counts.by_severity?.info || 0;
+                    return critical + warning + info;
+                  })()}
                 </div>
               </div>
               {runStatus.counts.by_severity && (
@@ -836,6 +854,12 @@ export function RunStatusPage() {
                     <div className="text-xs text-yellow-700 mb-1">Warning</div>
                     <div className="text-2xl font-semibold text-yellow-800">
                       {runStatus.counts.by_severity.warning || 0}
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-blue-200 p-4 bg-blue-50">
+                    <div className="text-xs text-blue-700 mb-1">Info</div>
+                    <div className="text-2xl font-semibold text-blue-800">
+                      {runStatus.counts.by_severity.info || 0}
                     </div>
                   </div>
                 </>

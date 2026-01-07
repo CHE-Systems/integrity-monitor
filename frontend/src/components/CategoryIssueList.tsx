@@ -1,13 +1,28 @@
-import { useFirestoreIssues, type IssueFilters } from "../hooks/useFirestoreIssues";
+import {
+  useFirestoreIssues,
+  type IssueFilters,
+} from "../hooks/useFirestoreIssues";
 import { formatLeadershipIssue } from "../utils/issueFormatter";
 
 interface CategoryIssueListProps {
   filter: IssueFilters;
+  totalCount?: number;
 }
 
-export function CategoryIssueList({ filter }: CategoryIssueListProps) {
-  // Fetch up to 200 issues to ensure a good sample for grouping
-  const { data: issues, loading, error } = useFirestoreIssues(filter, 200);
+export function CategoryIssueList({
+  filter,
+  totalCount,
+}: CategoryIssueListProps) {
+  // Fetch all issues for this category (use a high limit to ensure we get everything)
+  // Add buffer to account for the +1 used by the hook to check for more
+  const limit =
+    totalCount && totalCount > 0 ? Math.ceil(totalCount * 1.1) : 2000;
+  const {
+    data: issues,
+    loading,
+    error,
+    hasMore,
+  } = useFirestoreIssues(filter, limit);
 
   if (loading) {
     return (
@@ -28,7 +43,7 @@ export function CategoryIssueList({ filter }: CategoryIssueListProps) {
       acc[label] = {
         label: label,
         entity: issue.entity,
-        count: 0
+        count: 0,
       };
     }
     acc[label].count += 1;
@@ -36,9 +51,16 @@ export function CategoryIssueList({ filter }: CategoryIssueListProps) {
   }, {} as Record<string, { label: string; entity: string; count: number }>);
 
   const groups = Object.values(groupsMap).sort((a, b) => b.count - a.count);
+  const displayedCount = issues.length;
+  const totalGroupedCount = groups.reduce((sum, group) => sum + group.count, 0);
+  const isTruncated = hasMore || (totalCount && displayedCount < totalCount);
 
   if (groups.length === 0) {
-    return <div className="text-[10px] text-[var(--text-muted)] py-2 px-3 text-center">No issues found</div>;
+    return (
+      <div className="text-[10px] text-[var(--text-muted)] py-2 px-3 text-center">
+        No issues found
+      </div>
+    );
   }
 
   return (
@@ -59,6 +81,20 @@ export function CategoryIssueList({ filter }: CategoryIssueListProps) {
           </span>
         </div>
       ))}
+      {isTruncated && (
+        <div className="text-[10px] text-[var(--text-muted)] py-2 px-3 text-center italic border-t border-[var(--border)]/30 pt-2 mt-1">
+          Showing {displayedCount} of {totalCount || "many"} items.{" "}
+          {totalCount &&
+            totalGroupedCount < totalCount &&
+            "Some items may not be shown due to the display limit."}
+        </div>
+      )}
+      {!isTruncated && totalCount && totalGroupedCount < totalCount && (
+        <div className="text-[10px] text-[var(--text-muted)] py-2 px-3 text-center italic border-t border-[var(--border)]/30 pt-2 mt-1">
+          Note: Grouped items ({totalGroupedCount}) may not sum to total (
+          {totalCount}) as some issues share the same description.
+        </div>
+      )}
     </div>
   );
 }

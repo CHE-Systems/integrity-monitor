@@ -1,4 +1,8 @@
-import { useLeadershipMetrics, type HealthStatus, type LeadershipCategory } from "../hooks/useLeadershipMetrics";
+import {
+  useLeadershipMetrics,
+  type HealthStatus,
+  type LeadershipCategory,
+} from "../hooks/useLeadershipMetrics";
 import { LeadershipTrendChart } from "../components/LeadershipTrendChart";
 
 function HealthIndicator({ status }: { status: HealthStatus }) {
@@ -32,7 +36,9 @@ function HealthIndicator({ status }: { status: HealthStatus }) {
   const c = config[status];
 
   return (
-    <div className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full ${c.bg} ${c.border} border`}>
+    <div
+      className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full ${c.bg} ${c.border} border`}
+    >
       <span className={`w-2 h-2 rounded-full ${c.dot} animate-pulse`} />
       <span className={`text-sm font-medium ${c.text}`}>
         {status === "excellent" && "All Clear"}
@@ -69,10 +75,8 @@ function CategoryCard({ category }: { category: LeadershipCategory }) {
   const [isExpanded, setIsExpanded] = useState(false);
 
   return (
-    <div
-      className="group flex flex-col rounded-2xl transition-all duration-300 bg-[var(--bg-mid)]/60 hover:bg-[var(--bg-mid)] p-4 shadow-sm"
-    >
-      <div 
+    <div className="group flex flex-col rounded-2xl transition-all duration-300 bg-[var(--bg-mid)]/60 hover:bg-[var(--bg-mid)] p-4 shadow-sm">
+      <div
         className="flex items-center justify-between cursor-pointer select-none"
         onClick={() => setIsExpanded(!isExpanded)}
       >
@@ -96,22 +100,34 @@ function CategoryCard({ category }: { category: LeadershipCategory }) {
               Items
             </span>
           </div>
-          <div className={`flex h-8 w-8 items-center justify-center rounded-full transition-all duration-300 ${!isExpanded ? "-rotate-90" : ""}`}>
-            <svg 
-              className="w-5 h-5 text-[var(--text-muted)] group-hover:text-[var(--brand)] transition-colors duration-300" 
-              fill="none" 
-              viewBox="0 0 24 24" 
+          <div
+            className={`flex h-8 w-8 items-center justify-center rounded-full transition-all duration-300 ${
+              !isExpanded ? "-rotate-90" : ""
+            }`}
+          >
+            <svg
+              className="w-5 h-5 text-[var(--text-muted)] group-hover:text-[var(--brand)] transition-colors duration-300"
+              fill="none"
+              viewBox="0 0 24 24"
               stroke="currentColor"
             >
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M19 9l-7 7-7-7"
+              />
             </svg>
           </div>
         </div>
       </div>
-      
+
       {isExpanded && (
         <div className="mt-2 pt-2 border-t border-[var(--border)]/40 animate-in fade-in slide-in-from-top-1 duration-200">
-          <CategoryIssueList filter={category.filter} />
+          <CategoryIssueList
+            filter={category.filter}
+            totalCount={category.count}
+          />
         </div>
       )}
     </div>
@@ -173,14 +189,16 @@ export function LeadershipDashboardPage() {
             </div>
             <div className="text-center py-4 border-l border-[var(--border)]">
               <p
-                className={`text-4xl font-semibold ${metrics.criticalIssues > 0 ? "text-rose-600" : "text-[var(--text-main)]"}`}
+                className={`text-4xl font-semibold ${
+                  metrics.criticalIssues > 0
+                    ? "text-rose-600"
+                    : "text-[var(--text-main)]"
+                }`}
                 style={{ fontFamily: "Outfit" }}
               >
                 {metrics.criticalIssues}
               </p>
-              <p className="text-sm text-[var(--text-muted)] mt-1">
-                Urgent
-              </p>
+              <p className="text-sm text-[var(--text-muted)] mt-1">Urgent</p>
             </div>
           </div>
         </div>
@@ -214,8 +232,18 @@ export function LeadershipDashboardPage() {
         {metrics.categories.length === 0 && metrics.totalOpenIssues === 0 && (
           <div className="bg-white rounded-3xl border border-[var(--border)] p-12 text-center shadow-sm">
             <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-emerald-100 flex items-center justify-center">
-              <svg className="w-8 h-8 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+              <svg
+                className="w-8 h-8 text-emerald-600"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M5 13l4 4L19 7"
+                />
               </svg>
             </div>
             <h3 className="text-xl font-semibold text-[var(--text-main)] mb-2">
@@ -229,7 +257,8 @@ export function LeadershipDashboardPage() {
 
         {/* Footer Note */}
         <p className="text-center text-sm text-[var(--text-muted)] mt-8">
-          Automated checks run daily. For details, contact your system administrator.
+          Automated checks run daily. For details, contact your system
+          administrator.
         </p>
       </div>
     </div>

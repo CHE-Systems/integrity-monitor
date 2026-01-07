@@ -134,6 +134,26 @@ entities:
         rule_id: "required_field.contractors.contractor_vol"
         severity: warning
         message: "Contractor/Vol role type is required."
+  classes:
+    description: Class/section records with scheduling and enrollment data.
+    table_id: tblTn41VXPeu7l8PG
+    key_identifiers:
+      - fldDSDNAAgCEV8MBR
+      - fldItJmSkCOSsKS6G
+    identity_fields:
+      - fldDSDNAAgCEV8MBR
+      - fld8LOv6zqVvpwMQ4
+      - fldDw1XvXr5dLhO9O
+      - fldEmsQQ0y3nAACvT
+      - fldP3BucsNoe3baNJ
+    relationships:
+      Student:
+        target: students
+        min_links: 1
+        require_active: false
+        message: "Classes must have at least one enrolled student."
+    missing_key_data: []
+    value_checks: []
 
 duplicates:
   students:

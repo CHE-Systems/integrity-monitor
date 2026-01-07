@@ -1,7 +1,8 @@
 import { useMemo } from "react";
-import { useIssueCounts } from "./useIssueCounts";
+import { useIssueCounts, useIssueCountsByType } from "./useIssueCounts";
 import { useFirestoreRuns } from "./useFirestoreRuns";
 import { useFirestoreMetrics } from "./useFirestoreMetrics";
+import { useNewIssuesByDay } from "./useNewIssuesByDay";
 
 export type HealthStatus = "excellent" | "good" | "attention" | "critical";
 
@@ -158,18 +159,19 @@ function getTrendLabel(direction: TrendDirection, percentage: number | null): st
 
 export function useLeadershipMetrics(): LeadershipMetrics {
   const { counts, loading: countsLoading } = useIssueCounts();
+  const { counts: countsByType, loading: countsByTypeLoading } = useIssueCountsByType();
   const { data: runs, loading: runsLoading } = useFirestoreRuns(10);
   const { trends, loading: trendsLoading } = useFirestoreMetrics(7);
-  // Get 30 days of data for the monthly trend chart
-  const { trends: monthlyTrends, loading: monthlyTrendsLoading } = useFirestoreMetrics(30);
+  // Get 30 days of new issues data for the monthly trend chart
+  const { trends: monthlyTrends, loading: monthlyTrendsLoading } = useNewIssuesByDay(30);
 
   return useMemo(() => {
-    const loading = countsLoading || runsLoading;
+    const loading = countsLoading || countsByTypeLoading || runsLoading;
 
-    const totalOpenIssues = counts.open;
+    const totalOpenIssues = counts.openExcludingInfo;
     const criticalIssues = counts.critical;
 
-    // Health status
+    // Health status (using openExcludingInfo to exclude info issues)
     const healthStatus = getHealthStatus(criticalIssues, totalOpenIssues);
     const healthLabel = getHealthLabel(healthStatus);
     const healthDescription = getHealthDescription(healthStatus, totalOpenIssues, criticalIssues);
@@ -196,7 +198,7 @@ export function useLeadershipMetrics(): LeadershipMetrics {
     }
 
     // Build human-friendly categories
-    // Group by issue type from the trends data
+    // Use Firestore counts by type to ensure consistency with expanded list
     const categories: LeadershipCategory[] = [];
 
     if (counts.critical > 0) {
@@ -208,41 +210,38 @@ export function useLeadershipMetrics(): LeadershipMetrics {
       });
     }
 
-    // We'll derive these from the latest run or trends if available
-    const latestTrend = trends[0];
-    if (latestTrend) {
-      if (Number(latestTrend.duplicates || 0) > 0) {
-        categories.push({
-          label: "Possible Duplicates",
-          count: Number(latestTrend.duplicates || 0),
-          description: "People who may have multiple records",
-          filter: { type: "duplicate", status: "open" },
-        });
-      }
-      if (Number(latestTrend.links || 0) > 0) {
-        categories.push({
-          label: "Incomplete Records",
-          count: Number(latestTrend.links || 0),
-          description: "Records missing required connections",
-          filter: { type: "missing_link", status: "open" },
-        });
-      }
-      if (Number(latestTrend.attendance || 0) > 0) {
-        categories.push({
-          label: "Attendance Concerns",
-          count: Number(latestTrend.attendance || 0),
-          description: "Students with attendance patterns to review",
-          filter: { type: "attendance", status: "open" },
-        });
-      }
-      if (Number(latestTrend.missing_field || 0) > 0) {
-        categories.push({
-          label: "Missing Information",
-          count: Number(latestTrend.missing_field || 0),
-          description: "Records with required fields not filled in",
-          filter: { type: "missing_field", status: "open" },
-        });
-      }
+    // Use actual Firestore counts instead of trend data for accuracy
+    if (countsByType.duplicate > 0) {
+      categories.push({
+        label: "Possible Duplicates",
+        count: countsByType.duplicate,
+        description: "People who may have multiple records",
+        filter: { type: "duplicate", status: "open" },
+      });
+    }
+    if (countsByType.missing_link > 0) {
+      categories.push({
+        label: "Incomplete Records",
+        count: countsByType.missing_link,
+        description: "Records missing required connections",
+        filter: { type: "missing_link", status: "open" },
+      });
+    }
+    if (countsByType.attendance > 0) {
+      categories.push({
+        label: "Attendance Concerns",
+        count: countsByType.attendance,
+        description: "Students with attendance patterns to review",
+        filter: { type: "attendance", status: "open" },
+      });
+    }
+    if (countsByType.missing_field > 0) {
+      categories.push({
+        label: "Missing Information",
+        count: countsByType.missing_field,
+        description: "Records with required fields not filled in",
+        filter: { type: "missing_field", status: "open" },
+      });
     }
 
     // If no categories from trends, show a summary
@@ -290,5 +289,5 @@ export function useLeadershipMetrics(): LeadershipMetrics {
       lastCheckRelative,
       loading,
     };
-  }, [counts, runs, trends, monthlyTrends, countsLoading, runsLoading, trendsLoading, monthlyTrendsLoading]);
+  }, [counts, countsByType, runs, trends, monthlyTrends, countsLoading, countsByTypeLoading, runsLoading, trendsLoading, monthlyTrendsLoading]);
 }

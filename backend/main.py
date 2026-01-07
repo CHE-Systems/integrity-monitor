@@ -442,6 +442,11 @@ def run_integrity(
     print(f"[API DEBUG] Run config received: {run_config}")
     if run_config:
         print(f"[API DEBUG] notify_slack in run_config: {run_config.get('notify_slack')}")
+        print(f"[API DEBUG] checks in run_config: {run_config.get('checks')}")
+        print(f"[API DEBUG] rules in run_config: {run_config.get('rules')}")
+        if run_config.get('checks'):
+            checks = run_config.get('checks')
+            print(f"[API DEBUG] checks.value_checks: {checks.get('value_checks')}")
     else:
         print("[API DEBUG] WARNING: run_config is None - no request body received!")
     print("=" * 80)
@@ -1100,14 +1105,17 @@ def airtable_records(table_id: str):
         import time
         from pyairtable import Api
         from requests.exceptions import HTTPError, RequestException
+        from backend.utils.secrets import get_secret
         
         # Use Personal Access Token (PAT) for Airtable authentication
-        pat = os.getenv("AIRTABLE_PAT")
+        # Try environment variable first, then Secret Manager for local development
+        pat = get_secret("AIRTABLE_PAT")
         
         if not pat:
             raise HTTPException(
                 status_code=500,
-                detail="AIRTABLE_PAT environment variable must be set"
+                detail="AIRTABLE_PAT not found in environment variables or Secret Manager. "
+                       "Set AIRTABLE_PAT environment variable or ensure it exists in Google Cloud Secret Manager."
             )
         
         token = pat
@@ -1674,16 +1682,25 @@ def get_airtable_records_by_ids(request: Request, body: RecordsByIdsRequest):
         table_id = None
         for table in schema_data.get("tables", []):
             table_name_lower = table.get("name", "").lower().strip()
+            # Normalize both entity and table name by replacing underscores/spaces
+            table_name_normalized = table_name_lower.replace(" ", "_")
+            entity_as_spaces = normalized_entity.replace("_", " ")
+
             if (table_name_lower == normalized_entity or
                 table_name_lower == entity_lower or
-                normalized_entity in table_name_lower):
+                table_name_lower == entity_as_spaces or
+                table_name_normalized == normalized_entity or
+                normalized_entity in table_name_lower or
+                entity_as_spaces in table_name_lower):
                 table_id = table.get("id")
                 break
 
         if not table_id:
             # Try environment variable fallback
-            env_key = f"AIRTABLE_{normalized_entity.upper()}_TABLE"
-            table_id = os.getenv(env_key)
+            # Try both AIRTABLE_ and AT_ prefixes for compatibility
+            env_key_airtable = f"AIRTABLE_{normalized_entity.upper()}_TABLE"
+            env_key_at = f"AT_{normalized_entity.upper()}_TABLE"
+            table_id = os.getenv(env_key_airtable) or os.getenv(env_key_at)
 
         if not table_id:
             logger.warning(
@@ -1693,12 +1710,15 @@ def get_airtable_records_by_ids(request: Request, body: RecordsByIdsRequest):
             return {"records": {}, "count": 0, "error": f"Table not found for entity: {entity}"}
 
         # Get Airtable API client using Personal Access Token (PAT)
-        pat = os.getenv("AIRTABLE_PAT")
+        # Try environment variable first, then Secret Manager for local development
+        from backend.utils.secrets import get_secret
+        pat = get_secret("AIRTABLE_PAT")
 
         if not pat:
             raise HTTPException(
                 status_code=500,
-                detail="AIRTABLE_PAT environment variable must be set"
+                detail="AIRTABLE_PAT not found in environment variables or Secret Manager. "
+                       "Set AIRTABLE_PAT environment variable or ensure it exists in Google Cloud Secret Manager."
             )
 
         token = pat
@@ -2224,4 +2244,123 @@ def test_slack_webhook_endpoint(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error": "Failed to send test notification", "message": str(exc)},
+        )
+
+
+# ===== School Year Management =====
+
+@app.get("/admin/school-years/current", dependencies=[Depends(verify_firebase_token)])
+async def get_current_school_years(
+    request: Request,
+    user: dict = Depends(verify_firebase_token)
+):
+    """Get currently active school years with caching info.
+
+    Returns the active school years based on date and external API configuration.
+    During transition period (Feb 1 - Aug 5): both current and upcoming years.
+    Outside transition period: only current year.
+    """
+    request_id = str(uuid.uuid4())
+    logger.info(
+        "Fetching current school years",
+        extra={"user_id": user.get("uid"), "request_id": request_id}
+    )
+
+    try:
+        from backend.services.school_year_service import SchoolYearService
+
+        school_year_service = SchoolYearService(firestore_client)
+        active_years = school_year_service.get_active_school_years()
+
+        # Get cached data for display
+        doc = firestore_client.db.collection("system_config").document("active_school_years").get()
+        cache_data = doc.to_dict() if doc.exists else {}
+
+        return {
+            "active_years": active_years,
+            "current_year": cache_data.get("current_year"),
+            "upcoming_year": cache_data.get("upcoming_year"),
+            "cached_at": cache_data.get("cached_at"),
+            "in_transition_period": len(active_years) > 1,
+            "field_mappings": school_year_service._school_year_config.get("field_mappings", {})
+        }
+    except ValueError as e:
+        logger.error(
+            "Configuration error fetching school years",
+            extra={"error": str(e), "request_id": request_id},
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "Configuration error", "message": str(e)},
+        )
+    except Exception as exc:
+        logger.error(
+            "Failed to fetch school years",
+            extra={"error": str(exc), "request_id": request_id},
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Failed to fetch school years", "message": str(exc)},
+        )
+
+
+@app.post("/admin/school-years/refresh", dependencies=[Depends(verify_firebase_token)])
+async def refresh_school_years(
+    request: Request,
+    user: dict = Depends(verify_firebase_token)
+):
+    """Force refresh of active school years from external API.
+
+    Bypasses cache and fetches fresh data from the external school year API.
+    Updates the Firestore cache with the latest values.
+    """
+    request_id = str(uuid.uuid4())
+    logger.info(
+        "Refreshing school years from external API",
+        extra={"user_id": user.get("uid"), "request_id": request_id}
+    )
+
+    try:
+        from backend.services.school_year_service import SchoolYearService
+
+        school_year_service = SchoolYearService(firestore_client)
+        result = school_year_service.refresh_cache()
+
+        logger.info(
+            "School years refreshed successfully",
+            extra={
+                "user_id": user.get("uid"),
+                "request_id": request_id,
+                "active_years": result["active_years"],
+                "current_year": result["current_year"],
+                "upcoming_year": result["upcoming_year"]
+            }
+        )
+
+        return {
+            "success": True,
+            "message": "School years refreshed successfully",
+            **result
+        }
+    except ValueError as e:
+        logger.error(
+            "Configuration error refreshing school years",
+            extra={"error": str(e), "request_id": request_id},
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "Configuration error", "message": str(e)},
+        )
+    except Exception as exc:
+        logger.error(
+            "Failed to refresh school years",
+            extra={"error": str(exc), "request_id": request_id},
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Failed to refresh school years", "message": str(exc)},
         )

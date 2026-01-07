@@ -7,3 +7,5 @@ entity_table_mapping:
   parents: "Parents"
   contractors: "Contractors/Volunteers"
   absent: "Absent"
+  student_truth: "Student Truth"
+  classes: "Classes"

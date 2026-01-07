@@ -23,6 +23,12 @@ airtable:
   absent:
     base_env: "AT_ABSENT_BASE"
     table_env: "AT_ABSENT_TABLE"
+  student_truth:
+    base_env: "AT_STUDENT_TRUTH_BASE"
+    table_env: "AT_STUDENT_TRUTH_TABLE"
+  classes:
+    base_env: "AT_CLASSES_BASE"
+    table_env: "AT_CLASSES_TABLE"
 
 firestore:
   runs_collection: "integrity_runs"
@@ -34,3 +40,36 @@ attendance_rules:
   onboarding_grace_days: 7
   limited_schedule_threshold: 3
   thresholds: {}
+
+school_year:
+  # Cache configuration
+  cache_ttl_hours: 24
+
+  # Transition period: Feb 1 - Aug 5 (both current and upcoming years active)
+  # Outside transition: Aug 6 - Jan 31 (only current year active)
+  transition_start_month: 2
+  transition_start_day: 1
+  transition_end_month: 8
+  transition_end_day: 5
+
+  # Field name mapping per entity
+  # filter_type: 'exact' for direct equality, 'contains' for lookup/concatenated fields
+  field_mappings:
+    students:
+      field_name: "School Year Text"
+      filter_type: "exact"
+    parents:
+      field_name: "School Year (from Student) text"
+      filter_type: "contains"
+    contractors:
+      field_name: "School Year (from Micro-Campus Data) text"
+      filter_type: "contains"
+    absent:
+      field_name: "School Year (from Truth) (from Student) text"
+      filter_type: "contains"
+    student_truth:
+      field_name: "School Year"
+      filter_type: "exact"
+    classes:
+      field_name: "School Year text"
+      filter_type: "exact"

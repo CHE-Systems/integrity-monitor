@@ -262,8 +262,11 @@ class SlackNotifier:
         emoji = self._get_status_emoji(status)
         color = self._get_status_color(status)
 
-        # Build header
-        header_text = f"⛭ Data Integrity Scan Complete"
+        # Build header based on status
+        if status.lower() == "error":
+            header_text = f"⛭ Data Integrity Scan Error"
+        else:
+            header_text = f"⛭ Data Integrity Scan Complete"
 
         # Format run info line
         trigger_display = trigger.title()
@@ -336,13 +339,11 @@ class SlackNotifier:
         if started_str:
             run_info_line += f" • Started: {started_str}"
 
-        # Get total open issues
-        total_open_issues = self._get_total_open_issues()
-
-        # Parse issue counts to get types and severity
+        # Parse issue counts to get types and severity, and calculate total without double counting
         issue_type_counts: Dict[str, int] = {}
         critical_count = 0
         warning_count = 0
+        total_issues_from_scan = 0
 
         # Map internal keys to display names
         display_names = {
@@ -371,6 +372,7 @@ class SlackNotifier:
                 base_keys_with_severity.add(base_key)
         
         # Second pass: Count issues, prioritizing severity-specific keys over base keys
+        # Also calculate total issues from this scan (avoiding double counting)
         for key, count in issue_counts.items():
             if count > 0:
                 if ":" in key:
@@ -386,12 +388,16 @@ class SlackNotifier:
                     base_key = issue_type.lower()
                     display_name = display_names.get(base_key, base_key.replace("_", " ").title())
                     issue_type_counts[display_name] = issue_type_counts.get(display_name, 0) + count
+                    # Count this in total (severity-specific keys are the source of truth)
+                    total_issues_from_scan += count
                 else:
                     # Base key like "duplicate" - only count if we haven't seen severity-specific versions
                     base_key = key.lower()
                     if base_key not in base_keys_with_severity:
                         display_name = display_names.get(base_key, base_key.replace("_", " ").title())
                         issue_type_counts[display_name] = issue_type_counts.get(display_name, 0) + count
+                        # Count this in total (base key only counted if no severity-specific version exists)
+                        total_issues_from_scan += count
 
         # Build scope section
         scope_lines = []
@@ -445,8 +451,8 @@ class SlackNotifier:
         new_issues_display = new_issues_count if new_issues_count is not None else 0
         results_lines.append(f"• New issues: {new_issues_display}")
         
-        # Total open issues
-        results_lines.append(f"• Total open issues: {total_open_issues}")
+        # Total issues from this scan
+        results_lines.append(f"• Total issues found: {total_issues_from_scan}")
         
         # Issue types
         if issue_type_counts:

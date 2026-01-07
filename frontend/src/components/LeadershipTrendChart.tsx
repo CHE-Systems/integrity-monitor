@@ -26,16 +26,34 @@ function CustomTooltip({ active, payload, label }: any) {
     return (
       <div className="bg-white border border-[var(--border)] rounded-xl px-4 py-3 shadow-lg">
         <p className="text-sm font-medium text-[var(--text-main)]">{label}</p>
-        <p className="text-2xl font-semibold text-[var(--text-main)] mt-1" style={{ fontFamily: "Outfit" }}>
+        <p
+          className="text-2xl font-semibold text-[var(--text-main)] mt-1"
+          style={{ fontFamily: "Outfit" }}
+        >
           {value}
         </p>
         <p className="text-xs text-[var(--text-muted)]">
-          {value === 1 ? "item" : "items"} to review
+          {value === 1 ? "new issue" : "new issues"} discovered
         </p>
       </div>
     );
   }
   return null;
+}
+
+function calculateNiceMax(value: number): number {
+  if (value <= 0) return 10;
+
+  const magnitude = Math.pow(10, Math.floor(Math.log10(value)));
+  const normalized = value / magnitude;
+
+  let niceValue;
+  if (normalized <= 1) niceValue = 1;
+  else if (normalized <= 2) niceValue = 2;
+  else if (normalized <= 5) niceValue = 5;
+  else niceValue = 10;
+
+  return niceValue * magnitude;
 }
 
 export function LeadershipTrendChart({
@@ -52,10 +70,13 @@ export function LeadershipTrendChart({
 
     if (recent.length === 0 || earlier.length === 0) return null;
 
-    const recentAvg = recent.reduce((sum, d) => sum + d.total, 0) / recent.length;
-    const earlierAvg = earlier.reduce((sum, d) => sum + d.total, 0) / earlier.length;
+    const recentAvg =
+      recent.reduce((sum, d) => sum + d.total, 0) / recent.length;
+    const earlierAvg =
+      earlier.reduce((sum, d) => sum + d.total, 0) / earlier.length;
 
-    if (earlierAvg === 0 && recentAvg === 0) return { direction: "stable", change: 0 };
+    if (earlierAvg === 0 && recentAvg === 0)
+      return { direction: "stable", change: 0 };
     if (earlierAvg === 0) return { direction: "up", change: 100 };
 
     const percentChange = ((recentAvg - earlierAvg) / earlierAvg) * 100;
@@ -73,7 +94,9 @@ export function LeadershipTrendChart({
   if (loading) {
     return (
       <div className="h-64 flex items-center justify-center">
-        <div className="text-sm text-[var(--text-muted)]">Loading trend data...</div>
+        <div className="text-sm text-[var(--text-muted)]">
+          Loading trend data...
+        </div>
       </div>
     );
   }
@@ -96,17 +119,33 @@ export function LeadershipTrendChart({
     );
   }
 
-  // Find max for Y-axis domain
+  // Find max for Y-axis domain with nice rounding
   const maxValue = Math.max(...data.map((d) => d.total), 1);
-  const yDomain = [0, Math.ceil(maxValue * 1.1)];
+  const niceMax = calculateNiceMax(maxValue * 1.1);
+  const yDomain = [0, niceMax];
+
+  // Calculate evenly spaced ticks that match the domain
+  // Ensure ticks are unique, sorted, and properly spaced
+  const tickCount = 5;
+  const step = niceMax / (tickCount - 1);
+  const yTicksSet = new Set<number>();
+  yTicksSet.add(0); // Always include 0
+
+  // Add evenly spaced ticks
+  for (let i = 1; i < tickCount - 1; i++) {
+    const tick = Math.round(i * step);
+    if (tick > 0 && tick < niceMax) {
+      yTicksSet.add(tick);
+    }
+  }
+  yTicksSet.add(niceMax); // Always include max
+
+  // Convert to sorted array
+  const yTicks = Array.from(yTicksSet).sort((a, b) => a - b);
 
   // Determine gradient colors based on trend
   const gradientId = "leadershipTrendGradient";
-  const lineColor = trendInfo?.direction === "down"
-    ? "#10B981" // emerald-500 (improving)
-    : trendInfo?.direction === "up"
-    ? "#F59E0B" // amber-500 (worsening)
-    : "#3B82F6"; // blue-500 (stable)
+  const lineColor = "#3E716A"; // Brand dark green
 
   return (
     <div className="space-y-4">
@@ -115,26 +154,63 @@ export function LeadershipTrendChart({
         <div className="flex items-center gap-2">
           {trendInfo.direction === "down" ? (
             <div className="flex items-center gap-1.5 text-emerald-600">
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M13 17h8m0 0v-8m0 8l-8-8-4 4-6-6" />
+              <svg
+                className="w-4 h-4"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M13 17h8m0 0v-8m0 8l-8-8-4 4-6-6"
+                />
               </svg>
               <span className="text-sm font-medium">
-                {trendInfo.change > 0 ? `${trendInfo.change}% fewer issues` : "Improving"}
+                {trendInfo.change > 0
+                  ? `${trendInfo.change}% fewer issues`
+                  : "Improving"}
               </span>
             </div>
           ) : trendInfo.direction === "up" ? (
-            <div className="flex items-center gap-1.5 text-amber-600">
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
+            <div
+              className="flex items-center gap-1.5"
+              style={{ color: "#3E716A" }}
+            >
+              <svg
+                className="w-4 h-4"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"
+                />
               </svg>
               <span className="text-sm font-medium">
-                {trendInfo.change > 0 ? `${trendInfo.change}% more issues` : "Needs attention"}
+                {trendInfo.change > 0
+                  ? `${trendInfo.change}% more issues`
+                  : "Needs attention"}
               </span>
             </div>
           ) : (
             <div className="flex items-center gap-1.5 text-slate-500">
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M5 12h14" />
+              <svg
+                className="w-4 h-4"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M5 12h14"
+                />
               </svg>
               <span className="text-sm font-medium">Holding steady</span>
             </div>
@@ -176,8 +252,14 @@ export function LeadershipTrendChart({
               domain={yDomain}
               tickLine={false}
               axisLine={false}
-              tickFormatter={(value) => Math.round(value).toString()}
-              width={30}
+              ticks={yTicks}
+              tickFormatter={(value) => {
+                const num = Math.round(value);
+                return num.toString();
+              }}
+              allowDecimals={false}
+              width={50}
+              tickMargin={8}
             />
             <Tooltip content={<CustomTooltip />} />
             <Area
@@ -192,11 +274,6 @@ export function LeadershipTrendChart({
           </AreaChart>
         </ResponsiveContainer>
       </div>
-
-      {/* Legend */}
-      <p className="text-xs text-center text-[var(--text-muted)]">
-        Total items to review over the past 30 days
-      </p>
     </div>
   );
 }

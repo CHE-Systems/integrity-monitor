@@ -17,8 +17,7 @@
         "statusBarItem.remoteForeground": "#e7e7e7",
         "titleBar.activeForeground": "#e7e7e7",
         "titleBar.inactiveForeground": "#e7e7e799",
-        "editorGroup.border": "#bf368d",
-        "panel.border": "#bf368d"
+        "tab.activeBorder": "#bf368d"
     },
     "peacock.color": "#972b70"
 }

@@ -21,23 +21,25 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
 
 # Configuration
-# Priority: 1) GCP_PROJECT_ID env var, 2) .firebaserc, 3) gcloud config
-if [ -n "$GCP_PROJECT_ID" ]; then
-    PROJECT_ID="$GCP_PROJECT_ID"
-elif [ -f "$PROJECT_ROOT/.firebaserc" ]; then
-    PROJECT_ID=$(grep -o '"default":\s*"[^"]*"' "$PROJECT_ROOT/.firebaserc" | cut -d'"' -f4)
+# HARDCODED: This script is specifically for the Data Integrity Monitor project
+# This prevents accidental deployment to wrong projects (e.g., che-toolkit)
+PROJECT_ID="data-integrity-monitor"
+
+# Allow override via environment variable for testing, but warn if different
+if [ -n "$GCP_PROJECT_ID" ] && [ "$GCP_PROJECT_ID" != "$PROJECT_ID" ]; then
+    print_warning "GCP_PROJECT_ID environment variable is set to: ${GCP_PROJECT_ID}"
+    print_warning "This script is hardcoded for: ${PROJECT_ID}"
+    print_warning "Using hardcoded value to prevent project switching issues."
+    echo ""
 fi
 
-# Fallback to gcloud config if still not set
-if [ -z "$PROJECT_ID" ]; then
-    PROJECT_ID=$(gcloud config get-value project 2>/dev/null || echo "")
-fi
-
-if [ -z "$PROJECT_ID" ]; then
-    echo -e "${RED}Error: PROJECT_ID not found${NC}"
-    echo "Set GCP_PROJECT_ID environment variable or configure gcloud:"
-    echo "  export GCP_PROJECT_ID=your-project-id"
-    echo "  gcloud config set project your-project-id"
+# Safety check: Warn if project looks wrong (should never happen with hardcoded value)
+if echo "$PROJECT_ID" | grep -qi "toolkit"; then
+    print_error "ERROR: Project ID contains 'toolkit' - this is the wrong project!"
+    echo "  Detected PROJECT_ID: ${PROJECT_ID}"
+    echo "  Expected: data-integrity-monitor"
+    echo ""
+    print_error "This should never happen with the hardcoded value. Exiting for safety."
     exit 1
 fi
 
@@ -172,6 +174,49 @@ if [ "$DEPLOY_RULES" = true ]; then
 fi
 
 #########################################
+# Sync Rules from YAML to Firestore
+#########################################
+# Run migration sync when deploying rules or backend (since schema.yaml is in backend)
+if [ "$DEPLOY_RULES" = true ] || [ "$DEPLOY_BACKEND" = true ]; then
+    print_status "Syncing rules from YAML to Firestore..."
+
+    # Check if we're in the backend directory context
+    cd "$PROJECT_ROOT"
+    
+    # Check if Python and required modules are available
+    if ! command -v python3 &> /dev/null && ! command -v python &> /dev/null; then
+        print_warning "Python not found. Skipping rules migration sync."
+        print_warning "Run manually: python -m backend.scripts.migrate_rules --action=sync"
+    else
+        # Try python3 first, fall back to python
+        PYTHON_CMD="python3"
+        if ! command -v python3 &> /dev/null; then
+            PYTHON_CMD="python"
+        fi
+        
+        # Check if we can import the required modules
+        if $PYTHON_CMD -c "from backend.config.schema_loader import load_schema_from_yaml" 2>/dev/null; then
+            if $PYTHON_CMD -m backend.scripts.migrate_rules --action=sync 2>&1; then
+                print_success "Rules synced from YAML to Firestore successfully"
+            else
+                SYNC_EXIT=$?
+                print_warning "Rules migration sync failed (exit code: $SYNC_EXIT)"
+                print_warning "This may be due to missing Firestore credentials."
+                print_warning "Rules in schema.yaml will still work for scans, but may not appear in UI."
+                print_warning "To sync manually, run: python -m backend.scripts.migrate_rules --action=sync"
+                # Don't exit on sync failure - it's not critical for deployment
+            fi
+        else
+            print_warning "Cannot import backend modules. Skipping rules migration sync."
+            print_warning "Make sure you're in the project root and dependencies are installed."
+            print_warning "Run manually: python -m backend.scripts.migrate_rules --action=sync"
+        fi
+    fi
+
+    echo ""
+fi
+
+#########################################
 # Deploy Backend
 #########################################
 if [ "$DEPLOY_BACKEND" = true ]; then
@@ -193,37 +238,63 @@ if [ "$DEPLOY_BACKEND" = true ]; then
     print_status "Building and deploying backend container..."
 
     # Check for required secrets
-    # Note: slack-webhook-url is NOT in this list - it's managed separately via API
-    # and should never be created/updated by deployment scripts
-    print_status "Checking for required secrets in Secret Manager..."
+    # NOTE: This script ONLY VERIFIES secrets exist - it NEVER creates or updates them.
+    # Secrets must be managed separately via create-secrets.sh or manually in Secret Manager.
+    # This prevents accidental overwrites during deployment.
+    # Note: SLACK_WEBHOOK_URL is optional - Slack notifications work without it
+    print_status "Checking for required secrets in Secret Manager (verification only, no updates)..."
     REQUIRED_SECRETS=(
         "AIRTABLE_PAT"
         "API_AUTH_TOKEN"
         "OPENAI_API_KEY"
+    )
+    OPTIONAL_SECRETS=(
         "SLACK_WEBHOOK_URL"
     )
     
-    # Test gcloud connectivity first with a quick command
-    print_status "Verifying gcloud access..."
+    # Test gcloud connectivity and authentication first
+    # Note: We use --project flag explicitly to avoid gcloud config project issues
+    print_status "Verifying gcloud access for project: ${PROJECT_ID}..."
     set +e  # Temporarily disable exit on error to capture output
-    TEST_OUTPUT=$(gcloud config get-value project 2>&1)
+    
+    # Test gcloud with explicit project flag (don't rely on gcloud config)
+    TEST_OUTPUT=$(gcloud projects describe "$PROJECT_ID" 2>&1)
     TEST_EXIT=$?
+    
+    # Check if there's an active account
+    ACCOUNT_OUTPUT=$(gcloud config get-value account 2>&1)
+    ACCOUNT_EXIT=$?
+    if [ $ACCOUNT_EXIT -ne 0 ] || [ -z "$ACCOUNT_OUTPUT" ] || [ "$ACCOUNT_OUTPUT" = "(unset)" ]; then
+        print_error "gcloud has no active account selected"
+        echo ""
+        print_warning "To fix this, run:"
+        echo "  gcloud auth login"
+        echo "  # Or for application default credentials:"
+        echo "  gcloud auth application-default login"
+        echo ""
+        exit 1
+    fi
+    
     set -e  # Re-enable exit on error
     
     if [ $TEST_EXIT -ne 0 ]; then
-        print_error "gcloud is not working properly. Error details:"
+        print_error "Cannot access project ${PROJECT_ID}. Error details:"
         echo "$TEST_OUTPUT" | head -20
         echo ""
-        print_warning "Please fix gcloud installation before continuing."
-        print_warning "Common fixes:"
-        echo "  - Reinstall gcloud: https://cloud.google.com/sdk/docs/install"
-        echo "  - Check Python: gcloud may need Python 3.9-3.14"
-        echo "  - Try: gcloud components reinstall"
+        print_warning "Please verify:"
+        echo "  1. You have access to project: ${PROJECT_ID}"
+        echo "  2. gcloud is authenticated: gcloud auth login"
+        echo "  3. Project exists and you have permissions"
+        echo ""
+        print_warning "Note: This script uses project ${PROJECT_ID} explicitly via --project flag"
+        print_warning "      and does NOT rely on gcloud config to prevent project switching."
         exit 1
     fi
     
     MISSING_SECRETS=()
     GCLOUD_ERRORS=()
+    
+    # Check required secrets
     for secret in "${REQUIRED_SECRETS[@]}"; do
         echo -n "  Checking ${secret}... "
         set +e  # Temporarily disable exit on error
@@ -232,19 +303,51 @@ if [ "$DEPLOY_BACKEND" = true ]; then
         set -e  # Re-enable exit on error
         
         if [ $EXIT_CODE -ne 0 ]; then
-            # Check if it's a "not found" error or a gcloud failure
+            # Check if it's a "not found" error first (most common)
             if echo "$ERROR_OUTPUT" | grep -qi "NOT_FOUND\|does not exist\|not found\|was not found"; then
                 echo "NOT FOUND"
-                # Show the actual error for debugging
-                echo "    Error: $(echo "$ERROR_OUTPUT" | head -1)"
+                MISSING_SECRETS+=("$secret")
+            # Check if it's an authentication error (must NOT be NOT_FOUND)
+            elif echo "$ERROR_OUTPUT" | grep -qi "not currently have an active\|Please run.*gcloud auth"; then
+                echo "AUTH ERROR"
+                ERROR_FIRST_LINE=$(echo "$ERROR_OUTPUT" | head -1)
+                echo "    Error: $ERROR_FIRST_LINE"
+                GCLOUD_ERRORS+=("$secret: Authentication required")
                 MISSING_SECRETS+=("$secret")
             else
                 echo "ERROR"
-                # Show first line of error for diagnosis
                 ERROR_FIRST_LINE=$(echo "$ERROR_OUTPUT" | head -1)
                 echo "    Error: $ERROR_FIRST_LINE"
                 GCLOUD_ERRORS+=("$secret: $ERROR_FIRST_LINE")
                 MISSING_SECRETS+=("$secret")
+            fi
+        else
+            echo "OK"
+        fi
+    done
+    
+    # Check optional secrets (don't fail if missing)
+    for secret in "${OPTIONAL_SECRETS[@]}"; do
+        echo -n "  Checking ${secret} (optional)... "
+        set +e  # Temporarily disable exit on error
+        ERROR_OUTPUT=$(gcloud secrets describe "$secret" --project="$PROJECT_ID" 2>&1)
+        EXIT_CODE=$?
+        set -e  # Re-enable exit on error
+        
+        if [ $EXIT_CODE -ne 0 ]; then
+            # Only report auth errors for optional secrets, not missing ones
+            if echo "$ERROR_OUTPUT" | grep -qi "not currently have an active\|Please run.*gcloud auth"; then
+                echo "AUTH ERROR"
+                ERROR_FIRST_LINE=$(echo "$ERROR_OUTPUT" | head -1)
+                echo "    Error: $ERROR_FIRST_LINE"
+                GCLOUD_ERRORS+=("$secret: Authentication required")
+            elif echo "$ERROR_OUTPUT" | grep -qi "NOT_FOUND\|does not exist\|not found\|was not found"; then
+                echo "NOT FOUND (optional)"
+            else
+                echo "ERROR"
+                ERROR_FIRST_LINE=$(echo "$ERROR_OUTPUT" | head -1)
+                echo "    Error: $ERROR_FIRST_LINE"
+                GCLOUD_ERRORS+=("$secret: $ERROR_FIRST_LINE")
             fi
         else
             echo "OK"
@@ -259,12 +362,28 @@ if [ "$DEPLOY_BACKEND" = true ]; then
             echo "  $error"
         done
         echo ""
-        print_warning "The secrets may exist, but gcloud cannot access them."
-        print_warning "This usually indicates a gcloud configuration or permission issue."
-        print_warning ""
-        print_warning "To diagnose, run manually:"
-        echo "  gcloud secrets describe OPENAI_API_KEY --project=${PROJECT_ID}"
-        echo ""
+        
+        # Check if it's an authentication issue
+        if echo "${GCLOUD_ERRORS[@]}" | grep -qi "Authentication required\|active account"; then
+            print_warning "gcloud authentication is required."
+            print_warning ""
+            print_warning "To fix, run one of these commands:"
+            echo "  gcloud auth login"
+            echo "  # Or for application default credentials:"
+            echo "  gcloud auth application-default login"
+            echo ""
+            print_warning "If you're using gcloud configurations, activate one:"
+            echo "  gcloud config configurations list"
+            echo "  gcloud config configurations activate data-integrity-monitor"
+            echo ""
+        else
+            print_warning "The secrets may exist, but gcloud cannot access them."
+            print_warning "This usually indicates a gcloud configuration or permission issue."
+            print_warning ""
+            print_warning "To diagnose, run manually:"
+            echo "  gcloud secrets describe OPENAI_API_KEY --project=${PROJECT_ID}"
+            echo ""
+        fi
         exit 1
     fi
     
@@ -279,10 +398,11 @@ if [ "$DEPLOY_BACKEND" = true ]; then
         echo "  2. Secret is in project: ${PROJECT_ID}"
         echo "  3. List all secrets: gcloud secrets list --project=${PROJECT_ID}"
         echo ""
-        print_warning "Create the missing secrets using:"
+        print_warning "NOTE: This script does NOT create or update secrets."
+        print_warning "      Create the missing secrets using:"
         echo "  ./deploy/create-secrets.sh"
         echo ""
-        print_warning "Or create them manually:"
+        print_warning "Or create them manually in Secret Manager:"
         echo "  gcloud secrets create SECRET_NAME --data-file=- --project=${PROJECT_ID}"
         echo ""
         exit 1
@@ -331,6 +451,21 @@ if [ "$DEPLOY_BACKEND" = true ]; then
         fi
     fi
 
+    # Check if optional SLACK_WEBHOOK_URL exists
+    SLACK_WEBHOOK_EXISTS=false
+    if gcloud secrets describe "SLACK_WEBHOOK_URL" --project="$PROJECT_ID" &>/dev/null; then
+        SLACK_WEBHOOK_EXISTS=true
+    fi
+
+    # Create temporary env-vars file to handle commas in ALLOWED_ORIGINS value
+    # Note: gcloud requires YAML or JSON format, not plain KEY=VALUE
+    ALLOWED_ORIGINS_VALUE="${ALLOWED_ORIGINS:-https://data-integrity.che.systems,https://data-integrity-monitor.web.app,https://data-integrity-monitor.firebaseapp.com}"
+    ENV_VARS_FILE=$(mktemp)
+    cat > "$ENV_VARS_FILE" <<EOF
+ALLOWED_ORIGINS: "${ALLOWED_ORIGINS_VALUE}"
+AIRTABLE_MIN_REQUEST_INTERVAL: "0.05"
+EOF
+
     # Build base deploy command
     DEPLOY_CMD=(
         "gcloud" "run" "deploy" "$SERVICE_NAME"
@@ -344,13 +479,17 @@ if [ "$DEPLOY_BACKEND" = true ]; then
         "--min-instances" "0"
         "--max-instances" "10"
         "--concurrency" "80"
-        "--set-env-vars" "ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-*},AIRTABLE_MIN_REQUEST_INTERVAL=0.05"
+        "--env-vars-file" "$ENV_VARS_FILE"
         "--set-secrets" "AIRTABLE_PAT=AIRTABLE_PAT:latest"
         "--set-secrets" "API_AUTH_TOKEN=API_AUTH_TOKEN:latest"
         "--set-secrets" "OPENAI_API_KEY=OPENAI_API_KEY:latest"
-        "--set-secrets" "SLACK_WEBHOOK_URL=SLACK_WEBHOOK_URL:latest"
         "--project" "$PROJECT_ID"
     )
+    
+    # Add SLACK_WEBHOOK_URL only if it exists
+    if [ "$SLACK_WEBHOOK_EXISTS" = true ]; then
+        DEPLOY_CMD+=("--set-secrets" "SLACK_WEBHOOK_URL=SLACK_WEBHOOK_URL:latest")
+    fi
 
     # Add service account only if it's the custom one
     if [ "$SERVICE_ACCOUNT" != "${PROJECT_ID}-compute@developer.gserviceaccount.com" ]; then
@@ -366,7 +505,7 @@ if [ "$DEPLOY_BACKEND" = true ]; then
     # If deployment failed with custom service account, retry without it
     if [ $DEPLOY_STATUS -ne 0 ] && [ "$SERVICE_ACCOUNT" != "${PROJECT_ID}-compute@developer.gserviceaccount.com" ]; then
         print_warning "Deployment with custom service account failed, retrying without explicit service account..."
-        # Remove service account from args
+        # Remove service account from args, reuse env-vars-file
         DEPLOY_CMD=(
             "gcloud" "run" "deploy" "$SERVICE_NAME"
             "--source" "backend"
@@ -379,16 +518,23 @@ if [ "$DEPLOY_BACKEND" = true ]; then
             "--min-instances" "0"
             "--max-instances" "10"
             "--concurrency" "80"
-            "--set-env-vars" "ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-*},AIRTABLE_MIN_REQUEST_INTERVAL=0.05"
+            "--env-vars-file" "$ENV_VARS_FILE"
             "--set-secrets" "AIRTABLE_PAT=AIRTABLE_PAT:latest"
             "--set-secrets" "API_AUTH_TOKEN=API_AUTH_TOKEN:latest"
             "--set-secrets" "OPENAI_API_KEY=OPENAI_API_KEY:latest"
-            "--set-secrets" "SLACK_WEBHOOK_URL=SLACK_WEBHOOK_URL:latest"
             "--project" "$PROJECT_ID"
         )
+        
+        # Add SLACK_WEBHOOK_URL only if it exists
+        if [ "$SLACK_WEBHOOK_EXISTS" = true ]; then
+            DEPLOY_CMD+=("--set-secrets" "SLACK_WEBHOOK_URL=SLACK_WEBHOOK_URL:latest")
+        fi
         "${DEPLOY_CMD[@]}"
         DEPLOY_STATUS=$?
     fi
+    
+    # Clean up temporary env-vars file
+    rm -f "$ENV_VARS_FILE"
 
     if [ $DEPLOY_STATUS -eq 0 ]; then
         print_success "Backend deployed successfully"

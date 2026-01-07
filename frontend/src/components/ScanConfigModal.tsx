@@ -218,7 +218,11 @@ export function ScanConfigModal({
 
   // Helper to find matching entity name in rules (handles singular/plural mismatches)
   const findEntityInRules = (
-    category: "duplicates" | "relationships" | "required_fields" | "value_checks",
+    category:
+      | "duplicates"
+      | "relationships"
+      | "required_fields"
+      | "value_checks",
     entityName: string
   ): string | null => {
     if (!rules || !rules[category]) return null;
@@ -248,7 +252,11 @@ export function ScanConfigModal({
 
   // Get all rule IDs for an entity in a category
   const getAllRuleIds = (
-    category: "duplicates" | "relationships" | "required_fields" | "value_checks",
+    category:
+      | "duplicates"
+      | "relationships"
+      | "required_fields"
+      | "value_checks",
     entityName: string
   ): string[] => {
     if (!rules) return [];
@@ -295,7 +303,8 @@ export function ScanConfigModal({
       );
     } else if (category === "value_checks") {
       return (categoryRules as any[]).map(
-        (r: any) => r.rule_id || r.field || `value_check.${entityName}.${r.field}`
+        (r: any) =>
+          r.rule_id || r.field || `value_check.${entityName}.${r.field}`
       );
     }
     return [];
@@ -303,7 +312,12 @@ export function ScanConfigModal({
 
   // Check if all rules are selected for a check type across all entities
   const areAllRulesSelectedForCheckType = (
-    checkType: "duplicates" | "links" | "required_fields" | "value_checks" | "attendance"
+    checkType:
+      | "duplicates"
+      | "links"
+      | "required_fields"
+      | "value_checks"
+      | "attendance"
   ): boolean => {
     if (checkType === "attendance") {
       return selectedRules.attendance_rules === true;
@@ -337,7 +351,12 @@ export function ScanConfigModal({
 
   // Check if any rules are selected for a check type (for indeterminate state)
   const areAnyRulesSelectedForCheckType = (
-    checkType: "duplicates" | "links" | "required_fields" | "value_checks" | "attendance"
+    checkType:
+      | "duplicates"
+      | "links"
+      | "required_fields"
+      | "value_checks"
+      | "attendance"
   ): boolean => {
     if (checkType === "attendance") {
       return selectedRules.attendance_rules === true;
@@ -365,7 +384,11 @@ export function ScanConfigModal({
   // Check if all rules are selected for a specific table and rule type
   const areAllRulesSelectedForTable = (
     entity: string,
-    category: "duplicates" | "relationships" | "required_fields" | "value_checks"
+    category:
+      | "duplicates"
+      | "relationships"
+      | "required_fields"
+      | "value_checks"
   ): boolean => {
     if (!rules) return false;
     const allIds = getAllRuleIds(category, entity);
@@ -380,7 +403,11 @@ export function ScanConfigModal({
   // Check if any rules are selected for a specific table and rule type
   const areAnyRulesSelectedForTable = (
     entity: string,
-    category: "duplicates" | "relationships" | "required_fields" | "value_checks"
+    category:
+      | "duplicates"
+      | "relationships"
+      | "required_fields"
+      | "value_checks"
   ): boolean => {
     if (!rules) return false;
     const selectedIds = selectedRules[category]?.[entity] || [];
@@ -390,7 +417,11 @@ export function ScanConfigModal({
   // Toggle all rules for a specific table and rule type
   const toggleTableRuleType = (
     entity: string,
-    category: "duplicates" | "relationships" | "required_fields" | "value_checks"
+    category:
+      | "duplicates"
+      | "relationships"
+      | "required_fields"
+      | "value_checks"
   ) => {
     const allSelected = areAllRulesSelectedForTable(entity, category);
     const allIds = getAllRuleIds(category, entity);
@@ -427,7 +458,14 @@ export function ScanConfigModal({
   if (!isOpen) return null;
 
   const toggleCheckType = (checkName: keyof typeof checks) => {
-    const allSelected = areAllRulesSelectedForCheckType(checkName as "duplicates" | "links" | "required_fields" | "value_checks" | "attendance");
+    const allSelected = areAllRulesSelectedForCheckType(
+      checkName as
+        | "duplicates"
+        | "links"
+        | "required_fields"
+        | "value_checks"
+        | "attendance"
+    );
     const newValue = !allSelected;
 
     // When toggling a check type, select/deselect all its rules
@@ -765,6 +803,11 @@ export function ScanConfigModal({
         if (selectedRules.required_fields[entity].length > 0) return true;
       }
     }
+    if (selectedRules.value_checks) {
+      for (const entity in selectedRules.value_checks) {
+        if (selectedRules.value_checks[entity].length > 0) return true;
+      }
+    }
     return false;
   })();
   const hasAtLeastOneEntity = selectedEntities.size > 0;
@@ -922,9 +965,18 @@ export function ScanConfigModal({
                 <div className="text-sm text-red-600 py-8 px-4 border border-red-300 rounded-lg bg-red-50">
                   <div className="font-medium mb-2">Failed to load rules</div>
                   <div className="text-xs space-y-1 text-left">
-                    {rulesError.split('\n').map((line, index) => (
-                      <div key={index} className={line.trim().startsWith('Current') || line.trim().startsWith('VITE') || line.trim().startsWith('To fix') ? 'font-mono text-[10px] text-gray-700' : ''}>
-                        {line || '\u00A0'}
+                    {rulesError.split("\n").map((line, index) => (
+                      <div
+                        key={index}
+                        className={
+                          line.trim().startsWith("Current") ||
+                          line.trim().startsWith("VITE") ||
+                          line.trim().startsWith("To fix")
+                            ? "font-mono text-[10px] text-gray-700"
+                            : ""
+                        }
+                      >
+                        {line || "\u00A0"}
                       </div>
                     ))}
                   </div>
@@ -1302,10 +1354,7 @@ export function ScanConfigModal({
                               const valueChecks =
                                 rules.value_checks?.[actualEntityName];
 
-                              if (
-                                !valueChecks ||
-                                valueChecks.length === 0
-                              )
+                              if (!valueChecks || valueChecks.length === 0)
                                 return null;
 
                               const selectedIds =
