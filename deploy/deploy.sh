@@ -174,47 +174,12 @@ if [ "$DEPLOY_RULES" = true ]; then
 fi
 
 #########################################
-# Sync Rules from YAML to Firestore
+# Rules Management Note
 #########################################
-# Run migration sync when deploying rules or backend (since schema.yaml is in backend)
-if [ "$DEPLOY_RULES" = true ] || [ "$DEPLOY_BACKEND" = true ]; then
-    print_status "Syncing rules from YAML to Firestore..."
-
-    # Check if we're in the backend directory context
-    cd "$PROJECT_ROOT"
-    
-    # Check if Python and required modules are available
-    if ! command -v python3 &> /dev/null && ! command -v python &> /dev/null; then
-        print_warning "Python not found. Skipping rules migration sync."
-        print_warning "Run manually: python -m backend.scripts.migrate_rules --action=sync"
-    else
-        # Try python3 first, fall back to python
-        PYTHON_CMD="python3"
-        if ! command -v python3 &> /dev/null; then
-            PYTHON_CMD="python"
-        fi
-        
-        # Check if we can import the required modules
-        if $PYTHON_CMD -c "from backend.config.schema_loader import load_schema_from_yaml" 2>/dev/null; then
-            if $PYTHON_CMD -m backend.scripts.migrate_rules --action=sync 2>&1; then
-                print_success "Rules synced from YAML to Firestore successfully"
-            else
-                SYNC_EXIT=$?
-                print_warning "Rules migration sync failed (exit code: $SYNC_EXIT)"
-                print_warning "This may be due to missing Firestore credentials."
-                print_warning "Rules in schema.yaml will still work for scans, but may not appear in UI."
-                print_warning "To sync manually, run: python -m backend.scripts.migrate_rules --action=sync"
-                # Don't exit on sync failure - it's not critical for deployment
-            fi
-        else
-            print_warning "Cannot import backend modules. Skipping rules migration sync."
-            print_warning "Make sure you're in the project root and dependencies are installed."
-            print_warning "Run manually: python -m backend.scripts.migrate_rules --action=sync"
-        fi
-    fi
-
-    echo ""
-fi
+# Rules are now managed in Firestore only. The schema.yaml file has been removed.
+# To create a snapshot/backup of Firestore rules, use:
+#   python -m backend.scripts.migrate_rules --output schema.yaml.snapshot
+# This is a read-only operation that does not modify Firestore.
 
 #########################################
 # Deploy Backend

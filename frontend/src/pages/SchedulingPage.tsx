@@ -36,6 +36,7 @@ type ScheduleForm = {
     duplicates?: Record<string, string[]>;
     relationships?: Record<string, string[]>;
     required_fields?: Record<string, string[]>;
+    value_checks?: Record<string, string[]>;
     attendance_rules?: boolean;
   };
   notify_slack: boolean;
@@ -669,9 +670,39 @@ export function SchedulingPage() {
         scheduleData.run_config.entities = scheduleForm.entities;
       }
 
-      // Include rules if specified
+      // Include rules if specified and has actual content
       if (scheduleForm.rules) {
-        scheduleData.run_config.rules = scheduleForm.rules;
+        // Validate that rules object has actual selections
+        const hasRules =
+          (scheduleForm.rules.duplicates &&
+            Object.keys(scheduleForm.rules.duplicates).length > 0 &&
+            Object.values(scheduleForm.rules.duplicates).some(
+              (arr) => Array.isArray(arr) && arr.length > 0
+            )) ||
+          (scheduleForm.rules.relationships &&
+            Object.keys(scheduleForm.rules.relationships).length > 0 &&
+            Object.values(scheduleForm.rules.relationships).some(
+              (arr) => Array.isArray(arr) && arr.length > 0
+            )) ||
+          (scheduleForm.rules.required_fields &&
+            Object.keys(scheduleForm.rules.required_fields).length > 0 &&
+            Object.values(scheduleForm.rules.required_fields).some(
+              (arr) => Array.isArray(arr) && arr.length > 0
+            )) ||
+          (scheduleForm.rules.value_checks &&
+            Object.keys(scheduleForm.rules.value_checks).length > 0 &&
+            Object.values(scheduleForm.rules.value_checks).some(
+              (arr) => Array.isArray(arr) && arr.length > 0
+            )) ||
+          scheduleForm.rules.attendance_rules === true;
+
+        if (hasRules) {
+          scheduleData.run_config.rules = scheduleForm.rules;
+        } else {
+          console.warn(
+            "Schedule form has rules object but no actual rule selections, skipping rules"
+          );
+        }
       }
 
       // Include stop condition fields if set
@@ -777,9 +808,39 @@ export function SchedulingPage() {
         updateData.run_config.entities = scheduleForm.entities;
       }
 
-      // Include rules if specified
+      // Include rules if specified and has actual content
       if (scheduleForm.rules) {
-        updateData.run_config.rules = scheduleForm.rules;
+        // Validate that rules object has actual selections
+        const hasRules =
+          (scheduleForm.rules.duplicates &&
+            Object.keys(scheduleForm.rules.duplicates).length > 0 &&
+            Object.values(scheduleForm.rules.duplicates).some(
+              (arr) => Array.isArray(arr) && arr.length > 0
+            )) ||
+          (scheduleForm.rules.relationships &&
+            Object.keys(scheduleForm.rules.relationships).length > 0 &&
+            Object.values(scheduleForm.rules.relationships).some(
+              (arr) => Array.isArray(arr) && arr.length > 0
+            )) ||
+          (scheduleForm.rules.required_fields &&
+            Object.keys(scheduleForm.rules.required_fields).length > 0 &&
+            Object.values(scheduleForm.rules.required_fields).some(
+              (arr) => Array.isArray(arr) && arr.length > 0
+            )) ||
+          (scheduleForm.rules.value_checks &&
+            Object.keys(scheduleForm.rules.value_checks).length > 0 &&
+            Object.values(scheduleForm.rules.value_checks).some(
+              (arr) => Array.isArray(arr) && arr.length > 0
+            )) ||
+          scheduleForm.rules.attendance_rules === true;
+
+        if (hasRules) {
+          updateData.run_config.rules = scheduleForm.rules;
+        } else {
+          console.warn(
+            "Schedule form has rules object but no actual rule selections, skipping rules"
+          );
+        }
       }
 
       // Handle stop condition fields
@@ -2021,8 +2082,6 @@ function CreateScheduleModal({
     return allSelected;
   };
 
-
-
   // Check if all rules are selected for a specific table and rule type
   const areAllRulesSelectedForTable = (
     entity: string,
@@ -2806,10 +2865,15 @@ function CreateScheduleModal({
                           <div className="px-3 pb-3 pt-2 space-y-4 border-t border-[var(--border)] bg-[var(--bg-mid)]/20">
                             {/* Duplicate Detection Rules */}
                             {(() => {
-                              const actualEntityName = findEntityInRules("duplicates", entity);
-                              const dupDef = actualEntityName ? (rules?.duplicates?.[actualEntityName] as
-                                | { likely?: any[]; possible?: any[] }
-                                | undefined) : undefined;
+                              const actualEntityName = findEntityInRules(
+                                "duplicates",
+                                entity
+                              );
+                              const dupDef = actualEntityName
+                                ? (rules?.duplicates?.[actualEntityName] as
+                                    | { likely?: any[]; possible?: any[] }
+                                    | undefined)
+                                : undefined;
                               if (!dupDef) return null;
 
                               const likelyRules = dupDef.likely || [];
@@ -2945,8 +3009,13 @@ function CreateScheduleModal({
 
                             {/* Relationship Rules */}
                             {(() => {
-                              const actualEntityName = findEntityInRules("relationships", entity);
-                              const relRules = actualEntityName ? rules?.relationships?.[actualEntityName] : undefined;
+                              const actualEntityName = findEntityInRules(
+                                "relationships",
+                                entity
+                              );
+                              const relRules = actualEntityName
+                                ? rules?.relationships?.[actualEntityName]
+                                : undefined;
                               if (
                                 !relRules ||
                                 Object.keys(relRules).length === 0
@@ -3023,9 +3092,13 @@ function CreateScheduleModal({
 
                             {/* Required Field Rules */}
                             {(() => {
-                              const actualEntityName = findEntityInRules("required_fields", entity);
-                              const reqFields =
-                                actualEntityName ? rules?.required_fields?.[actualEntityName] : undefined;
+                              const actualEntityName = findEntityInRules(
+                                "required_fields",
+                                entity
+                              );
+                              const reqFields = actualEntityName
+                                ? rules?.required_fields?.[actualEntityName]
+                                : undefined;
                               if (
                                 !reqFields ||
                                 !Array.isArray(reqFields) ||
@@ -3105,7 +3178,7 @@ function CreateScheduleModal({
                               );
                             })()}
 
-                             {/* Attendance Rules (for attendance and absent tables) */}
+                            {/* Attendance Rules (for attendance and absent tables) */}
                             {(entity === "attendance" || entity === "absent") &&
                               (selectedEntities.has("attendance") ||
                                 selectedEntities.has("absent")) &&

@@ -3,6 +3,7 @@ import os
 import json
 import time
 import threading
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Dict, Any
@@ -2256,9 +2257,8 @@ async def get_current_school_years(
 ):
     """Get currently active school years with caching info.
 
-    Returns the active school years based on date and external API configuration.
-    During transition period (Feb 1 - Aug 5): both current and upcoming years.
-    Outside transition period: only current year.
+    Returns the active school years (current + 3 future years) from external API.
+    Year transitions are handled externally in the toolkit API.
     """
     request_id = str(uuid.uuid4())
     logger.info(
@@ -2268,6 +2268,12 @@ async def get_current_school_years(
 
     try:
         from backend.services.school_year_service import SchoolYearService
+        from .clients.firestore import FirestoreClient
+        from .config.config_loader import load_runtime_config
+
+        # Create Firestore client
+        config = load_runtime_config()
+        firestore_client = FirestoreClient(config.firestore)
 
         school_year_service = SchoolYearService(firestore_client)
         active_years = school_year_service.get_active_school_years()
@@ -2279,9 +2285,9 @@ async def get_current_school_years(
         return {
             "active_years": active_years,
             "current_year": cache_data.get("current_year"),
-            "upcoming_year": cache_data.get("upcoming_year"),
+            "future_years": cache_data.get("future_years", []),
+            "num_future_years": cache_data.get("num_future_years", 0),
             "cached_at": cache_data.get("cached_at"),
-            "in_transition_period": len(active_years) > 1,
             "field_mappings": school_year_service._school_year_config.get("field_mappings", {})
         }
     except ValueError as e:
@@ -2324,6 +2330,12 @@ async def refresh_school_years(
 
     try:
         from backend.services.school_year_service import SchoolYearService
+        from backend.clients.firestore import FirestoreClient
+        from backend.config.config_loader import load_runtime_config
+
+        # Create Firestore client
+        config = load_runtime_config()
+        firestore_client = FirestoreClient(config.firestore)
 
         school_year_service = SchoolYearService(firestore_client)
         result = school_year_service.refresh_cache()

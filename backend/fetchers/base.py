@@ -28,6 +28,7 @@ class BaseFetcher:
         self,
         progress_callback: Optional[Callable[[str, Optional[Dict[str, Any]]], None]] = None,
         cancel_check: Optional[Callable[[], None]] = None,
+        _async_log: Optional[Callable[[str, str], None]] = None,
     ) -> List[Dict[str, Any]]:
         """Fetch all records for the entity with automatic school year filtering.
 
@@ -40,17 +41,24 @@ class BaseFetcher:
         """
         filter_formula = None
 
+        # DEBUG: Log school year service availability
+        logger.info(f"[FETCH DEBUG] Entity: {self._entity_key}, Has school_year_service: {self._school_year_service is not None}")
+
         # Apply school year filtering if service is available
         if self._school_year_service:
+            logger.info(f"[FETCH DEBUG] Attempting to get field config for {self._entity_key}")
             try:
                 field_config = self._school_year_service.get_field_config_for_entity(self._entity_key)
+                logger.info(f"[FETCH DEBUG] Field config: {field_config}")
 
                 if field_config:
                     field_name = field_config.get("field_name")
                     filter_type = field_config.get("filter_type", "exact")
 
                     # Get active school years
+                    logger.info(f"[FETCH DEBUG] Getting active school years...")
                     active_years = self._school_year_service.get_active_school_years()
+                    logger.info(f"[FETCH DEBUG] Active years: {active_years}")
 
                     if active_years and field_name:
                         # Build filter formula
@@ -70,6 +78,13 @@ class BaseFetcher:
                                 "filter_formula": filter_formula
                             }
                         )
+
+                        # Log to real-time status page
+                        if progress_callback:
+                            progress_callback(
+                                f"School year filter: {filter_formula}",
+                                {"filter_formula": filter_formula, "active_years": active_years}
+                            )
                     else:
                         logger.debug(
                             f"No school year filtering for {self._entity_key}: no active years or field name"
@@ -78,10 +93,13 @@ class BaseFetcher:
                     logger.debug(f"No school year field configured for {self._entity_key}")
 
             except Exception as e:
+                logger.error(f"[FETCH DEBUG] EXCEPTION in school year filtering: {e}, type: {type(e)}")
                 logger.warning(
                     f"Could not apply school year filtering to {self._entity_key}, fetching all records: {e}",
                     exc_info=True
                 )
+        else:
+            logger.info(f"[FETCH DEBUG] No school_year_service available, skipping filtering")
 
         return self._client.fetch_records(
             self._entity_key,

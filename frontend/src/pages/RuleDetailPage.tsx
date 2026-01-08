@@ -71,6 +71,14 @@ export function RuleDetailPage() {
                 (r: any) => r.field === ruleId || r.rule_id === ruleId
               ) || null;
           }
+        } else if (category === "value_checks" && entity) {
+          const entityValueChecks = allRules.value_checks?.[entity];
+          if (entityValueChecks) {
+            foundRule =
+              entityValueChecks.find(
+                (r: any) => r.field === ruleId || r.rule_id === ruleId || r.field_name === ruleId
+              ) || null;
+          }
         } else if (category === "attendance_rules") {
           foundRule = allRules.attendance_rules || null;
         }

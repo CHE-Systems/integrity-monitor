@@ -117,6 +117,7 @@ exports.runScheduledScans = onSchedule(
           let nextRunTimestamp = null;
           let scheduledFor = null;
           let runConfig = null;
+          let notifySlack = false;
 
           // Claim the schedule in a transaction
           await db.runTransaction(async (transaction) => {
@@ -207,6 +208,7 @@ exports.runScheduledScans = onSchedule(
             // Store values for use outside transaction
             scheduledFor = nextRunAt;
             runConfig = currentData.run_config;
+            notifySlack = currentData.notify_slack || false;
 
             // Create execution record
             const executionRef = db.collection("schedule_executions").doc(executionId);
@@ -244,11 +246,23 @@ exports.runScheduledScans = onSchedule(
           logger.info(`Claimed schedule ${scheduleId}`, {
             nextRunAt: nextRunTimestamp.toDate().toISOString(),
             executionId: executionId,
+            has_run_config: !!runConfig,
+            run_config_keys: runConfig ? Object.keys(runConfig) : [],
           });
 
           // Trigger the backend run
-          const entities = runConfig.entities || [];
-          const rules = runConfig.rules;
+          // Safely extract entities and rules with null checks
+          const entities = (runConfig && runConfig.entities) || [];
+          const rules = (runConfig && runConfig.rules) || null;
+
+          // Log what we're about to send
+          logger.info(`Preparing run request for schedule ${scheduleId}`, {
+            entities_count: entities.length,
+            entities: entities,
+            has_rules: !!rules,
+            rules_keys: rules ? Object.keys(rules) : [],
+            rules_content: rules ? JSON.stringify(rules) : null,
+          });
 
           const params = new URLSearchParams({
             trigger: "schedule",
@@ -263,7 +277,9 @@ exports.runScheduledScans = onSchedule(
               params.append("entities", entity);
             });
           }
-          if (rules) {
+          
+          // Only include rules if they exist and have content
+          if (rules && typeof rules === 'object' && Object.keys(rules).length > 0) {
             requestBody.rules = rules;
 
             // Build checks object based on which rule categories have selections
@@ -294,6 +310,14 @@ exports.runScheduledScans = onSchedule(
               checks.required_fields = hasSelectedRequiredFields;
             }
 
+            // Check if value_checks has any rules selected
+            if (rules.value_checks && typeof rules.value_checks === 'object') {
+              const hasSelectedValueChecks = Object.values(rules.value_checks).some(
+                arr => Array.isArray(arr) && arr.length > 0
+              );
+              checks.value_checks = hasSelectedValueChecks;
+            }
+
             // Check if attendance_rules is enabled
             if (rules.attendance_rules === true) {
               checks.attendance = true;
@@ -305,7 +329,7 @@ exports.runScheduledScans = onSchedule(
             }
           }
           // Include notify_slack if enabled on the schedule
-          if (schedule.notify_slack) {
+          if (notifySlack) {
             requestBody.notify_slack = true;
           }
 
@@ -313,11 +337,20 @@ exports.runScheduledScans = onSchedule(
           logger.info(`Triggering run for schedule ${scheduleId}`, {
             url,
             entities,
+            entities_count: entities.length,
             has_rules: !!rules,
+            rules_structure: rules ? {
+              has_duplicates: !!(rules.duplicates && Object.keys(rules.duplicates).length > 0),
+              has_relationships: !!(rules.relationships && Object.keys(rules.relationships).length > 0),
+              has_required_fields: !!(rules.required_fields && Object.keys(rules.required_fields).length > 0),
+              has_value_checks: !!(rules.value_checks && Object.keys(rules.value_checks).length > 0),
+              has_attendance_rules: rules.attendance_rules === true,
+            } : null,
             has_checks: !!requestBody.checks,
             checks: requestBody.checks,
-            notify_slack: schedule.notify_slack || false,
-            requestBody: JSON.stringify(requestBody)
+            notify_slack: notifySlack,
+            requestBody: JSON.stringify(requestBody),
+            requestBody_keys: Object.keys(requestBody),
           });
 
           let runId = null;

@@ -1,7 +1,7 @@
 """Script to update contractor required field rules in Firestore to use field IDs.
 
 This script updates any existing Firestore rules for contractors to use Airtable field IDs
-instead of field names. Run this after updating schema.yaml to ensure consistency.
+instead of field names.
 
 Field ID mappings:
 - Email: flddCJDACjAsP1ltS

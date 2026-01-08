@@ -15,10 +15,9 @@ from ..clients.firestore import FirestoreClient
 class SchoolYearService:
     """Manages active school year configuration with external API integration.
 
-    Fetches current and upcoming school years from external API and determines
-    which years should be active based on transition period rules:
-    - Feb 1 - Aug 5: Both current and upcoming years are active
-    - Aug 6 - Jan 31: Only current year is active
+    Fetches current school year from external API and programmatically generates
+    future years (up to 3 years ahead). Always includes current + 3 future years.
+    Year transitions are handled externally in the toolkit API.
     """
 
     CACHE_COLLECTION = "system_config"
@@ -27,7 +26,9 @@ class SchoolYearService:
     # External API configuration
     API_BASE_URL = "https://toolkit.che.systems/api/secrets"
     CURRENT_YEAR_SECRET_ID = "yG1S06mVruhx933WDo8r"
-    UPCOMING_YEAR_SECRET_ID = "saysaEJZt2ywx9Gh5HeX"
+
+    # Number of future years to include beyond current year
+    NUM_FUTURE_YEARS = 3
 
     def __init__(self, firestore_client: FirestoreClient):
         self._firestore = firestore_client
@@ -46,13 +47,14 @@ class SchoolYearService:
             raise ValueError("TOOLKIT_API_KEY not found in environment variables or Secret Manager")
 
     def get_active_school_years(self, force_refresh: bool = False) -> List[str]:
-        """Get list of currently active school years based on date and API data.
+        """Get list of currently active school years (current + 3 future years).
 
         Args:
             force_refresh: If True, bypass cache and fetch from API
 
         Returns:
-            List of active school year strings (e.g., ["2024-2025", "2025-2026"])
+            List of active school year strings
+            Example: ["2025-2026", "2026-2027", "2027-2028", "2028-2029"]
         """
         # Try cache first unless force refresh
         if not force_refresh:
@@ -60,53 +62,46 @@ class SchoolYearService:
             if cached:
                 return cached
 
-        # Fetch from external API
+        # Fetch current year from external API
         current_year = self._fetch_secret(self.CURRENT_YEAR_SECRET_ID)
-        upcoming_year = self._fetch_secret(self.UPCOMING_YEAR_SECRET_ID)
 
         if not current_year:
             raise ValueError("Failed to fetch current school year from external API")
 
-        # Determine active years based on transition period
-        active_years = self._determine_active_years(current_year, upcoming_year)
+        # Generate active years: current + 3 future years
+        active_years = self._generate_future_years(current_year, self.NUM_FUTURE_YEARS)
 
         # Cache the result
-        self._cache_years(active_years, current_year, upcoming_year)
+        self._cache_years(active_years, current_year)
 
         return active_years
 
-    def _determine_active_years(self, current: str, upcoming: Optional[str]) -> List[str]:
-        """Determine which years are active based on current date.
+    def _generate_future_years(self, current_year: str, num_future: int) -> List[str]:
+        """Generate future school years programmatically from current year.
 
-        Transition period: Feb 1 - Aug 5
-        - During transition: both current and upcoming years
-        - Outside transition: only current year
+        Args:
+            current_year: Current school year in format "YYYY-YYYY" (e.g., "2025-2026")
+            num_future: Number of future years to generate beyond current
+
+        Returns:
+            List of school years starting with current, followed by future years
+            Example: ["2025-2026", "2026-2027", "2027-2028", "2028-2029"]
         """
-        now = datetime.now()
-        current_year = now.year
+        try:
+            # Parse the start year from "2025-2026" format
+            start_year = int(current_year.split("-")[0])
+        except (ValueError, IndexError):
+            raise ValueError(f"Invalid school year format: {current_year}. Expected 'YYYY-YYYY'")
 
-        # Transition period dates for current calendar year
-        transition_start = datetime(
-            current_year,
-            self._school_year_config.get("transition_start_month", 2),
-            self._school_year_config.get("transition_start_day", 1)
-        )
+        # Generate list: current + num_future years
+        years = [current_year]
 
-        transition_end = datetime(
-            current_year,
-            self._school_year_config.get("transition_end_month", 8),
-            self._school_year_config.get("transition_end_day", 5),
-            23, 59, 59  # End of day
-        )
+        for i in range(1, num_future + 1):
+            next_start = start_year + i
+            next_end = next_start + 1
+            years.append(f"{next_start}-{next_end}")
 
-        # During transition period (Feb 1 - Aug 5): both years active
-        if transition_start <= now <= transition_end:
-            if upcoming:
-                return [current, upcoming]
-            return [current]
-
-        # Outside transition period: only current year
-        return [current]
+        return years
 
     def _fetch_secret(self, secret_id: str) -> Optional[str]:
         """Fetch a secret value from the external API.
@@ -122,6 +117,7 @@ class SchoolYearService:
 
         try:
             response = requests.get(url, headers=headers, timeout=10)
+            
             response.raise_for_status()
             data = response.json()
             return data.get("value")
@@ -140,6 +136,7 @@ class SchoolYearService:
         """
         try:
             doc = self._firestore.db.collection(self.CACHE_COLLECTION).document(self.CACHE_DOCUMENT).get()
+            
             if not doc.exists:
                 return None
 
@@ -161,23 +158,21 @@ class SchoolYearService:
     def _cache_years(
         self,
         active_years: List[str],
-        current_year: str,
-        upcoming_year: Optional[str]
+        current_year: str
     ) -> None:
         """Cache school years in Firestore.
 
         Args:
-            active_years: List of currently active school years
-            current_year: The current school year
-            upcoming_year: The upcoming school year (may be None)
+            active_years: List of currently active school years (current + 3 future)
+            current_year: The current school year from external API
         """
         try:
             cache_data = {
                 "active_years": active_years,
                 "current_year": current_year,
-                "upcoming_year": upcoming_year,
+                "future_years": active_years[1:],  # All years except current
                 "cached_at": datetime.now(),
-                "in_transition_period": len(active_years) > 1
+                "num_future_years": len(active_years) - 1
             }
 
             self._firestore.db.collection(self.CACHE_COLLECTION).document(self.CACHE_DOCUMENT).set(cache_data)
@@ -205,20 +200,19 @@ class SchoolYearService:
         """Force refresh of school year cache from API.
 
         Returns:
-            Dict with active_years, current_year, upcoming_year, and in_transition_period
+            Dict with active_years, current_year, and future_years
         """
         current_year = self._fetch_secret(self.CURRENT_YEAR_SECRET_ID)
-        upcoming_year = self._fetch_secret(self.UPCOMING_YEAR_SECRET_ID)
 
         if not current_year:
             raise ValueError("Failed to fetch current school year from external API")
 
-        active_years = self._determine_active_years(current_year, upcoming_year)
-        self._cache_years(active_years, current_year, upcoming_year)
+        active_years = self._generate_future_years(current_year, self.NUM_FUTURE_YEARS)
+        self._cache_years(active_years, current_year)
 
         return {
             "active_years": active_years,
             "current_year": current_year,
-            "upcoming_year": upcoming_year,
-            "in_transition_period": len(active_years) > 1
+            "future_years": active_years[1:],
+            "num_future_years": len(active_years) - 1
         }

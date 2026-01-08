@@ -1,167 +1,153 @@
-# Rules Migration Script
+# Rules Snapshot Script
 
 ## Overview
 
-The `migrate_rules.py` script migrates data integrity rules from YAML files to Firestore, enabling runtime rule management without code deployments.
+The `migrate_rules.py` script creates a snapshot/backup of Firestore rules to a YAML file. This is a **read-only operation** - it does not modify Firestore. Rules are managed in Firestore only, and this script is used for backup/archival purposes.
+
+## Important Note
+
+**Rules are now managed in Firestore only.** The `schema.yaml` file has been removed. This script creates snapshots for backup purposes only - it does not sync rules back to Firestore.
 
 ## Features
 
-- **Initial Migration**: Load all YAML rules into Firestore
-- **Sync**: Update Firestore with YAML changes (preserves user-created rules)
-- **Reset**: Delete all Firestore rules and reload from YAML
-- **Clear**: Delete all Firestore rules
-- **Dry Run**: Preview changes without applying them
+- **Snapshot**: Export all Firestore rules to YAML file
+- **Read-only**: Does not modify Firestore
+- **Backup**: Create timestamped backups of your rules
+- **Format**: Outputs YAML matching the old schema.yaml structure
 
 ## Usage
 
-### 1. Initial Migration (First Time)
+### Basic Snapshot
 
-**Step 1: Preview changes (dry run)**
+Create a snapshot with default filename:
+
 ```bash
-cd backend
-python -m scripts.migrate_rules --action=migrate --dry-run
+python -m backend.scripts.migrate_rules --output schema.yaml.snapshot
 ```
 
-This will show you what rules will be created without actually creating them.
+### Timestamped Backup
 
-**Step 2: Run the actual migration**
+Create a timestamped backup:
+
 ```bash
-python -m scripts.migrate_rules --action=migrate
+python -m backend.scripts.migrate_rules --output rules-backup-$(date +%Y-%m-%d).yaml
 ```
 
-This loads all rules from `config/schema.yaml` and `config/rules.yaml` into Firestore.
+### Custom Output Path
 
-### 2. Sync YAML Changes
-
-After modifying YAML files, sync changes to Firestore:
+Specify a custom output location:
 
 ```bash
-python -m scripts.migrate_rules --action=sync
+python -m backend.scripts.migrate_rules --output backups/rules-snapshot.yaml
 ```
 
-This will:
-- ✅ Add new YAML rules
-- ✅ Update existing YAML rules
-- ✅ Delete removed YAML rules
-- ⏭️  Preserve user-created rules (source != "yaml")
+## Output Format
 
-### 3. Reset to YAML Defaults
+The snapshot YAML file matches the old `schema.yaml` structure:
 
-To delete all Firestore rules and reload from YAML:
+```yaml
+metadata:
+  source: firestore_snapshot
+  generated: "2024-01-01T12:00:00"
+  note: "This is a snapshot/backup of Firestore rules. Rules are managed in Firestore only."
 
-```bash
-python -m scripts.migrate_rules --action=reset --confirm
-```
+entities:
+  students:
+    description: "Students entity"
+    relationships:
+      parents:
+        target: parents
+        min_links: 1
+        require_active: true
+        message: "Students need at least one active parent/guardian."
+    missing_key_data:
+      - field: fldVGRpEqAyKv0o0g
+        rule_id: "required_field.students.first_name"
+        message: "First name is required."
+        severity: warning
 
-⚠️ **Warning:** This deletes ALL rules, including user-created ones!
-
-### 4. Clear All Rules
-
-To delete all Firestore rules without reloading:
-
-```bash
-python -m scripts.migrate_rules --action=clear --confirm
+duplicates:
+  students:
+    likely:
+      - rule_id: "dup.students.dob_name"
+        description: "Exact DOB match plus 80%+ name similarity."
+        conditions:
+          - type: exact_match
+            field: fldya31Cb8IADmmkp
+          - type: similarity
+            field: fldJtWBqZzfyiEFJl
+            similarity: 0.80
 ```
 
 ## Rule Categories
 
-The script migrates four categories of rules:
+The snapshot includes all rule categories:
 
 ### 1. Duplicate Rules
-- **Source:** `config/schema.yaml` → `duplicates` section
 - **Firestore Path:** `rules/duplicates/{entity}/{rule_id}`
-- **Entities:** students, parents, contractors
-- **Types:** likely, possible
+- **Output:** `duplicates.{entity}.{likely|possible}`
 
 ### 2. Relationship Rules
-- **Source:** `config/schema.yaml` → `entities[*].relationships`
-- **Firestore Path:** `rules/relationships/{source_entity}/{target_entity}`
-- **Entities:** students, parents, contractors, classes
+- **Firestore Path:** `rules/relationships/{source_entity}/{relationship_key}`
+- **Output:** `entities.{entity}.relationships.{relationship_key}`
 
 ### 3. Required Field Rules
-- **Source:** `config/schema.yaml` → `entities[*].missing_key_data`
-- **Firestore Path:** `rules/required_fields/{entity}/{field_name}`
-- **Entities:** students, parents, contractors, classes
+- **Firestore Path:** `rules/required_fields/{entity}/{rule_id}`
+- **Output:** `entities.{entity}.missing_key_data[]`
 
-### 4. Attendance Rules
-- **Source:** `config/rules.yaml` → `attendance_rules`
+### 4. Value Check Rules
+- **Firestore Path:** `rules/value_checks/{entity}/{rule_id}`
+- **Output:** `entities.{entity}.value_checks[]`
+
+### 5. Attendance Rules
 - **Firestore Path:** `rules/attendance/thresholds/{metric_name}`
-- **Metrics:** absence_rate_30d, consecutive_absences, tardy_rate, etc.
-
-## Firestore Schema
-
-Each rule document includes:
-
-```javascript
-{
-  rule_id: string,
-  entity: string,
-  // ... rule-specific fields ...
-  source: "yaml" | "firestore" | "user",
-  enabled: boolean,
-  created_at: timestamp,
-  updated_at: timestamp,
-  created_by: user_id,
-  updated_by: user_id
-}
-```
-
-The `source` field tracks rule origin:
-- `"yaml"`: Loaded from YAML files
-- `"user"`: Created by users via UI
-- `"firestore"`: Created via API/script
+- **Output:** (Not included in snapshot - managed separately)
 
 ## Examples
 
-### Example 1: Initial Setup
+### Example 1: Create Snapshot
 
 ```bash
-# 1. Preview migration
-python -m scripts.migrate_rules --action=migrate --dry-run
+$ python -m backend.scripts.migrate_rules --output schema.yaml.snapshot
 
-# Output:
-# 📋 Migrating Duplicate Rules...
-#    Entity: students
-#       [DRY RUN] Would create: dup.student.email_dob (likely)
-#       [DRY RUN] Would create: dup.student.name_campus (possible)
-# ...
-# TOTAL: Created: 45, Updated: 0, Deleted: 0, Preserved: 0
+======================================================================
+RULES SNAPSHOT: Firestore → YAML
+======================================================================
 
-# 2. Run migration
-python -m scripts.migrate_rules --action=migrate
+Output file: schema.yaml.snapshot
 
-# Output:
-# ✅ Created: dup.student.email_dob (likely)
-# ✅ Created: dup.student.name_campus (possible)
-# ...
-# ✅ Migration completed successfully
+Loading rules from Firestore...
+Converting to YAML format...
+Writing snapshot to schema.yaml.snapshot...
+
+----------------------------------------------------------------------
+SNAPSHOT SUMMARY
+----------------------------------------------------------------------
+  Duplicates:        12
+  Relationships:     8
+  Required Fields:   15
+  Value Checks:      3
+  Total Rules:       38
+
+✅ Snapshot created successfully: schema.yaml.snapshot
 ```
 
-### Example 2: Update YAML and Sync
+### Example 2: Timestamped Backup
 
 ```bash
-# 1. Edit config/schema.yaml
-# Add new duplicate rule for students
+$ python -m backend.scripts.migrate_rules --output rules-backup-2024-01-15.yaml
 
-# 2. Sync changes
-python -m scripts.migrate_rules --action=sync
+======================================================================
+RULES SNAPSHOT: Firestore → YAML
+======================================================================
 
-# Output:
-# 📋 Syncing Duplicate Rules...
-#    Entity: students
-#       ✅ Created: dup.student.new_rule (likely)
-#       ⏭️  Preserved user rule: dup.student.custom_001
-# ...
-```
+Output file: rules-backup-2024-01-15.yaml
 
-### Example 3: Reset After Major Changes
+Loading rules from Firestore...
+Converting to YAML format...
+Writing snapshot to rules-backup-2024-01-15.yaml...
 
-```bash
-# Reset to YAML defaults (preview first)
-python -m scripts.migrate_rules --action=reset --dry-run
-
-# Confirm and execute
-python -m scripts.migrate_rules --action=reset --confirm
+✅ Snapshot created successfully: rules-backup-2024-01-15.yaml
 ```
 
 ## Troubleshooting
@@ -169,6 +155,7 @@ python -m scripts.migrate_rules --action=reset --confirm
 ### Error: "GOOGLE_APPLICATION_CREDENTIALS not set"
 
 Set up Firebase credentials:
+
 ```bash
 # Option 1: Application Default Credentials (recommended for local dev)
 gcloud auth application-default login
@@ -177,120 +164,75 @@ gcloud auth application-default login
 export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account.json"
 ```
 
-### Error: "Module not found"
+### Error: "Failed to load rules from Firestore"
 
-Run from the backend directory:
+1. Verify Firestore credentials are set up correctly
+2. Check that you have read permissions for the `rules/` collection
+3. Verify the Firestore project is correct
+
+### Error: "File already exists"
+
+The script will prompt you to confirm overwrite. To avoid the prompt, use a different filename:
+
 ```bash
-cd backend
-python -m scripts.migrate_rules --action=migrate
+python -m backend.scripts.migrate_rules --output schema-$(date +%s).yaml.snapshot
 ```
-
-### Rules not appearing in UI
-
-1. Verify migration succeeded (check console output)
-2. Check Firestore console for `rules/` collection
-3. Verify `enabled: true` on rules
-4. Check browser console for errors
-
-### Sync not detecting changes
-
-The sync command only updates rules with `source: "yaml"`. User-created rules are preserved. To force update:
-
-1. Use `--action=reset` to delete all and reload
-2. Or manually update in Firestore console
 
 ## Best Practices
 
-### 1. Always Preview First
+### 1. Regular Backups
+
+Create regular snapshots for backup purposes:
+
 ```bash
-# Always run dry-run before actual migration
-python -m scripts.migrate_rules --action=migrate --dry-run
+# Weekly backup
+python -m backend.scripts.migrate_rules --output backups/rules-$(date +%Y-W%V).yaml
 ```
 
-### 2. Backup Before Reset
+### 2. Before Major Changes
+
+Create a snapshot before making major rule changes:
+
 ```bash
-# Export rules before destructive operations
-# (Future: export functionality will be added)
+python -m backend.scripts.migrate_rules --output backups/before-changes-$(date +%Y%m%d).yaml
 ```
 
-### 3. Version Control YAML Files
-```bash
-# Commit YAML changes before syncing
-git add backend/config/schema.yaml backend/config/rules.yaml
-git commit -m "Updated duplicate rules"
+### 3. Version Control
 
-# Then sync to Firestore
-python -m scripts.migrate_rules --action=sync
+Commit snapshots to git for version history:
+
+```bash
+python -m backend.scripts.migrate_rules --output schema.yaml.snapshot
+git add schema.yaml.snapshot
+git commit -m "Snapshot of Firestore rules"
 ```
 
-### 4. Test in Staging First
-```bash
-# Use different Firebase projects for staging/production
-# Set GOOGLE_APPLICATION_CREDENTIALS for staging
-export GOOGLE_APPLICATION_CREDENTIALS="./staging-key.json"
-python -m scripts.migrate_rules --action=migrate
-```
+## Important Notes
 
-## Next Steps
-
-After migration, you can:
-
-1. **View rules** in Firestore Console
-   - Navigate to `rules/` collection
-   - Browse by category and entity
-
-2. **Edit rules** via API or UI
-   - Use existing `/rules` endpoints
-   - Rules page (coming soon)
-
-3. **Create custom rules**
-   - Add via API with `source: "user"`
-   - These will be preserved during sync
-
-4. **Run integrity checks**
-   - Backend will automatically load rules from Firestore
-   - Falls back to YAML if Firestore empty
+- **Read-only**: This script does NOT modify Firestore
+- **Not for syncing**: Rules are managed in Firestore only. This script is for backup only
+- **Format compatibility**: The output format matches the old `schema.yaml` structure for compatibility
+- **No reverse sync**: There is no way to sync from YAML back to Firestore. Use the Rules UI or API to manage rules.
 
 ## Script Architecture
 
 ```
 migrate_rules.py
-├── RulesMigrator (main class)
-│   ├── migrate()         # Initial migration
-│   ├── sync()            # Sync YAML changes
-│   ├── reset()           # Delete all + migrate
-│   └── clear()           # Delete all
+├── RulesSnapshot (main class)
+│   └── snapshot()           # Export Firestore rules to YAML
 │
-├── Per-category methods:
-│   ├── _migrate_duplicates()
-│   ├── _migrate_relationships()
-│   ├── _migrate_required_fields()
-│   └── _migrate_attendance()
+├── Conversion methods:
+│   └── _convert_to_yaml_format()  # Convert Firestore format to YAML
 │
 └── Utilities:
-    ├── _create_*_rule()  # Create rule in Firestore
-    ├── _update_*_rule()  # Update existing rule
-    ├── _delete_rule()    # Delete single rule
-    └── _print_summary()  # Show statistics
+    └── _print_summary()     # Show statistics
 ```
-
-## Future Enhancements
-
-Planned improvements:
-
-- [ ] Export rules to JSON
-- [ ] Import rules from JSON
-- [ ] Backup/restore functionality
-- [ ] Rule validation before migration
-- [ ] Batch operations for large rule sets
-- [ ] Migration status tracking
-- [ ] Rollback capability
 
 ## Support
 
 For issues or questions:
 
 1. Check Firestore Console for rule documents
-2. Review migration logs for errors
-3. Use `--dry-run` to preview changes
-4. Consult [RULES-FIREBASE-MIGRATION-PLAN.md](../../RULES-FIREBASE-MIGRATION-PLAN.md) for architecture details
+2. Verify Firestore credentials are set up correctly
+3. Review script output for errors
+4. Ensure you have read permissions for the `rules/` collection

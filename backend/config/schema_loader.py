@@ -22,20 +22,34 @@ from .models import (
 
 logger = logging.getLogger(__name__)
 
+# DEPRECATED: schema.yaml has been removed. This constant is kept for backward compatibility
+# but should not be used. Rules are now managed in Firestore only.
 SCHEMA_PATH = Path(__file__).with_name("schema.yaml")
 
 
 def load_schema_from_yaml(path: Optional[Path] = None) -> SchemaConfig:
     """Load schema configuration directly from YAML file.
     
-    Used by migration scripts to read YAML rules before syncing to Firestore.
+    DEPRECATED: This function is kept only for reading snapshot/backup YAML files.
+    The main schema.yaml file has been removed. Rules are now managed in Firestore only.
+    
+    This function can be used to read snapshot files created by the snapshot tool,
+    but should not be used for production rule loading.
     
     Args:
-        path: Path to schema.yaml file. If None, uses default SCHEMA_PATH.
+        path: Path to YAML file. If None, uses default SCHEMA_PATH (which no longer exists).
         
     Returns:
         SchemaConfig instance built from YAML file.
     """
+    import warnings
+    warnings.warn(
+        "load_schema_from_yaml() is deprecated. Rules are now managed in Firestore only. "
+        "This function is kept only for reading snapshot/backup files.",
+        DeprecationWarning,
+        stacklevel=2
+    )
+    
     yaml_path = path or SCHEMA_PATH
     
     if not yaml_path.exists():

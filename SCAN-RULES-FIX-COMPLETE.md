@@ -5,6 +5,7 @@
 **Problem**: Scans were running rules that weren't selected in the scan configuration, including rules that had been deleted from Firestore. For example, 860 contractor records resulted in 4,000 issues from unselected rules like the deleted "EIN required field" rule.
 
 **Root Cause**: The `load_schema_config()` function was loading rules from YAML first, then applying Firestore overrides on top. This meant:
+
 1. All YAML-based rules were loaded as the base
 2. When you deleted a rule from Firestore, it didn't delete the YAML version
 3. The scan still saw and ran the YAML rule
@@ -19,6 +20,7 @@
 **File**: [backend/config/schema_loader.py](backend/config/schema_loader.py)
 
 **Key Changes**:
+
 - Added `_convert_firestore_rules_to_schema_config()` function that converts RulesService data to SchemaConfig format
 - Completely rewrote `load_schema_config()` to:
   - Load rules from Firestore via RulesService
@@ -27,6 +29,7 @@
 - The `path` parameter is now deprecated but kept for backward compatibility
 
 **Before**:
+
 ```python
 def load_schema_config(path, firestore_client):
     # Load from YAML file
@@ -42,6 +45,7 @@ def load_schema_config(path, firestore_client):
 ```
 
 **After**:
+
 ```python
 def load_schema_config(path, firestore_client):
     # Load ONLY from Firestore using RulesService
@@ -78,17 +82,20 @@ This allows the `_filter_rules_by_selection()` method in `integrity_runner.py` t
 ### Rule Loading Flow
 
 1. **IntegrityRunner initialization** ([integrity_runner.py:96](backend/services/integrity_runner.py#L96)):
+
    ```python
    self._schema_config = load_schema_config(firestore_client=self._firestore_client)
    ```
 
 2. **load_schema_config** calls RulesService ([schema_loader.py:172](backend/config/schema_loader.py#L172)):
+
    ```python
    rules_service = RulesService(firestore_client)
    rules_data = rules_service.get_all_rules()
    ```
 
 3. **RulesService.get_all_rules()** loads from Firestore ([rules_service.py:185](backend/services/rules_service.py#L185)):
+
    ```python
    return {
        "duplicates": self._load_duplicates_from_firestore(),
@@ -98,7 +105,7 @@ This allows the `_filter_rules_by_selection()` method in `integrity_runner.py` t
    }
    ```
 
-4. **_convert_firestore_rules_to_schema_config** transforms data ([schema_loader.py:27](backend/config/schema_loader.py#L27)):
+4. **\_convert_firestore_rules_to_schema_config** transforms data ([schema_loader.py:27](backend/config/schema_loader.py#L27)):
    - Converts duplicates to `DuplicateDefinition` objects with `likely` and `possible` lists
    - Converts relationships to `RelationshipRule` objects
    - Converts required_fields to `FieldRequirement` objects (with `rule_id` for filtering)
@@ -109,6 +116,7 @@ This allows the `_filter_rules_by_selection()` method in `integrity_runner.py` t
 1. **Scan starts** with `run_config` containing selected rules ([integrity_runner.py:132](backend/services/integrity_runner.py#L132))
 
 2. **Before running checks**, filter rules ([integrity_runner.py:483](backend/services/integrity_runner.py#L483)):
+
    ```python
    schema_config_to_use = self._schema_config
    if hasattr(self, "_run_config") and self._run_config:
@@ -118,7 +126,8 @@ This allows the `_filter_rules_by_selection()` method in `integrity_runner.py` t
        )
    ```
 
-3. **_filter_rules_by_selection** filters each category ([integrity_runner.py:944](backend/services/integrity_runner.py#L944)):
+3. **\_filter_rules_by_selection** filters each category ([integrity_runner.py:944](backend/services/integrity_runner.py#L944)):
+
    - **Duplicates**: Filters `likely` and `possible` lists by `rule_id`
    - **Relationships**: Filters relationship dict by key
    - **Required Fields**: Filters `missing_key_data` list by `rule_id`, `field`, or `required.{entity}.{field}` formats
@@ -147,12 +156,13 @@ This allows the `_filter_rules_by_selection()` method in `integrity_runner.py` t
 ### For Users
 
 - **No action required** - Your existing Firestore rules will be loaded automatically
-- **YAML rules are ignored** - The schema.yaml file is no longer used for rules
-- **Clean slate** - Any YAML rules that weren't migrated to Firestore are now inactive
+- **YAML rules are ignored** - The schema.yaml file has been removed
+- **Rules managed in Firestore only** - All rules are managed through the Rules UI or API
 
 ### For Developers
 
-- **schema.yaml is deprecated** for rules - It's still present but not loaded
+- **schema.yaml has been removed** - Rules are managed in Firestore only
+- **Snapshot tool available** - Use `python -m backend.scripts.migrate_rules --output snapshot.yaml` to create backups
 - **RulesService is the API** - All rule CRUD operations go through RulesService
 - **FieldRequirement.rule_id** - Now available for filtering required field rules
 - **Empty schema fallback** - If Firestore fails, we return empty schema (not YAML fallback)
@@ -169,6 +179,7 @@ This allows the `_filter_rules_by_selection()` method in `integrity_runner.py` t
 ## Files Modified
 
 1. **[backend/config/schema_loader.py](backend/config/schema_loader.py)**
+
    - Complete rewrite of `load_schema_config()`
    - New `_convert_firestore_rules_to_schema_config()` function
    - Removed YAML loading and Firestore override merging logic
@@ -179,6 +190,7 @@ This allows the `_filter_rules_by_selection()` method in `integrity_runner.py` t
 ## Impact
 
 ### Before This Fix
+
 ```
 User deletes "EIN required field" rule from Firestore
     ↓
@@ -194,6 +206,7 @@ Scan runs EIN check on 860 contractors
 ```
 
 ### After This Fix
+
 ```
 User deletes "EIN required field" rule from Firestore
     ↓

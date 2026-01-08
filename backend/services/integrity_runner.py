@@ -1226,7 +1226,15 @@ class IntegrityRunner:
         """
         logger.info("Performing full scan")
 
+        # DEBUG: Check school year service availability
+        logger.info(f"[RUNNER DEBUG] Building fetchers, school_year_service exists: {self._school_year_service is not None}")
+
         fetchers = build_fetchers(self._airtable_client, self._school_year_service)
+
+        # DEBUG: Check fetchers
+        logger.info(f"[RUNNER DEBUG] Built {len(fetchers)} fetchers")
+        for entity_key, fetcher in fetchers.items():
+            logger.info(f"[RUNNER DEBUG] Fetcher '{entity_key}' has school_year_service: {fetcher._school_year_service is not None}")
 
         # Filter fetchers by selected entities if provided
         if entities:

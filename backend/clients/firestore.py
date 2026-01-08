@@ -120,6 +120,11 @@ class FirestoreClient:
                     ) from exc
                 raise
         return self._client
+    
+    @property
+    def db(self) -> firestore.Client:
+        """Property to access the Firestore client directly (for backward compatibility)."""
+        return self._get_client()
 
     def record_run(self, run_id: str, payload: Dict[str, Any]) -> None:
         """Write run summary to Firestore integrity_runs collection."""

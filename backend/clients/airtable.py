@@ -129,17 +129,17 @@ class AirtableClient:
 
         Args:
             field_name: Name of the school year field in Airtable
-            active_years: List of school year strings (e.g., ["2024-2025", "2025-2026"])
-            filter_type: Either "exact" for direct equality or "contains" for substring search
+            active_years: List of school year strings (e.g., ["2025-2026", "2026-2027", ...])
+            filter_type: One of "exact", "exact_or_empty", "contains", "contains_or_empty"
 
         Returns:
             Airtable formula string for filtering
 
         Examples:
-            exact: {School Year}="2024-2025"
-            exact (multiple): OR({School Year}="2024-2025", {School Year}="2025-2026")
-            contains: FIND("2024-2025", {School Year (from Student) text})
-            contains (multiple): OR(FIND("2024-2025", {Field}), FIND("2025-2026", {Field}))
+            exact: OR({School Year}="2025-2026", {School Year}="2026-2027")
+            exact_or_empty: OR({School Year}="2025-2026", {School Year}="2026-2027", OR({School Year}='', ISBLANK({School Year})))
+            contains: OR(FIND("2025-2026", {Field}), FIND("2026-2027", {Field}))
+            contains_or_empty: OR(FIND("2025-2026", {Field}), FIND("2026-2027", {Field}), OR({Field}='', ISBLANK({Field})))
         """
         if not active_years:
             return ""
@@ -148,21 +148,40 @@ class AirtableClient:
         field_ref = f"{{{field_name}}}"
 
         if filter_type == "exact":
-            # For direct equality comparisons
+            # For direct equality comparisons (students, student_truth)
             if len(active_years) == 1:
                 return f"{field_ref}='{active_years[0]}'"
             else:
                 conditions = [f"{field_ref}='{year}'" for year in active_years]
                 return f"OR({', '.join(conditions)})"
+
+        elif filter_type == "exact_or_empty":
+            # For direct equality that also includes empty/blank values (classes)
+            conditions = [f"{field_ref}='{year}'" for year in active_years]
+            # Add empty/blank condition - in Airtable, NOT() checks for empty/null/blank
+            conditions.append(f"NOT({field_ref})")
+            return f"OR({', '.join(conditions)})"
+
         elif filter_type == "contains":
-            # For lookup/concatenated fields, use FIND() to check if year exists in string
+            # For lookup/concatenated fields, use FIND() to check if year exists in string (absent - if no empty)
             if len(active_years) == 1:
                 return f"FIND('{active_years[0]}', {field_ref})"
             else:
                 conditions = [f"FIND('{year}', {field_ref})" for year in active_years]
                 return f"OR({', '.join(conditions)})"
+
+        elif filter_type == "contains_or_empty":
+            # For lookup fields that should also include empty values (parents, contractors, absent)
+            conditions = [f"FIND('{year}', {field_ref})" for year in active_years]
+            # Add empty/blank condition - in Airtable, NOT() checks for empty/null/blank
+            conditions.append(f"NOT({field_ref})")
+            return f"OR({', '.join(conditions)})"
+
         else:
-            raise ValueError(f"Invalid filter_type: {filter_type}. Must be 'exact' or 'contains'")
+            raise ValueError(
+                f"Invalid filter_type: {filter_type}. "
+                f"Must be 'exact', 'exact_or_empty', 'contains', or 'contains_or_empty'"
+            )
 
     @retry(
         retry=retry_if_exception_type((HTTPError, RequestException)),
@@ -201,15 +220,31 @@ class AirtableClient:
         }
         if filter_formula:
             log_extra["filter"] = filter_formula
+            # Log both to structured logs and to console for easy visibility
+            print(f"\n{'='*80}")
+            print(f"[AIRTABLE FETCH] Entity: {key}")
+            print(f"[AIRTABLE FETCH] Filter Formula:")
+            print(f"{filter_formula}")
+            print(f"{'='*80}\n")
             logger.info(f"Fetching Airtable records with filter: {filter_formula}", extra=log_extra)
         else:
-            logger.info("Fetching Airtable records", extra=log_extra)
+            logger.info("Fetching Airtable records (NO FILTER)", extra=log_extra)
 
         # Fetch all records with pagination, throttling between pages
         records = []
         page_count = 0
         total_records = 0
         fetch_start_time = time.time()
+
+        # Log start of fetch to real-time status
+        if progress_callback:
+            try:
+                progress_callback(
+                    f"Starting to fetch {key} records from Airtable...",
+                    {"entity": key, "filter_applied": filter_formula is not None}
+                )
+            except Exception:
+                pass
 
         try:
             # Use iterate() directly so we can throttle between pages
@@ -303,12 +338,12 @@ class AirtableClient:
                         }
                     )
 
-            # Call completion callback
+            # Call completion callback with total count
             if progress_callback:
                 try:
                     progress_callback(
-                        f"Completed fetching {total_records} records in {page_count} pages",
-                        {"pages": page_count, "records": total_records, "entity": key}
+                        f"✓ Loaded {total_records} {key} records (from {page_count} pages)",
+                        {"pages": page_count, "records": total_records, "entity": key, "completed": True}
                     )
                 except Exception:
                     pass
