@@ -2366,6 +2366,46 @@ function CreateScheduleModal({
     return false;
   })();
 
+  // Count total number of selected rules
+  const totalRuleCount = (() => {
+    let count = 0;
+
+    // Count attendance rules (1 if enabled, 0 if not)
+    if (form.rules?.attendance_rules === true) {
+      count += 1;
+    }
+
+    // Count duplicate rules
+    if (form.rules?.duplicates) {
+      for (const entity in form.rules.duplicates) {
+        count += form.rules.duplicates[entity].length;
+      }
+    }
+
+    // Count relationship rules
+    if (form.rules?.relationships) {
+      for (const entity in form.rules.relationships) {
+        count += form.rules.relationships[entity].length;
+      }
+    }
+
+    // Count required field rules
+    if (form.rules?.required_fields) {
+      for (const entity in form.rules.required_fields) {
+        count += form.rules.required_fields[entity].length;
+      }
+    }
+
+    // Count value check rules
+    if (form.rules?.value_checks) {
+      for (const entity in form.rules.value_checks) {
+        count += form.rules.value_checks[entity].length;
+      }
+    }
+
+    return count;
+  })();
+
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 sm:p-0">
       <div
@@ -3244,6 +3284,23 @@ function CreateScheduleModal({
                 </p>
               )}
             </div>
+          </div>
+        </div>
+
+        {/* Rule Count */}
+        <div className="mt-6 pt-4 border-t border-[var(--border)]">
+          <div className="text-sm text-[var(--text-muted)] text-center">
+            {totalRuleCount === 0 ? (
+              "No rules selected"
+            ) : (
+              <>
+                <span className="font-medium text-[var(--text-main)]">
+                  {totalRuleCount}
+                </span>{" "}
+                {totalRuleCount === 1 ? "rule" : "rules"} will be used for this
+                scan
+              </>
+            )}
           </div>
         </div>
 

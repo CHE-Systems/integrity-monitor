@@ -77,11 +77,6 @@ class IntegrityRunner:
         entities: List[str] | None = None,
         run_config: Dict[str, Any] | None = None
     ) -> Dict[str, Any]:
-        # DEBUG: Print run_config at entry
-        print(f"[RUNNER DEBUG] IntegrityRunner.run() called with run_config={run_config}")
-        if run_config:
-            print(f"[RUNNER DEBUG] run_config.notify_slack = {run_config.get('notify_slack')}")
-
         # Explicitly reference module-level time to avoid UnboundLocalError
         # (Python may treat time as local if used in nested scopes)
         import time as _time_module
@@ -199,13 +194,12 @@ class IntegrityRunner:
         # Store run_config for use in filtering
         self._run_config = run_config
 
-
-
         # Initialize summary to empty dict so it's always available in finally block
         summary: Dict[str, Any] = {}
 
         # Setup timeout mechanism
         timeout_triggered = threading.Event()
+        timeout_cancel_sent = threading.Event()
         timeout_timer = None
 
         def handle_timeout():
@@ -219,8 +213,24 @@ class IntegrityRunner:
                 self._firestore_writer.write_log(
                     run_id,
                     "error",
-                    f"Run exceeded maximum duration ({MAX_RUN_DURATION_SECONDS}s) and will be terminated"
+                    f"Run exceeded maximum duration ({MAX_RUN_DURATION_SECONDS}s). Cancelling and marking as timeout."
                 )
+            except Exception:
+                pass
+
+            # Signal cancellation so long-running loops can stop ASAP
+            try:
+                if cancel_event and not cancel_event.is_set():
+                    cancel_event.set()
+                    timeout_cancel_sent.set()
+                    try:
+                        self._firestore_writer.write_log(
+                            run_id,
+                            "error",
+                            "Timeout cancellation signal sent. Stopping as soon as current operation allows."
+                        )
+                    except Exception:
+                        pass
             except Exception:
                 pass
 
@@ -232,8 +242,16 @@ class IntegrityRunner:
 
         # Helper to check cancellation and timeout
         def check_cancelled():
+            nonlocal status, error_message
             # Check timeout first
             if timeout_triggered.is_set():
+                # Ensure cancellation signal is set (some code paths only call check_cancelled)
+                try:
+                    if cancel_event and not cancel_event.is_set():
+                        cancel_event.set()
+                        timeout_cancel_sent.set()
+                except Exception:
+                    pass
                 raise TimeoutError(f"Run exceeded maximum duration of {MAX_RUN_DURATION_SECONDS} seconds")
             # Then check cancellation
             if cancel_event and cancel_event.is_set():
@@ -447,8 +465,39 @@ class IntegrityRunner:
                     extra={"run_id": run_id}
                 )
 
-                # Log selected entities
+                # Write selected rules to real-time Firestore logs
                 selected_entities = run_config.get("entities", [])
+                rules_config = run_config.get("rules", {})
+                checks_config = run_config.get("checks", {})
+                
+                # Build summary of selected rules for real-time log
+                rules_summary = []
+                if rules_config.get("duplicates"):
+                    dup_count = sum(len(r) for r in rules_config["duplicates"].values())
+                    if dup_count > 0:
+                        rules_summary.append(f"duplicates: {dup_count}")
+                if rules_config.get("relationships"):
+                    rel_count = sum(len(r) for r in rules_config["relationships"].values())
+                    if rel_count > 0:
+                        rules_summary.append(f"relationships: {rel_count}")
+                if rules_config.get("required_fields"):
+                    req_count = sum(len(r) for r in rules_config["required_fields"].values())
+                    if req_count > 0:
+                        rules_summary.append(f"required_fields: {req_count}")
+                if rules_config.get("value_checks"):
+                    val_count = sum(len(r) for r in rules_config["value_checks"].values())
+                    if val_count > 0:
+                        rules_summary.append(f"value_checks: {val_count}")
+                if rules_config.get("attendance_rules"):
+                    rules_summary.append("attendance: enabled")
+                
+                # Write to real-time Firestore log
+                self._firestore_writer.write_log(
+                    run_id, "info",
+                    f"SCAN CONFIG: entities={selected_entities}, rules=[{', '.join(rules_summary) if rules_summary else 'NONE'}], checks={checks_config}"
+                )
+
+                # Log selected entities
                 logger.info(
                     f"Selected Entities: {', '.join(selected_entities) if selected_entities else 'ALL'}",
                     extra={"run_id": run_id, "selected_entities": selected_entities}
@@ -535,6 +584,11 @@ class IntegrityRunner:
                 logger.info(
                     "SCAN STARTED - No rule filtering (all rules will be used)",
                     extra={"run_id": run_id}
+                )
+                # Write to real-time Firestore log that no run_config was received
+                self._firestore_writer.write_log(
+                    run_id, "warning",
+                    f"SCAN CONFIG: run_config is {'None' if run_config is None else 'empty'} - no rule filtering applied, ALL rules will be used"
                 )
         except Exception as exc:
             # Logging failures should not affect the run
@@ -1226,15 +1280,7 @@ class IntegrityRunner:
         """
         logger.info("Performing full scan")
 
-        # DEBUG: Check school year service availability
-        logger.info(f"[RUNNER DEBUG] Building fetchers, school_year_service exists: {self._school_year_service is not None}")
-
         fetchers = build_fetchers(self._airtable_client, self._school_year_service)
-
-        # DEBUG: Check fetchers
-        logger.info(f"[RUNNER DEBUG] Built {len(fetchers)} fetchers")
-        for entity_key, fetcher in fetchers.items():
-            logger.info(f"[RUNNER DEBUG] Fetcher '{entity_key}' has school_year_service: {fetcher._school_year_service is not None}")
 
         # Filter fetchers by selected entities if provided
         if entities:
@@ -1346,7 +1392,8 @@ class IntegrityRunner:
                 return (key, [], exc)
         
         # Execute parallel fetches
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        executor = ThreadPoolExecutor(max_workers=max_workers)
+        try:
             submit_start = time.time()
             futures = {executor.submit(fetch_entity, key, fetcher): key for key, fetcher in fetchers.items()}
             submit_duration = time.time() - submit_start
@@ -1356,22 +1403,58 @@ class IntegrityRunner:
             )
             
             completion_times = {}
-            for future in as_completed(futures):
-                result_start = time.time()
-                key, data, error = future.result()
-                result_duration = time.time() - result_start
-                completion_times[key] = time.time() - parallel_fetch_start
-                
-                logger.info(
-                    f"[TIMING] Entity '{key}' result retrieved: {result_duration:.3f}s (completed at {completion_times[key]:.3f}s from start)",
-                    extra={"entity": key, "result_duration": result_duration, "completion_time": completion_times[key]}
-                )
-                
-                if error:
-                    errors[key] = error
-                else:
-                    records[key] = data
-                    counts[key] = len(data)
+            # Use a cancellable wait loop so timeouts/cancellations stop waiting on hung futures.
+            pending = set(futures.keys())
+            while pending:
+                # Check cancellation/timeout frequently while waiting for futures
+                if cancel_check:
+                    cancel_check()
+
+                done, pending = set(), pending
+                try:
+                    # Wait briefly for any futures to complete, then re-check cancellation.
+                    from concurrent.futures import wait, FIRST_COMPLETED
+                    done, pending = wait(pending, timeout=1.0, return_when=FIRST_COMPLETED)
+                except Exception:
+                    # If wait itself fails, bail out and let outer error handling handle it.
+                    raise
+
+                for future in done:
+                    result_start = time.time()
+                    key, data, error = future.result()
+                    result_duration = time.time() - result_start
+                    completion_times[key] = time.time() - parallel_fetch_start
+
+                    logger.info(
+                        f"[TIMING] Entity '{key}' result retrieved: {result_duration:.3f}s (completed at {completion_times[key]:.3f}s from start)",
+                        extra={"entity": key, "result_duration": result_duration, "completion_time": completion_times[key]}
+                    )
+
+                    if error:
+                        errors[key] = error
+                    else:
+                        records[key] = data
+                        counts[key] = len(data)
+
+            # If we were cancelled mid-wait, attempt to stop outstanding futures quickly.
+            # Note: running thread tasks cannot be forcibly killed, but this cancels queued work.
+            if cancel_check:
+                cancel_check()
+        except Exception:
+            # Critical: on timeout/cancel we must NOT block waiting for worker threads.
+            # Worker threads should stop quickly because Airtable pagination calls cancel_check each page.
+            try:
+                executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+            raise
+        finally:
+            # Normal completion path: wait for threads to finish cleanly.
+            # If the executor was already shutdown in the exception path, this is a no-op.
+            try:
+                executor.shutdown(wait=True, cancel_futures=False)
+            except Exception:
+                pass
         
         parallel_fetch_duration = time.time() - parallel_fetch_start
         logger.info(
@@ -2027,19 +2110,6 @@ class IntegrityRunner:
             logger.info("Required Field Rules Loaded: NONE")
 
         logger.info("=" * 80)
-
-        # CRITICAL DEBUG: Print the ACTUAL missing_key_data arrays
-        print("=" * 80)
-        print("FILTER DEBUG: ACTUAL missing_key_data in filtered_config")
-        print("=" * 80)
-        for entity_name, entity_schema in filtered_config.entities.items():
-            if entity_schema.missing_key_data:
-                print(f"{entity_name} has {len(entity_schema.missing_key_data)} rules:")
-                for req in entity_schema.missing_key_data:
-                    print(f"  - {req.rule_id or req.field}")
-            else:
-                print(f"{entity_name} has NO required field rules")
-        print("=" * 80)
 
         # Note: attendance_rules is handled separately in attendance.run()
         # since it's not part of SchemaConfig

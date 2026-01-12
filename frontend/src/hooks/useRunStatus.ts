@@ -100,9 +100,6 @@ export function useRunStatus(runId: string | null) {
             id: snapshot.id,
             ...data,
           } as RunStatus;
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/5d5f825f-e8a4-412f-af68-47be30198b26', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'useRunStatus.ts:87', message: 'Status update received from Firestore', data: { runId, status: newStatus.status, ended_at: newStatus.ended_at, cancelled_at: newStatus.cancelled_at }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'status-update', hypothesisId: 'H5' }) }).catch(() => { });
-          // #endregion agent log
           setRunStatus(newStatus);
           setLoading(false);
           setError(null);

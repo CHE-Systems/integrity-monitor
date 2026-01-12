@@ -249,43 +249,76 @@ export function RunsPage() {
   };
 
   const handleDelete = async (runId: string) => {
-    if (
-      !confirm(
-        "Are you sure you want to delete this run? This action cannot be undone."
-      )
-    ) {
-      return;
-    }
+    // First confirmation: Delete run?
+    const confirmDelete = window.confirm(
+      "Are you sure you want to delete this run? This action cannot be undone."
+    );
+    if (!confirmDelete) return;
+
+    // Second confirmation: Delete issues?
+    const deleteIssues = window.confirm(
+      "Also delete ALL issues found in this run? This will only delete issues associated with this specific run."
+    );
 
     setDeletingRunId(runId);
     try {
       const token = await getToken();
-      const response = await fetch(`${API_BASE}/integrity/run/${runId}`, {
-        method: "DELETE",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-      });
-
-      if (!response.ok) {
-        const errorData = await response
-          .json()
-          .catch(() => ({ error: "Failed to delete run" }));
-        throw new Error(errorData.error || "Failed to delete run");
+      if (!token) {
+        alert("Authentication required. Please sign in again.");
+        setDeletingRunId(null);
+        return;
       }
 
+      const response = await fetch(
+        `${API_BASE}/integrity/run/${runId}?delete_issues=${deleteIssues}`,
+        {
+          method: "DELETE",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+        }
+      );
+
+      if (!response.ok) {
+        let errorData;
+        try {
+          errorData = await response.json();
+        } catch {
+          errorData = {
+            error: `Server returned ${response.status}: ${response.statusText}`,
+          };
+        }
+
+        const errorMessage =
+          errorData.detail?.error ||
+          errorData.detail?.message ||
+          errorData.error ||
+          errorData.message ||
+          `Failed to delete run (${response.status})`;
+
+        throw new Error(errorMessage);
+      }
+
+      const result = await response.json();
+      const successMessage = deleteIssues && result.deleted_issues_count !== undefined
+        ? `Run deleted successfully. ${result.deleted_issues_count} issues were also deleted.`
+        : "Run deleted successfully.";
+
+      alert(successMessage);
       // The Firestore subscription will automatically update the list
     } catch (error) {
       console.error("Failed to delete run:", error);
-      let errorMessage = "Unknown error";
+      let errorMessage = "Failed to delete run. Please try again.";
+
       if (error instanceof TypeError && error.message.includes("fetch")) {
         errorMessage =
           "Backend server is not available. Please ensure the backend is running.";
       } else if (error instanceof Error) {
         errorMessage = error.message;
       }
-      alert(`Failed to delete run: ${errorMessage}`);
+
+      alert(errorMessage);
     } finally {
       setDeletingRunId(null);
     }
@@ -1035,17 +1068,18 @@ export function RunsPage() {
                             )}
                           </button>
                         )}
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            if (run.run_id || run.id) {
-                              handleDelete(run.run_id || run.id);
-                            }
-                          }}
-                          disabled={deletingRunId === (run.run_id || run.id)}
-                          className="text-sm text-red-600 hover:text-red-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
-                          title="Delete run"
-                        >
+                        {!isRunning && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (run.run_id || run.id) {
+                                handleDelete(run.run_id || run.id);
+                              }
+                            }}
+                            disabled={deletingRunId === (run.run_id || run.id)}
+                            className="text-sm text-red-600 hover:text-red-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
+                            title="Delete run"
+                          >
                           {deletingRunId === (run.run_id || run.id) ? (
                             "Deleting..."
                           ) : (
@@ -1066,7 +1100,8 @@ export function RunsPage() {
                               Delete
                             </>
                           )}
-                        </button>
+                          </button>
+                        )}
                         <svg
                           className={`w-5 h-5 text-[var(--text-muted)] transition-transform ${
                             isExpanded ? "rotate-180" : ""

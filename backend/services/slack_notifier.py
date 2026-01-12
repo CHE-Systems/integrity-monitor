@@ -45,55 +45,16 @@ class SlackNotifier:
         2. Environment variable (SLACK_WEBHOOK_URL)
         3. Google Secret Manager (slack-webhook-url)
         """
-        # #region agent log
-        debug_log_path = '/Users/joshuaedwards/Library/CloudStorage/GoogleDrive-jedwards@che.school/My Drive/CHE/che-data-integrity-monitor/.cursor/debug.log'
-        try:
-            import json as _json
-            import time
-            with open(debug_log_path, 'a') as f:
-                f.write(_json.dumps({"sessionId":"debug-session","runId":"webhook-check","hypothesisId":"C","location":"slack_notifier.py:35","message":"_get_webhook_url entry","data":{"has_direct_config":self._webhook_url is not None},"timestamp":int(time.time()*1000)})+'\n')
-        except: pass
-        # #endregion agent log
-        print("[SLACK DEBUG] _get_webhook_url: Checking webhook sources...")
-        logger.info("[SLACK DEBUG] _get_webhook_url: Checking webhook sources...")
-
         if self._webhook_url:
-            print("[SLACK DEBUG] _get_webhook_url: Found direct config webhook URL")
-            logger.info("[SLACK DEBUG] _get_webhook_url: Found direct config webhook URL")
-            # #region agent log
-            try:
-                with open(debug_log_path, 'a') as f:
-                    f.write(_json.dumps({"sessionId":"debug-session","runId":"webhook-check","hypothesisId":"C","location":"slack_notifier.py:47","message":"Found direct config webhook","data":{},"timestamp":int(time.time()*1000)})+'\n')
-            except: pass
-            # #endregion agent log
             return self._webhook_url
 
         # Try environment variable
         env_webhook = os.getenv("SLACK_WEBHOOK_URL")
         if env_webhook:
-            print("[SLACK DEBUG] _get_webhook_url: Found SLACK_WEBHOOK_URL env var")
-            logger.info("[SLACK DEBUG] _get_webhook_url: Found SLACK_WEBHOOK_URL env var")
-            # #region agent log
-            try:
-                with open(debug_log_path, 'a') as f:
-                    f.write(_json.dumps({"sessionId":"debug-session","runId":"webhook-check","hypothesisId":"C","location":"slack_notifier.py:53","message":"Found SLACK_WEBHOOK_URL env var","data":{},"timestamp":int(time.time()*1000)})+'\n')
-            except: pass
-            # #endregion agent log
             return env_webhook
-
-        print("[SLACK DEBUG] _get_webhook_url: No env var, checking Secret Manager...")
-        logger.info("[SLACK DEBUG] _get_webhook_url: No env var, checking Secret Manager...")
 
         # Try Google Secret Manager
         if self._cached_secret_webhook:
-            print("[SLACK DEBUG] _get_webhook_url: Using cached Secret Manager webhook")
-            logger.info("[SLACK DEBUG] _get_webhook_url: Using cached Secret Manager webhook")
-            # #region agent log
-            try:
-                with open(debug_log_path, 'a') as f:
-                    f.write(_json.dumps({"sessionId":"debug-session","runId":"webhook-check","hypothesisId":"C","location":"slack_notifier.py:60","message":"Using cached Secret Manager webhook","data":{},"timestamp":int(time.time()*1000)})+'\n')
-            except: pass
-            # #endregion agent log
             return self._cached_secret_webhook
 
         try:
@@ -102,80 +63,26 @@ class SlackNotifier:
             client = secretmanager.SecretManagerServiceClient()
             project_id = os.getenv("GCP_PROJECT_ID") or os.getenv("GOOGLE_CLOUD_PROJECT")
 
-            print(f"[SLACK DEBUG] _get_webhook_url: GCP project ID = {project_id}")
-            logger.info(f"[SLACK DEBUG] _get_webhook_url: GCP project ID = {project_id}")
-            # #region agent log
-            try:
-                with open(debug_log_path, 'a') as f:
-                    f.write(_json.dumps({"sessionId":"debug-session","runId":"webhook-check","hypothesisId":"D","location":"slack_notifier.py:68","message":"Checking GCP project ID","data":{"project_id":project_id},"timestamp":int(time.time()*1000)})+'\n')
-            except: pass
-            # #endregion agent log
-
             if not project_id:
-                print("[SLACK DEBUG] _get_webhook_url: No GCP project ID found, cannot access Secret Manager")
-                logger.warning("[SLACK DEBUG] _get_webhook_url: No GCP project ID found, cannot access Secret Manager")
-                # #region agent log
-                try:
-                    with open(debug_log_path, 'a') as f:
-                        f.write(_json.dumps({"sessionId":"debug-session","runId":"webhook-check","hypothesisId":"D","location":"slack_notifier.py:71","message":"No GCP project ID found","data":{},"timestamp":int(time.time()*1000)})+'\n')
-                except: pass
-                # #endregion agent log
+                logger.warning("No GCP project ID found, cannot access Secret Manager")
                 return None
 
             secret_name = f"projects/{project_id}/secrets/slack-webhook-url/versions/latest"
-            print(f"[SLACK DEBUG] _get_webhook_url: Accessing secret: {secret_name}")
-            logger.info(f"[SLACK DEBUG] _get_webhook_url: Accessing secret: {secret_name}")
-            # #region agent log
-            try:
-                with open(debug_log_path, 'a') as f:
-                    f.write(_json.dumps({"sessionId":"debug-session","runId":"webhook-check","hypothesisId":"C","location":"slack_notifier.py:75","message":"Attempting to access secret","data":{"secret_name":secret_name},"timestamp":int(time.time()*1000)})+'\n')
-            except: pass
-            # #endregion agent log
 
             try:
                 response = client.access_secret_version(request={"name": secret_name})
                 self._cached_secret_webhook = response.payload.data.decode("UTF-8")
-                print("[SLACK DEBUG] _get_webhook_url: ✅ Successfully retrieved webhook from Secret Manager")
-                logger.info("[SLACK DEBUG] _get_webhook_url: ✅ Successfully retrieved webhook from Secret Manager")
-                # #region agent log
-                try:
-                    masked_url = _mask_url(self._cached_secret_webhook)
-                    with open(debug_log_path, 'a') as f:
-                        f.write(_json.dumps({"sessionId":"debug-session","runId":"webhook-check","hypothesisId":"C","location":"slack_notifier.py:81","message":"Successfully retrieved webhook from Secret Manager","data":{"masked_url":masked_url},"timestamp":int(time.time()*1000)})+'\n')
-                except: pass
-                # #endregion agent log
                 return self._cached_secret_webhook
             except Exception as e:
                 # Secret doesn't exist or access denied - this is expected if not configured
-                print(f"[SLACK DEBUG] _get_webhook_url: Could not access Slack webhook secret: {e}")
-                logger.warning(f"[SLACK DEBUG] _get_webhook_url: Could not access Slack webhook secret: {e}")
-                # #region agent log
-                try:
-                    with open(debug_log_path, 'a') as f:
-                        f.write(_json.dumps({"sessionId":"debug-session","runId":"webhook-check","hypothesisId":"C","location":"slack_notifier.py:84","message":"Could not access Slack webhook secret","data":{"error_type":type(e).__name__,"error":str(e)},"timestamp":int(time.time()*1000)})+'\n')
-                except: pass
-                # #endregion agent log
+                logger.warning(f"Could not access Slack webhook secret: {e}")
                 return None
 
         except ImportError:
-            print("[SLACK DEBUG] _get_webhook_url: google-cloud-secret-manager not installed")
-            logger.warning("[SLACK DEBUG] _get_webhook_url: google-cloud-secret-manager not installed")
-            # #region agent log
-            try:
-                with open(debug_log_path, 'a') as f:
-                    f.write(_json.dumps({"sessionId":"debug-session","runId":"webhook-check","hypothesisId":"C","location":"slack_notifier.py:88","message":"google-cloud-secret-manager not installed","data":{},"timestamp":int(time.time()*1000)})+'\n')
-            except: pass
-            # #endregion agent log
+            logger.warning("google-cloud-secret-manager not installed")
             return None
         except Exception as e:
-            print(f"[SLACK DEBUG] _get_webhook_url: Error accessing Secret Manager: {e}")
-            logger.warning(f"[SLACK DEBUG] _get_webhook_url: Error accessing Secret Manager: {e}")
-            # #region agent log
-            try:
-                with open(debug_log_path, 'a') as f:
-                    f.write(_json.dumps({"sessionId":"debug-session","runId":"webhook-check","hypothesisId":"C","location":"slack_notifier.py:91","message":"Error accessing Secret Manager","data":{"error_type":type(e).__name__,"error":str(e)},"timestamp":int(time.time()*1000)})+'\n')
-            except: pass
-            # #endregion agent log
+            logger.warning(f"Error accessing Secret Manager: {e}")
             return None
 
     def _get_status_emoji(self, status: str) -> str:
@@ -564,71 +471,28 @@ class SlackNotifier:
         Returns:
             True if notification was sent successfully, False otherwise
         """
-        logger.info(
-            f"[SLACK DEBUG] send_notification called with: run_id={run_id}, status={status}, "
-            f"trigger={trigger}, duration_ms={duration_ms}, issue_counts={issue_counts}, "
-            f"error_message={error_message}"
-        )
-
         # Check if we should notify for this status
         should_notify_result = self.should_notify(status)
-        print(f"[SLACK DEBUG] should_notify('{status}') = {should_notify_result} (notify statuses: warning, critical, error, timeout)")
-        logger.info(
-            f"[SLACK DEBUG] should_notify('{status}') = {should_notify_result} "
-            f"(notify statuses: warning, critical, error, timeout)"
-        )
-        # #region agent log
-        debug_log_path = '/Users/joshuaedwards/Library/CloudStorage/GoogleDrive-jedwards@che.school/My Drive/CHE/che-data-integrity-monitor/.cursor/debug.log'
-        try:
-            import json as _json
-            import time
-            with open(debug_log_path, 'a') as f:
-                f.write(_json.dumps({"sessionId":"debug-session","runId":run_id,"hypothesisId":"E","location":"slack_notifier.py:308","message":"should_notify check","data":{"status":status,"should_notify":should_notify_result},"timestamp":int(time.time()*1000)})+'\n')
-        except: pass
-        # #endregion agent log
 
         if not should_notify_result:
-            print(f"[SLACK DEBUG] Skipping notification - status '{status}' not in notify list")
             logger.info(
-                f"[SLACK DEBUG] Skipping notification - status '{status}' not in notify list",
+                f"Skipping notification - status '{status}' not in notify list",
                 extra={"run_id": run_id, "status": status},
             )
-            # #region agent log
-            try:
-                with open(debug_log_path, 'a') as f:
-                    f.write(_json.dumps({"sessionId":"debug-session","runId":run_id,"hypothesisId":"E","location":"slack_notifier.py:315","message":"Skipping notification - status not in notify list","data":{"status":status},"timestamp":int(time.time()*1000)})+'\n')
-            except: pass
-            # #endregion agent log
             return False
 
-        print("[SLACK DEBUG] Attempting to get webhook URL...")
-        logger.info("[SLACK DEBUG] Attempting to get webhook URL...")
         webhook_url = self._get_webhook_url()
 
         if not webhook_url:
-            print("[SLACK DEBUG] Slack webhook URL not configured! Checked: 1) direct config, 2) SLACK_WEBHOOK_URL env var, 3) Secret Manager 'slack-webhook-url'")
             logger.warning(
-                "[SLACK DEBUG] Slack webhook URL not configured! Checked: "
-                "1) direct config, 2) SLACK_WEBHOOK_URL env var, 3) Secret Manager 'slack-webhook-url'",
+                "Slack webhook URL not configured",
                 extra={"run_id": run_id},
             )
-            # #region agent log
-            try:
-                with open(debug_log_path, 'a') as f:
-                    f.write(_json.dumps({"sessionId":"debug-session","runId":run_id,"hypothesisId":"C","location":"slack_notifier.py:324","message":"Webhook URL not configured","data":{},"timestamp":int(time.time()*1000)})+'\n')
-            except: pass
-            # #endregion agent log
             return False
-
-        # Log masked webhook URL for debugging
-        masked_url = _mask_url(webhook_url)
-        logger.info(f"[SLACK DEBUG] Webhook URL found: {masked_url}")
 
         try:
             import urllib.request
             import urllib.error
-
-            logger.info("[SLACK DEBUG] Building Slack message payload...")
             message = self._build_message(
                 run_id=run_id,
                 status=status,

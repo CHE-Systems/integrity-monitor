@@ -964,3 +964,57 @@ class FirestoreClient:
                 exc_info=True,
             )
             raise
+    
+    def delete_issues_for_run(self, run_id: str) -> int:
+        """Delete all issues associated with a specific run.
+        
+        Args:
+            run_id: Run identifier to delete issues for
+            
+        Returns:
+            Number of issues deleted
+        """
+        try:
+            client = self._get_client()
+            issues_ref = client.collection(self._config.issues_collection)
+            
+            # Query all issues where run_id matches
+            query = issues_ref.where("run_id", "==", run_id)
+            issues = query.stream()
+            
+            deleted_count = 0
+            batch = client.batch()
+            batch_count = 0
+            
+            for issue_doc in issues:
+                batch.delete(issue_doc.reference)
+                batch_count += 1
+                deleted_count += 1
+                
+                # Firestore batch limit is 500 operations
+                if batch_count >= 500:
+                    batch.commit()
+                    batch = client.batch()
+                    batch_count = 0
+            
+            # Commit remaining issue deletions
+            if batch_count > 0:
+                batch.commit()
+            
+            logger.info(
+                "Deleted issues for run",
+                extra={
+                    "run_id": run_id,
+                    "deleted_count": deleted_count,
+                    "collection": self._config.issues_collection,
+                },
+            )
+            
+            return deleted_count
+        except Exception as exc:
+            logger.error(
+                "Failed to delete issues for run",
+                extra={"run_id": run_id, "error": str(exc)},
+                exc_info=True,
+            )
+            raise

@@ -24,6 +24,7 @@ export function RunStatusPage() {
   const { logs, loading: logsLoading } = useRunLogs(runId || null);
   const { getToken } = useAuth();
   const [isCancelling, setIsCancelling] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
   const [activeIssueTab, setActiveIssueTab] = useState<"new" | "all">("new");
   const logsContainerRef = useRef<HTMLDivElement>(null);
   const shouldAutoScrollRef = useRef(true);
@@ -61,24 +62,6 @@ export function RunStatusPage() {
       isCancelling &&
       (statusLower === "cancelled" || statusLower === "canceled")
     ) {
-      // #region agent log
-      fetch(
-        "http://127.0.0.1:7242/ingest/5d5f825f-e8a4-412f-af68-47be30198b26",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            location: "RunStatusPage.tsx:39",
-            message: "Status changed to cancelled, resetting isCancelling",
-            data: { statusLower, previousIsCancelling: isCancelling },
-            timestamp: Date.now(),
-            sessionId: "debug-session",
-            runId: "cancel-action",
-            hypothesisId: "H5",
-          }),
-        }
-      ).catch(() => {});
-      // #endregion agent log
       setIsCancelling(false);
     }
   }, [statusLower, isCancelling]);
@@ -508,29 +491,6 @@ export function RunStatusPage() {
             <button
               onClick={async () => {
                 if (!runId || isCancelling) return;
-                // #region agent log
-                fetch(
-                  "http://127.0.0.1:7242/ingest/5d5f825f-e8a4-412f-af68-47be30198b26",
-                  {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                      location: "RunStatusPage.tsx:247",
-                      message: "Cancel button clicked",
-                      data: {
-                        runId,
-                        isCancelling,
-                        currentStatus: runStatus?.status,
-                        isRunning,
-                      },
-                      timestamp: Date.now(),
-                      sessionId: "debug-session",
-                      runId: "cancel-action",
-                      hypothesisId: "H4",
-                    }),
-                  }
-                ).catch(() => {});
-                // #endregion agent log
                 setIsCancelling(true);
                 try {
                   const token = await getToken();
@@ -540,24 +500,6 @@ export function RunStatusPage() {
                     return;
                   }
 
-                  // #region agent log
-                  fetch(
-                    "http://127.0.0.1:7242/ingest/5d5f825f-e8a4-412f-af68-47be30198b26",
-                    {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({
-                        location: "RunStatusPage.tsx:257",
-                        message: "Sending cancel request",
-                        data: { runId, apiBase: API_BASE },
-                        timestamp: Date.now(),
-                        sessionId: "debug-session",
-                        runId: "cancel-action",
-                        hypothesisId: "H6",
-                      }),
-                    }
-                  ).catch(() => {});
-                  // #endregion agent log
                   const response = await fetch(
                     `${API_BASE}/integrity/run/${runId}/cancel`,
                     {
@@ -568,29 +510,6 @@ export function RunStatusPage() {
                       },
                     }
                   );
-
-                  // #region agent log
-                  fetch(
-                    "http://127.0.0.1:7242/ingest/5d5f825f-e8a4-412f-af68-47be30198b26",
-                    {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({
-                        location: "RunStatusPage.tsx:268",
-                        message: "Cancel response received",
-                        data: {
-                          ok: response.ok,
-                          status: response.status,
-                          statusText: response.statusText,
-                        },
-                        timestamp: Date.now(),
-                        sessionId: "debug-session",
-                        runId: "cancel-action",
-                        hypothesisId: "H6",
-                      }),
-                    }
-                  ).catch(() => {});
-                  // #endregion agent log
 
                   if (!response.ok) {
                     let errorData;
@@ -612,51 +531,9 @@ export function RunStatusPage() {
                     throw new Error(errorMessage);
                   }
 
-                  // #region agent log
-                  fetch(
-                    "http://127.0.0.1:7242/ingest/5d5f825f-e8a4-412f-af68-47be30198b26",
-                    {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({
-                        location: "RunStatusPage.tsx:288",
-                        message:
-                          "Cancel request succeeded, waiting for status update",
-                        data: { runId, currentStatus: runStatus?.status },
-                        timestamp: Date.now(),
-                        sessionId: "debug-session",
-                        runId: "cancel-action",
-                        hypothesisId: "H5",
-                      }),
-                    }
-                  ).catch(() => {});
-                  // #endregion agent log
                   // Status will update via real-time subscription
                   // Keep isCancelling true until status actually changes
                 } catch (error) {
-                  // #region agent log
-                  fetch(
-                    "http://127.0.0.1:7242/ingest/5d5f825f-e8a4-412f-af68-47be30198b26",
-                    {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({
-                        location: "RunStatusPage.tsx:293",
-                        message: "Cancel request failed",
-                        data: {
-                          error:
-                            error instanceof Error
-                              ? error.message
-                              : String(error),
-                        },
-                        timestamp: Date.now(),
-                        sessionId: "debug-session",
-                        runId: "cancel-action",
-                        hypothesisId: "H6",
-                      }),
-                    }
-                  ).catch(() => {});
-                  // #endregion agent log
                   console.error("Failed to cancel run:", error);
                   let errorMessage = "Failed to cancel run. Please try again.";
 
@@ -678,6 +555,93 @@ export function RunStatusPage() {
               className="rounded-lg border border-red-500 px-4 py-2 text-red-600 hover:bg-red-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isCancelling ? "Cancelling..." : "Cancel Scan"}
+            </button>
+          )}
+          {!isRunning && (
+            <button
+              onClick={async () => {
+                if (!runId || isDeleting) return;
+
+                // First confirmation: Delete run?
+                const confirmDelete = window.confirm(
+                  "Are you sure you want to delete this run? This action cannot be undone."
+                );
+                if (!confirmDelete) return;
+
+                // Second confirmation: Delete issues?
+                const deleteIssues = window.confirm(
+                  "Also delete ALL issues found in this run? This will only delete issues associated with this specific run."
+                );
+
+                setIsDeleting(true);
+                try {
+                  const token = await getToken();
+                  if (!token) {
+                    alert("Authentication required. Please sign in again.");
+                    setIsDeleting(false);
+                    return;
+                  }
+
+                  const response = await fetch(
+                    `${API_BASE}/integrity/run/${runId}?delete_issues=${deleteIssues}`,
+                    {
+                      method: "DELETE",
+                      headers: {
+                        Authorization: `Bearer ${token}`,
+                        "Content-Type": "application/json",
+                      },
+                    }
+                  );
+
+                  if (!response.ok) {
+                    let errorData;
+                    try {
+                      errorData = await response.json();
+                    } catch {
+                      errorData = {
+                        error: `Server returned ${response.status}: ${response.statusText}`,
+                      };
+                    }
+
+                    const errorMessage =
+                      errorData.detail?.error ||
+                      errorData.detail?.message ||
+                      errorData.error ||
+                      errorData.message ||
+                      `Failed to delete run (${response.status})`;
+
+                    throw new Error(errorMessage);
+                  }
+
+                  const result = await response.json();
+                  const successMessage = deleteIssues && result.deleted_issues_count !== undefined
+                    ? `Run deleted successfully. ${result.deleted_issues_count} issues were also deleted.`
+                    : "Run deleted successfully.";
+
+                  alert(successMessage);
+                  navigate("/runs");
+                } catch (error) {
+                  console.error("Failed to delete run:", error);
+                  let errorMessage = "Failed to delete run. Please try again.";
+
+                  if (
+                    error instanceof TypeError &&
+                    error.message.includes("fetch")
+                  ) {
+                    errorMessage =
+                      "Backend server is not available. Please ensure the backend is running.";
+                  } else if (error instanceof Error) {
+                    errorMessage = error.message;
+                  }
+
+                  alert(errorMessage);
+                  setIsDeleting(false);
+                }
+              }}
+              disabled={isDeleting}
+              className="rounded-lg border border-red-500 px-4 py-2 text-red-600 hover:bg-red-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isDeleting ? "Deleting..." : "Delete Run"}
             </button>
           )}
         </div>

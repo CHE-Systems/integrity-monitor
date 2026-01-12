@@ -64,191 +64,24 @@ export function AirtableSchemaProvider({ children }: { children: ReactNode }) {
               "Fetching remote schema failed, trying local fallback",
               err
             );
-            // #region agent log
-            fetch(
-              "http://127.0.0.1:7242/ingest/5d5f825f-e8a4-412f-af68-47be30198b26",
-              {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  location: "AirtableSchemaContext.tsx:63",
-                  message: "Attempting local schema fallback",
-                  data: {
-                    remoteError:
-                      err instanceof Error ? err.message : String(err),
-                  },
-                  timestamp: Date.now(),
-                  sessionId: "debug-session",
-                  runId: "schema-fetch",
-                  hypothesisId: "H1",
-                }),
-              }
-            ).catch(() => {});
-            // #endregion agent log
             const localResponse = await fetch("/airtable-schema.json");
-            // #region agent log
-            fetch(
-              "http://127.0.0.1:7242/ingest/5d5f825f-e8a4-412f-af68-47be30198b26",
-              {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  location: "AirtableSchemaContext.tsx:65",
-                  message: "Local response received",
-                  data: {
-                    ok: localResponse.ok,
-                    status: localResponse.status,
-                    statusText: localResponse.statusText,
-                    contentType: localResponse.headers.get("content-type"),
-                  },
-                  timestamp: Date.now(),
-                  sessionId: "debug-session",
-                  runId: "schema-fetch",
-                  hypothesisId: "H1",
-                }),
-              }
-            ).catch(() => {});
-            // #endregion agent log
             if (localResponse.ok) {
               const contentType =
                 localResponse.headers.get("content-type") || "";
-              // #region agent log
-              fetch(
-                "http://127.0.0.1:7242/ingest/5d5f825f-e8a4-412f-af68-47be30198b26",
-                {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({
-                    location: "AirtableSchemaContext.tsx:68",
-                    message: "Checking content type before JSON parse",
-                    data: {
-                      contentType,
-                      isJson: contentType.includes("application/json"),
-                    },
-                    timestamp: Date.now(),
-                    sessionId: "debug-session",
-                    runId: "schema-fetch",
-                    hypothesisId: "H2",
-                  }),
-                }
-              ).catch(() => {});
-              // #endregion agent log
               if (!contentType.includes("application/json")) {
-                // #region agent log
-                fetch(
-                  "http://127.0.0.1:7242/ingest/5d5f825f-e8a4-412f-af68-47be30198b26",
-                  {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                      location: "AirtableSchemaContext.tsx:70",
-                      message: "Content type is not JSON, reading as text",
-                      data: { contentType },
-                      timestamp: Date.now(),
-                      sessionId: "debug-session",
-                      runId: "schema-fetch",
-                      hypothesisId: "H2",
-                    }),
-                  }
-                ).catch(() => {});
-                // #endregion agent log
-                const text = await localResponse.text();
-                // #region agent log
-                fetch(
-                  "http://127.0.0.1:7242/ingest/5d5f825f-e8a4-412f-af68-47be30198b26",
-                  {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                      location: "AirtableSchemaContext.tsx:72",
-                      message: "Response text preview",
-                      data: {
-                        textPreview: text.substring(0, 100),
-                        isHtml: text.trim().startsWith("<!"),
-                      },
-                      timestamp: Date.now(),
-                      sessionId: "debug-session",
-                      runId: "schema-fetch",
-                      hypothesisId: "H1",
-                    }),
-                  }
-                ).catch(() => {});
-                // #endregion agent log
                 throw new Error(
                   `Expected JSON but received ${contentType}. The file /airtable-schema.json may not exist in production.`
                 );
               }
               const localData = await localResponse.json();
-              // #region agent log
-              fetch(
-                "http://127.0.0.1:7242/ingest/5d5f825f-e8a4-412f-af68-47be30198b26",
-                {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({
-                    location: "AirtableSchemaContext.tsx:75",
-                    message: "Local schema parsed successfully",
-                    data: { hasSchema: !!localData },
-                    timestamp: Date.now(),
-                    sessionId: "debug-session",
-                    runId: "schema-fetch",
-                    hypothesisId: "H1",
-                  }),
-                }
-              ).catch(() => {});
-              // #endregion agent log
               setSchema(localData);
               setError(null); // Clear error if fallback succeeds
             } else {
-              // #region agent log
-              fetch(
-                "http://127.0.0.1:7242/ingest/5d5f825f-e8a4-412f-af68-47be30198b26",
-                {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({
-                    location: "AirtableSchemaContext.tsx:79",
-                    message: "Local response not ok",
-                    data: {
-                      status: localResponse.status,
-                      statusText: localResponse.statusText,
-                    },
-                    timestamp: Date.now(),
-                    sessionId: "debug-session",
-                    runId: "schema-fetch",
-                    hypothesisId: "H1",
-                  }),
-                }
-              ).catch(() => {});
-              // #endregion agent log
               setError(
                 err instanceof Error ? err.message : "Failed to load schema"
               );
             }
           } catch (fallbackErr) {
-            // #region agent log
-            fetch(
-              "http://127.0.0.1:7242/ingest/5d5f825f-e8a4-412f-af68-47be30198b26",
-              {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  location: "AirtableSchemaContext.tsx:82",
-                  message: "Fallback error caught",
-                  data: {
-                    fallbackError:
-                      fallbackErr instanceof Error
-                        ? fallbackErr.message
-                        : String(fallbackErr),
-                  },
-                  timestamp: Date.now(),
-                  sessionId: "debug-session",
-                  runId: "schema-fetch",
-                  hypothesisId: "H3",
-                }),
-              }
-            ).catch(() => {});
-            // #endregion agent log
             setError(
               err instanceof Error ? err.message : "Failed to load schema"
             );

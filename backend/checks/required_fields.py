@@ -20,14 +20,17 @@ logger = logging.getLogger(__name__)
 
 def run(records: Dict[str, list], schema_config: SchemaConfig) -> List[IssuePayload]:
     issues: List[IssuePayload] = []
-    
+
+    # Track field IDs that have already been warned about to avoid spam
+    warned_field_ids = set()
+
     # Count rules per entity
     entity_rule_counts = {
         entity: len(entity_schema.missing_key_data)
         for entity, entity_schema in schema_config.entities.items()
         if entity_schema.missing_key_data
     }
-    
+
     if entity_rule_counts:
         logger.info(
             "Required fields check: processing entities",
@@ -86,7 +89,7 @@ def run(records: Dict[str, list], schema_config: SchemaConfig) -> List[IssuePayl
             for req in requirements:
                 if not matches_condition(fields, req.condition_field, req.condition_value):
                     continue
-                if _violates(fields, req):
+                if _violates(fields, req, warned_field_ids):
                     rule_id = req.rule_id or f"required.{entity_name}.{req.field}"
                     issue_key = f"{rule_id}:{record_id}"
                     
@@ -147,17 +150,17 @@ def run(records: Dict[str, list], schema_config: SchemaConfig) -> List[IssuePayl
     return issues
 
 
-def _violates(fields: Dict[str, Any], req: FieldRequirement) -> bool:
+def _violates(fields: Dict[str, Any], req: FieldRequirement, warned_field_ids: set) -> bool:
     """Check if a record violates a required field requirement.
-    
+
     Returns True if the field is missing/invalid, False otherwise.
     """
     # Use the field reference (should be field ID if available, otherwise field name)
     field_ref = req.field
-    
+
     # Try to get the field value
     primary_value = get_field(fields, field_ref)
-    
+
     # Enhanced logging for debugging field resolution issues
     is_field_id = field_ref.startswith("fld") and len(field_ref) >= 14
     logger.debug(
@@ -172,11 +175,12 @@ def _violates(fields: Dict[str, Any], req: FieldRequirement) -> bool:
             "field_keys_sample": [k[:20] + "..." if len(k) > 20 else k for k in list(fields.keys())[:10]],
         }
     )
-    
-    # If field not found and we're using a field ID, log a warning
-    if primary_value is None and is_field_id:
+
+    # If field not found and we're using a field ID, log a warning (only once per field ID)
+    if primary_value is None and is_field_id and field_ref not in warned_field_ids:
+        warned_field_ids.add(field_ref)
         logger.warning(
-            f"Field ID {field_ref} not found in record. This may indicate a schema mismatch.",
+            f"Field ID {field_ref} not found in record. This may indicate a schema mismatch. (Further warnings for this field will be suppressed)",
             extra={
                 "field_id": field_ref,
                 "available_keys_count": len(fields),

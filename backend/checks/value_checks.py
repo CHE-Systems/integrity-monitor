@@ -24,7 +24,10 @@ logger = logging.getLogger(__name__)
 
 def run(records: Dict[str, list], schema_config: SchemaConfig) -> List[IssuePayload]:
     issues: List[IssuePayload] = []
-    
+
+    # Track field IDs that have already been warned about to avoid spam
+    warned_field_ids = set()
+
     # Group value checks by source_entity (or entity if not specified)
     # This allows rules stored under one entity to check records from another
     checks_by_source: Dict[str, List[Tuple[str, ValueCheck]]] = defaultdict(list)
@@ -118,9 +121,9 @@ def run(records: Dict[str, list], schema_config: SchemaConfig) -> List[IssuePayl
                 # Check condition if specified
                 if not matches_condition(fields, check.condition_field, check.condition_value):
                     continue
-                
+
                 # Check if field has a value (flag if it does)
-                if _has_value(fields, check):
+                if _has_value(fields, check, warned_field_ids):
                     rule_id = check.rule_id or f"value_check.{rule_entity}.{check.field}"
                     issue_key = f"{rule_id}:{record_id}"
                     
@@ -182,18 +185,18 @@ def run(records: Dict[str, list], schema_config: SchemaConfig) -> List[IssuePayl
     return issues
 
 
-def _has_value(fields: Dict[str, Any], check: ValueCheck) -> bool:
+def _has_value(fields: Dict[str, Any], check: ValueCheck, warned_field_ids: set) -> bool:
     """Check if a record has a value in the specified field.
-    
+
     Returns True if the field has a value (should be flagged), False otherwise.
     This is the opposite of required_fields - we flag when a value IS present.
     """
     # Use the field reference (should be field ID if available, otherwise field name)
     field_ref = check.field
-    
+
     # Try to get the field value
     field_value = get_field(fields, field_ref)
-    
+
     # Enhanced logging for debugging field resolution issues
     is_field_id = field_ref.startswith("fld") and len(field_ref) >= 14
     logger.debug(
@@ -208,11 +211,12 @@ def _has_value(fields: Dict[str, Any], check: ValueCheck) -> bool:
             "field_keys_sample": [k[:20] + "..." if len(k) > 20 else k for k in list(fields.keys())[:10]],
         }
     )
-    
-    # If field not found and we're using a field ID, log a warning
-    if field_value is None and is_field_id:
+
+    # If field not found and we're using a field ID, log a warning (only once per field ID)
+    if field_value is None and is_field_id and field_ref not in warned_field_ids:
+        warned_field_ids.add(field_ref)
         logger.warning(
-            f"Field ID {field_ref} not found in record. This may indicate a schema mismatch.",
+            f"Field ID {field_ref} not found in record. This may indicate a schema mismatch. (Further warnings for this field will be suppressed)",
             extra={
                 "field_id": field_ref,
                 "available_keys_count": len(fields),

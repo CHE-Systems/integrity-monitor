@@ -45,6 +45,7 @@ fi
 
 REGION=${CLOUD_RUN_REGION:-us-central1}
 SERVICE_NAME="integrity-runner"
+ARTIFACT_REGISTRY=${ARTIFACT_REGISTRY:-integrity-monitor}
 
 echo -e "${BLUE}╔════════════════════════════════════════╗${NC}"
 echo -e "${BLUE}║   CHE Data Integrity Monitor          ║${NC}"
@@ -424,17 +425,75 @@ if [ "$DEPLOY_BACKEND" = true ]; then
 
     # Create temporary env-vars file to handle commas in ALLOWED_ORIGINS value
     # Note: gcloud requires YAML or JSON format, not plain KEY=VALUE
-    ALLOWED_ORIGINS_VALUE="${ALLOWED_ORIGINS:-https://data-integrity.che.systems,https://data-integrity-monitor.web.app,https://data-integrity-monitor.firebaseapp.com}"
+    # Changed default to '*' to match redeploy-backend.sh and ensure maximum compatibility
+    ALLOWED_ORIGINS_VALUE="${ALLOWED_ORIGINS:-*}"
     ENV_VARS_FILE=$(mktemp)
     cat > "$ENV_VARS_FILE" <<EOF
 ALLOWED_ORIGINS: "${ALLOWED_ORIGINS_VALUE}"
 AIRTABLE_MIN_REQUEST_INTERVAL: "0.05"
 EOF
 
-    # Build base deploy command
+    # ------------------------------------------------------------------
+    # Build backend image with NO CACHE (prevents Cloud Build layer reuse)
+    # This is critical when you need to guarantee Cloud Run is running the
+    # exact backend code currently in the repo.
+    # ------------------------------------------------------------------
+    print_status "Ensuring Artifact Registry repository exists (${ARTIFACT_REGISTRY} in ${REGION})..."
+    set +e
+    gcloud artifacts repositories describe "${ARTIFACT_REGISTRY}" \
+      --location "${REGION}" \
+      --project "${PROJECT_ID}" \
+      >/dev/null 2>&1
+    AR_EXISTS=$?
+    set -e
+
+    if [ $AR_EXISTS -ne 0 ]; then
+        print_warning "Artifact Registry repo '${ARTIFACT_REGISTRY}' not found. Creating it..."
+        # Ensure Artifact Registry API is enabled (safe to call repeatedly)
+        if ! gcloud services enable artifactregistry.googleapis.com --project "${PROJECT_ID}" >/dev/null 2>&1; then
+            print_error "Failed to enable Artifact Registry API"
+            rm -f "$ENV_VARS_FILE"
+            exit 1
+        fi
+
+        if ! gcloud artifacts repositories create "${ARTIFACT_REGISTRY}" \
+          --repository-format=docker \
+          --location "${REGION}" \
+          --description "Docker repo for ${SERVICE_NAME}" \
+          --project "${PROJECT_ID}" >/dev/null 2>&1; then
+            print_error "Failed to create Artifact Registry repo '${ARTIFACT_REGISTRY}' in ${REGION}"
+            print_warning "You may need permissions: Artifact Registry Admin (roles/artifactregistry.admin)"
+            rm -f "$ENV_VARS_FILE"
+            exit 1
+        fi
+        print_success "Created Artifact Registry repo: ${ARTIFACT_REGISTRY}"
+    else
+        print_success "Artifact Registry repo exists: ${ARTIFACT_REGISTRY}"
+    fi
+
+    print_status "Building backend image (no-cache) via Cloud Build..."
+    SHORT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "manual-$(date +%s)")
+    IMAGE_URI="${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REGISTRY}/${SERVICE_NAME}:${SHORT_SHA}"
+
+    set +e
+    gcloud builds submit . \
+      --config deploy/cloudbuild-backend-build.yaml \
+      --project "${PROJECT_ID}" \
+      --substitutions=_REGION="${REGION}",_ARTIFACT_REGISTRY="${ARTIFACT_REGISTRY}",_SERVICE_NAME="${SERVICE_NAME}",SHORT_SHA="${SHORT_SHA}"
+    BUILD_STATUS=$?
+    set -e
+
+    if [ $BUILD_STATUS -ne 0 ]; then
+        print_error "Backend image build failed"
+        rm -f "$ENV_VARS_FILE"
+        exit 1
+    fi
+    print_success "Backend image built: ${IMAGE_URI}"
+
+    # Build base deploy command (deploy the freshly-built image)
     DEPLOY_CMD=(
         "gcloud" "run" "deploy" "$SERVICE_NAME"
-        "--source" "backend"
+        "--image" "$IMAGE_URI"
         "--region" "$REGION"
         "--platform" "managed"
         "--allow-unauthenticated"
@@ -473,7 +532,7 @@ EOF
         # Remove service account from args, reuse env-vars-file
         DEPLOY_CMD=(
             "gcloud" "run" "deploy" "$SERVICE_NAME"
-            "--source" "backend"
+            "--image" "$IMAGE_URI"
             "--region" "$REGION"
             "--platform" "managed"
             "--allow-unauthenticated"

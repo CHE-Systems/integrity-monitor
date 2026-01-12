@@ -200,28 +200,6 @@ export default function App({ children }: AppProps) {
         });
       }
 
-      // #region agent log
-      fetch(
-        "http://127.0.0.1:7242/ingest/5d5f825f-e8a4-412f-af68-47be30198b26",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            location: "App.tsx:107",
-            message: "Before fetch request",
-            data: {
-              url: `${API_BASE}/integrity/run?${params.toString()}`,
-              hasToken: !!token,
-            },
-            timestamp: Date.now(),
-            sessionId: "debug-session",
-            runId: "fetch-attempt",
-            hypothesisId: "C",
-          }),
-        }
-      ).catch(() => {});
-      // #endregion agent log
-
       // Build run_config with entities, rules, checks, and notify_slack
       const runConfig: any = {};
       if (config.entities && config.entities.length > 0) {
@@ -237,21 +215,9 @@ export default function App({ children }: AppProps) {
         runConfig.notify_slack = config.notify_slack;
       }
 
-      // DEBUG LOGGING: Show what's being sent to backend
-      console.log("=".repeat(80));
-      console.log("FRONTEND: Starting Scan - Config Being Sent");
-      console.log("=".repeat(80));
-      console.log("Config from modal:", JSON.stringify(config, null, 2));
-      console.log("Run config to send:", JSON.stringify(runConfig, null, 2));
-      console.log("=".repeat(80));
-
       // Build request body - send runConfig directly as the body
-      // FastAPI's Body(default=None) will receive this as the run_config parameter
       const requestBody =
         Object.keys(runConfig).length > 0 ? runConfig : undefined;
-
-      console.log("Request body:", JSON.stringify(requestBody, null, 2));
-      console.log("=".repeat(80));
 
       const response = await fetch(
         `${API_BASE}/integrity/run?${params.toString()}`,
@@ -263,31 +229,7 @@ export default function App({ children }: AppProps) {
           },
           body: requestBody ? JSON.stringify(requestBody) : undefined,
         }
-      ).catch((error) => {
-        // #region agent log
-        fetch(
-          "http://127.0.0.1:7242/ingest/5d5f825f-e8a4-412f-af68-47be30198b26",
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              location: "App.tsx:117",
-              message: "Fetch error caught",
-              data: {
-                error: error.message,
-                errorType: error.name,
-                errorStack: error.stack,
-              },
-              timestamp: Date.now(),
-              sessionId: "debug-session",
-              runId: "fetch-attempt",
-              hypothesisId: "C",
-            }),
-          }
-        ).catch(() => {});
-        // #endregion agent log
-        throw error;
-      });
+      );
 
       if (!response.ok) {
         const errorText = await response.text();

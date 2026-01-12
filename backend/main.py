@@ -69,13 +69,6 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(RequestIDMiddleware)
 
-# #region agent log
-try:
-    with open(debug_log, 'a') as f:
-        f.write(json.dumps({"sessionId":"debug-session","runId":"startup","hypothesisId":"A","location":"main.py:104","message":"Starting schema config load","data":{"step":"before_load_schema_config"},"timestamp":int(time.time()*1000)})+'\n')
-except: pass
-# #endregion agent log
-
 # Load schema config with error handling
 try:
     schema_config = load_schema_config()
@@ -86,13 +79,6 @@ except Exception as e:
     from .config.models import SchemaConfig
     schema_config = SchemaConfig(entities={})
     logger.warning("Using empty schema config due to load failure")
-
-# #region agent log
-try:
-    with open(debug_log, 'a') as f:
-        f.write(json.dumps({"sessionId":"debug-session","runId":"startup","hypothesisId":"B","location":"main.py:120","message":"Schema config loaded, starting IntegrityRunner init","data":{"step":"before_integrity_runner","schema_loaded":True},"timestamp":int(time.time()*1000)})+'\n')
-except: pass
-# #endregion agent log
 
 # Initialize IntegrityRunner with error handling
 try:
@@ -107,13 +93,6 @@ except Exception as e:
 # Global dictionary to track running scans: {run_id: threading.Event}
 running_scans: dict[str, threading.Event] = {}
 running_scans_lock = threading.Lock()
-
-# #region agent log
-try:
-    with open(debug_log, 'a') as f:
-        f.write(json.dumps({"sessionId":"debug-session","runId":"startup","hypothesisId":"C","location":"main.py:135","message":"Startup complete","data":{"step":"after_integrity_runner","runner_available":runner is not None},"timestamp":int(time.time()*1000)})+'\n')
-except: pass
-# #endregion agent log
 
 logger.info("FastAPI application startup complete")
 
@@ -351,9 +330,6 @@ def _run_integrity_background(
     run_config: Optional[Dict[str, Any]] = None
 ):
     """Run integrity scan in background thread."""
-    print(f"[BACKGROUND DEBUG] _run_integrity_background called with run_config={run_config}")
-    if run_config:
-        print(f"[BACKGROUND DEBUG] run_config.notify_slack = {run_config.get('notify_slack')}")
     thread_runner = None
     try:
         # Create a new runner instance for this thread
@@ -407,11 +383,10 @@ def _run_integrity_background(
 
 
 @app.post("/integrity/run", dependencies=[Depends(verify_cloud_scheduler_auth)])
-def run_integrity(
+async def run_integrity(
     request: Request,
     trigger: str = "manual",
     entities: Optional[List[str]] = Query(default=None),
-    run_config: Optional[Dict[str, Any]] = Body(default=None)
 ):
     """Trigger the integrity runner (runs in background).
 
@@ -419,12 +394,21 @@ def run_integrity(
         request: FastAPI request object (injected)
         trigger: Trigger source ("nightly", "weekly", "schedule", or "manual")
         entities: Optional list of entity names to scan (deprecated, use run_config.entities)
-        run_config: Optional run configuration with entities and rules
 
     Returns:
         - 200: Success with run_id (scan runs in background)
         - 500: Complete system failure (unable to start run)
     """
+    # Read request body directly instead of using Body() parameter
+    # This ensures the body is received correctly from Firebase Functions
+    run_config: Optional[Dict[str, Any]] = None
+    try:
+        body_bytes = await request.body()
+        if body_bytes:
+            run_config = json.loads(body_bytes.decode('utf-8'))
+    except Exception:
+        pass
+    
     # Get request ID from middleware
     request_id = getattr(request.state, "request_id", "unknown")
     
@@ -434,23 +418,6 @@ def run_integrity(
         final_entities = run_config["entities"]
     elif entities:
         final_entities = entities
-
-    # DEBUG LOGGING: Show what was received (using print for guaranteed Cloud Run visibility)
-    print("=" * 80)
-    print("[API DEBUG] Received Scan Request")
-    print(f"[API DEBUG] Trigger: {trigger}")
-    print(f"[API DEBUG] Entities (query param): {entities}")
-    print(f"[API DEBUG] Run config received: {run_config}")
-    if run_config:
-        print(f"[API DEBUG] notify_slack in run_config: {run_config.get('notify_slack')}")
-        print(f"[API DEBUG] checks in run_config: {run_config.get('checks')}")
-        print(f"[API DEBUG] rules in run_config: {run_config.get('rules')}")
-        if run_config.get('checks'):
-            checks = run_config.get('checks')
-            print(f"[API DEBUG] checks.value_checks: {checks.get('value_checks')}")
-    else:
-        print("[API DEBUG] WARNING: run_config is None - no request body received!")
-    print("=" * 80)
 
     logger.info(
         "Integrity run requested",
@@ -668,20 +635,28 @@ def cancel_integrity_run(run_id: str, request: Request):
         )
 
 
-@app.delete("/integrity/run/{run_id}", dependencies=[Depends(verify_cloud_scheduler_auth)])
-def delete_integrity_run(run_id: str, request: Request):
+@app.delete("/integrity/run/{run_id}", dependencies=[Depends(verify_firebase_token)])
+def delete_integrity_run(
+    run_id: str,
+    request: Request,
+    delete_issues: bool = Query(False, description="Also delete all issues found in this run"),
+):
     """Delete an integrity run and all its associated logs.
     
     Args:
         run_id: Run identifier to delete
         request: FastAPI request object (injected)
+        delete_issues: If True, also delete all issues associated with this run (where issue.run_id == run_id)
     
     Returns:
-        - 200: Success (run deleted)
+        - 200: Success (run deleted, optionally with issues deleted)
         - 404: Run not found
     """
     request_id = getattr(request.state, "request_id", "unknown")
-    logger.info("Integrity run deletion requested", extra={"run_id": run_id, "request_id": request_id})
+    logger.info(
+        "Integrity run deletion requested",
+        extra={"run_id": run_id, "delete_issues": delete_issues, "request_id": request_id}
+    )
     
     try:
         from .clients.firestore import FirestoreClient
@@ -689,10 +664,49 @@ def delete_integrity_run(run_id: str, request: Request):
         
         config = load_runtime_config()
         firestore_client = FirestoreClient(config.firestore)
+        
+        deleted_issues_count = 0
+        
+        # Delete issues first if requested
+        if delete_issues:
+            try:
+                deleted_issues_count = firestore_client.delete_issues_for_run(run_id)
+                logger.info(
+                    "Deleted issues for run",
+                    extra={"run_id": run_id, "deleted_issues_count": deleted_issues_count, "request_id": request_id}
+                )
+            except Exception as exc:
+                logger.error(
+                    "Failed to delete issues for run",
+                    extra={"run_id": run_id, "error": str(exc), "request_id": request_id},
+                    exc_info=True,
+                )
+                # Continue to delete run even if issue deletion fails
+                # This ensures the run is still deleted if issue deletion has issues
+        
+        # Delete the run and its logs
         firestore_client.delete_run(run_id)
         
-        logger.info("Integrity run deleted", extra={"run_id": run_id, "request_id": request_id})
-        return {"status": "success", "message": "Run deleted successfully", "run_id": run_id}
+        logger.info(
+            "Integrity run deleted",
+            extra={
+                "run_id": run_id,
+                "deleted_issues_count": deleted_issues_count,
+                "request_id": request_id
+            }
+        )
+        
+        response = {
+            "status": "success",
+            "message": "Run deleted successfully",
+            "run_id": run_id,
+        }
+        
+        if delete_issues:
+            response["deleted_issues_count"] = deleted_issues_count
+            response["message"] = f"Run and {deleted_issues_count} associated issues deleted successfully"
+        
+        return response
     except Exception as exc:
         logger.error(
             "Failed to delete integrity run",

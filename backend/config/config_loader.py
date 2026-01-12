@@ -145,35 +145,11 @@ def _load_firestore_overrides(firestore_client: Optional[Any] = None) -> Dict[st
     Returns:
         Dict of override values, or empty dict if Firestore not available.
     """
-    # #region agent log
-    import json
-    import time
-    debug_log_path = '/Users/joshuaedwards/Library/CloudStorage/GoogleDrive-jedwards@che.school/My Drive/CHE/che-data-integrity-monitor/.cursor/debug.log'
-    try:
-        with open(debug_log_path, 'a') as f:
-            f.write(json.dumps({"sessionId":"debug-session","runId":"startup","hypothesisId":"B","location":"config_loader.py:119","message":"_load_firestore_overrides entry","data":{"has_client":firestore_client is not None},"timestamp":int(time.time()*1000)})+'\n')
-    except: pass
-    # #endregion agent log
-    
     if firestore_client is None:
         return {}
     
     try:
-        # #region agent log
-        try:
-            with open(debug_log_path, 'a') as f:
-                f.write(json.dumps({"sessionId":"debug-session","runId":"startup","hypothesisId":"B","location":"config_loader.py:132","message":"Before calling _get_client","data":{"step":"before_get_client"},"timestamp":int(time.time()*1000)})+'\n')
-        except: pass
-        # #endregion agent log
-        
         client = firestore_client._get_client()
-        
-        # #region agent log
-        try:
-            with open(debug_log_path, 'a') as f:
-                f.write(json.dumps({"sessionId":"debug-session","runId":"startup","hypothesisId":"B","location":"config_loader.py:135","message":"After _get_client, before reading document","data":{"step":"after_get_client"},"timestamp":int(time.time()*1000)})+'\n')
-        except: pass
-        # #endregion agent log
         
         config_doc_path = firestore_client._config.config_document
         # Parse document path (e.g., "integrity_config/current")
@@ -184,31 +160,11 @@ def _load_firestore_overrides(firestore_client: Optional[Any] = None) -> Dict[st
         collection_name, doc_id = parts
         doc_ref = client.collection(collection_name).document(doc_id)
         
-        # #region agent log
-        try:
-            with open(debug_log_path, 'a') as f:
-                f.write(json.dumps({"sessionId":"debug-session","runId":"startup","hypothesisId":"B","location":"config_loader.py:142","message":"Before doc.get() call","data":{"collection":collection_name,"doc_id":doc_id},"timestamp":int(time.time()*1000)})+'\n')
-        except: pass
-        # #endregion agent log
-        
         doc = doc_ref.get()
-        
-        # #region agent log
-        try:
-            with open(debug_log_path, 'a') as f:
-                f.write(json.dumps({"sessionId":"debug-session","runId":"startup","hypothesisId":"B","location":"config_loader.py:149","message":"After doc.get() call","data":{"exists":doc.exists},"timestamp":int(time.time()*1000)})+'\n')
-        except: pass
-        # #endregion agent log
         
         if doc.exists:
             return doc.to_dict() or {}
-    except Exception as exc:
-        # #region agent log
-        try:
-            with open(debug_log_path, 'a') as f:
-                f.write(json.dumps({"sessionId":"debug-session","runId":"startup","hypothesisId":"B","location":"config_loader.py:156","message":"Exception in _load_firestore_overrides","data":{"error":str(exc),"error_type":type(exc).__name__},"timestamp":int(time.time()*1000)})+'\n')
-        except: pass
-        # #endregion agent log
+    except Exception:
         # If Firestore is not available or document doesn't exist, return empty dict
         return {}
     

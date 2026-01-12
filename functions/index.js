@@ -360,13 +360,17 @@ exports.runScheduledScans = onSchedule(
             const controller = new AbortController();
             timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
 
+            // Serialize the body for the request
+            const bodyString = JSON.stringify(requestBody);
+
             const response = await fetch(url, {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
-                'Authorization': `Bearer ${API_AUTH_TOKEN}`
+                'Authorization': `Bearer ${API_AUTH_TOKEN}`,
+                'Content-Length': String(Buffer.byteLength(bodyString, 'utf8')),
               },
-              body: Object.keys(requestBody).length > 0 ? JSON.stringify(requestBody) : undefined,
+              body: bodyString,
               signal: controller.signal,
             });
 
