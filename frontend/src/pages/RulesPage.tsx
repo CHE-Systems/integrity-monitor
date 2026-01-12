@@ -8,20 +8,9 @@ import { AIRuleCreator } from "../components/AIRuleCreator";
 import ConfirmModal from "../components/ConfirmModal";
 import trashIcon from "../assets/trash.svg";
 import { formatRuleId } from "../utils/ruleFormatter";
+import { ACTIVE_ENTITIES, ENTITY_TABLE_MAPPING } from "../config/entities";
 
 type EntityName = string;
-
-// Map of entity names to display names
-const ENTITY_DISPLAY_NAMES: Record<string, string> = {
-  students: "Students",
-  parents: "Parents",
-  contractors: "Contractors",
-  classes: "Classes",
-  attendance: "Attendance",
-  truth: "Truth",
-  student_truth: "Student Truth",
-  payments: "Payments",
-};
 
 // Entity-centric structure
 interface EntityRules {
@@ -32,6 +21,8 @@ interface EntityRules {
   };
   relationships: Record<string, any>;
   required_fields: any[];
+  value_checks?: any[];
+  attendance_rules?: any;
 }
 
 export function RulesPage() {
@@ -193,18 +184,11 @@ export function RulesPage() {
     }
   };
 
-  // Reorganize rules by entity
+  // Get all active entities (show all configured entities, not just those with rules)
   const getEntitiesWithRules = (): EntityName[] => {
-    if (!rules) return [];
-
-    const entities = new Set<string>();
-
-    // Collect entities from all rule types
-    Object.keys(rules.duplicates || {}).forEach((e) => entities.add(e));
-    Object.keys(rules.relationships || {}).forEach((e) => entities.add(e));
-    Object.keys(rules.required_fields || {}).forEach((e) => entities.add(e));
-
-    return Array.from(entities).sort();
+    // Always show all active entities, even if they don't have rules yet
+    // This allows users to see and create rules for all configured tables
+    return Array.from(ACTIVE_ENTITIES).sort();
   };
 
   const getEntityRules = (entity: string): EntityRules => {
@@ -216,6 +200,11 @@ export function RulesPage() {
       },
       relationships: (rules?.relationships?.[entity] as any) || {},
       required_fields: (rules?.required_fields?.[entity] as any[]) || [],
+      value_checks: (rules?.value_checks?.[entity] as any[]) || [],
+      attendance_rules:
+        entity === "absent"
+          ? (rules?.attendance_rules as any) || {}
+          : undefined,
     };
   };
 
@@ -226,7 +215,9 @@ export function RulesPage() {
       (entityRules.duplicates.likely?.length || 0) +
       (entityRules.duplicates.possible?.length || 0) +
       Object.keys(entityRules.relationships).length +
-      (entityRules.required_fields?.length || 0);
+      (entityRules.required_fields?.length || 0) +
+      (entityRules.value_checks?.length || 0) +
+      (activeEntity === "absent" && entityRules.attendance_rules ? 1 : 0); // Count duplicate absence rule for absent entity
 
     if (totalRules === 0) {
       return (
@@ -476,6 +467,110 @@ export function RulesPage() {
             </div>
           </div>
         )}
+
+        {/* Value Checks */}
+        {entityRules.value_checks && entityRules.value_checks.length > 0 && (
+          <div>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold text-[var(--text-main)]">
+                Value Checks
+              </h3>
+              <button
+                onClick={() => {
+                  setEditingRule({
+                    category: "value_checks",
+                    entity: activeEntity,
+                    ruleId: "",
+                    rule: {},
+                  });
+                  setShowEditor(true);
+                }}
+                className="px-3 py-1.5 text-sm border border-[var(--border)] rounded-lg hover:bg-gray-50"
+              >
+                + Add Value Check
+              </button>
+            </div>
+            <div className="space-y-3">
+              {entityRules.value_checks.map(
+                (checkRule: any, idx: number) => {
+                  const ruleId =
+                    checkRule.rule_id ||
+                    (checkRule.field
+                      ? `${activeEntity}_${checkRule.field}`
+                      : undefined);
+
+                  if (!ruleId) {
+                    console.warn(
+                      "Value check rule missing rule_id and field:",
+                      checkRule
+                    );
+                    return null;
+                  }
+
+                  return (
+                    <RuleCard
+                      key={idx}
+                      rule={checkRule}
+                      entity={activeEntity}
+                      category="value_checks"
+                      ruleId={ruleId}
+                      onView={() =>
+                        navigate(
+                          `/rules/value_checks/${activeEntity}/${ruleId}`
+                        )
+                      }
+                      onEdit={() =>
+                        handleEditClick(
+                          "value_checks",
+                          activeEntity,
+                          ruleId,
+                          checkRule
+                        )
+                      }
+                      onDelete={() =>
+                        handleDeleteClick(
+                          "value_checks",
+                          activeEntity,
+                          ruleId
+                        )
+                      }
+                    />
+                  );
+                }
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Attendance Rules (only for absent entity) */}
+        {activeEntity === "absent" && entityRules.attendance_rules && (
+          <div>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold text-[var(--text-main)]">
+                Attendance Rules
+              </h3>
+            </div>
+            <div className="space-y-3">
+              <RuleCard
+                rule={{
+                  rule_id: "attendance.duplicate_absence",
+                  description:
+                    "Detects duplicate absence records for the same student on the same day. Only one absence record should exist per student per day.",
+                  severity: "warning",
+                }}
+                entity={activeEntity}
+                category="attendance_rules"
+                ruleId="attendance.duplicate_absence"
+                onView={() =>
+                  navigate(
+                    `/rules/attendance_rules/${activeEntity}/attendance.duplicate_absence`
+                  )
+                }
+                // Built-in rule, not editable or deletable (onEdit and onDelete are optional)
+              />
+            </div>
+          </div>
+        )}
       </div>
     );
   };
@@ -548,7 +643,7 @@ export function RulesPage() {
                   : ""
               }`}
             >
-              {ENTITY_DISPLAY_NAMES[entity] || entity}
+              {ENTITY_TABLE_MAPPING[entity] || entity}
             </button>
           );
         })}
@@ -616,8 +711,8 @@ interface RuleCardProps {
   entity?: string;
   ruleId?: string;
   onView: () => void;
-  onEdit: () => void;
-  onDelete: () => void;
+  onEdit?: () => void;
+  onDelete?: () => void;
 }
 
 function RuleCard({
@@ -636,7 +731,9 @@ function RuleCard({
           <div className="flex items-center gap-2 mb-2">
             <h4 className="font-medium text-[var(--text-main)]">
               {category === "required_fields" && rule.field_name
-                ? formatRuleId(`required_field_rule.${entity}.${rule.field_name}`)
+                ? formatRuleId(
+                    `required_field_rule.${entity}.${rule.field_name}`
+                  )
                 : rule.rule_id
                 ? formatRuleId(rule.rule_id)
                 : ruleId
@@ -702,41 +799,45 @@ function RuleCard({
               <line x1="12" y1="8" x2="12.01" y2="8"></line>
             </svg>
           </button>
-          <button
-            onClick={onEdit}
-            className="p-2 text-gray-600 hover:bg-gray-100 rounded transition-colors"
-            title="Edit Rule"
-          >
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              width="20"
-              height="20"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
+          {onEdit && (
+            <button
+              onClick={onEdit}
+              className="p-2 text-gray-600 hover:bg-gray-100 rounded transition-colors"
+              title="Edit Rule"
             >
-              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
-              <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
-            </svg>
-          </button>
-          <button
-            onClick={onDelete}
-            className="p-2 hover:bg-red-50 rounded transition-colors"
-            title="Delete Rule"
-          >
-            <img
-              src={trashIcon}
-              alt="Delete"
-              className="w-5 h-5"
-              style={{
-                filter:
-                  "brightness(0) saturate(100%) invert(20%) sepia(100%) saturate(5000%) hue-rotate(350deg) brightness(90%) contrast(100%)",
-              }}
-            />
-          </button>
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                width="20"
+                height="20"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+                <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+              </svg>
+            </button>
+          )}
+          {onDelete && (
+            <button
+              onClick={onDelete}
+              className="p-2 hover:bg-red-50 rounded transition-colors"
+              title="Delete Rule"
+            >
+              <img
+                src={trashIcon}
+                alt="Delete"
+                className="w-5 h-5"
+                style={{
+                  filter:
+                    "brightness(0) saturate(100%) invert(20%) sepia(100%) saturate(5000%) hue-rotate(350deg) brightness(90%) contrast(100%)",
+                }}
+              />
+            </button>
+          )}
         </div>
       </div>
     </div>

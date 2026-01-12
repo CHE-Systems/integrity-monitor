@@ -43,6 +43,13 @@ class FirestoreClient:
                 from google.auth.exceptions import DefaultCredentialsError
                 from google.oauth2 import service_account
                 
+                # Determine project ID - prefer env vars, fallback to data-integrity-monitor (matches .firebaserc)
+                project_id = (
+                    os.getenv("GOOGLE_CLOUD_PROJECT")
+                    or os.getenv("GCP_PROJECT_ID")
+                    or "data-integrity-monitor"
+                )
+                
                 # Try to initialize with explicit credentials path if set
                 cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
                 if cred_path:
@@ -60,8 +67,9 @@ class FirestoreClient:
                     if os.path.exists(cred_path):
                         # Load credentials explicitly
                         credentials = service_account.Credentials.from_service_account_file(cred_path)
-                        self._client = firestore.Client(credentials=credentials, project=credentials.project_id)
-                        
+                        # Use project_id from credentials if available, otherwise use determined project_id
+                        cred_project_id = credentials.project_id if hasattr(credentials, 'project_id') and credentials.project_id else project_id
+                        self._client = firestore.Client(credentials=credentials, project=cred_project_id)
                         logger.info(f"Firestore client initialized with credentials from {cred_path}")
                     else:
                         logger.warning(
@@ -70,10 +78,10 @@ class FirestoreClient:
                             f"To fix: either set up ADC with 'gcloud auth application-default login' "
                             f"or remove GOOGLE_APPLICATION_CREDENTIALS from your environment."
                         )
-                        # Try default credentials
+                        # Try default credentials with explicit project
                         try:
-                            self._client = firestore.Client()
-                            logger.info("Firestore client initialized with Application Default Credentials")
+                            self._client = firestore.Client(project=project_id)
+                            logger.info(f"Firestore client initialized with Application Default Credentials (project: {project_id})")
                         except DefaultCredentialsError:
                             # Re-raise with more helpful message
                             raise RuntimeError(
@@ -84,10 +92,10 @@ class FirestoreClient:
                                 f"or remove/unset GOOGLE_APPLICATION_CREDENTIALS from your environment."
                             ) from None
                 else:
-                    # No explicit path, try default credentials
+                    # No explicit path, try default credentials with explicit project
                     try:
-                        self._client = firestore.Client()
-                        logger.info("Firestore client initialized with Application Default Credentials")
+                        self._client = firestore.Client(project=project_id)
+                        logger.info(f"Firestore client initialized with Application Default Credentials (project: {project_id})")
                     except DefaultCredentialsError:
                         # Re-raise with more helpful message
                         raise RuntimeError(
@@ -112,6 +120,11 @@ class FirestoreClient:
                     ) from exc
                 raise
         return self._client
+    
+    @property
+    def db(self) -> firestore.Client:
+        """Property to access the Firestore client directly (for backward compatibility)."""
+        return self._get_client()
 
     def record_run(self, run_id: str, payload: Dict[str, Any]) -> None:
         """Write run summary to Firestore integrity_runs collection."""
@@ -122,8 +135,14 @@ class FirestoreClient:
             # Ensure timestamps are present
             data = payload.copy()
             # Only set started_at if it doesn't exist and we're not cancelling
-            # This prevents overwriting the original start time when cancelling
+            # WARNING: This fallback can cause bugs if called during updates without started_at
+            # All callers should include started_at explicitly to avoid incorrect timestamps
             if "started_at" not in data and data.get("status") != "cancelled":
+                logger.warning(
+                    "started_at not in data for record_run - using current time as fallback. "
+                    "This may cause incorrect timestamps. Caller should include started_at explicitly.",
+                    extra={"run_id": run_id, "status": data.get("status")},
+                )
                 data["started_at"] = datetime.now(timezone.utc)
             if "ended_at" not in data and "status" in data and data["status"] != "running":
                 data["ended_at"] = datetime.now(timezone.utc)
@@ -941,6 +960,60 @@ class FirestoreClient:
         except Exception as exc:
             logger.error(
                 "Failed to delete run",
+                extra={"run_id": run_id, "error": str(exc)},
+                exc_info=True,
+            )
+            raise
+    
+    def delete_issues_for_run(self, run_id: str) -> int:
+        """Delete all issues associated with a specific run.
+        
+        Args:
+            run_id: Run identifier to delete issues for
+            
+        Returns:
+            Number of issues deleted
+        """
+        try:
+            client = self._get_client()
+            issues_ref = client.collection(self._config.issues_collection)
+            
+            # Query all issues where run_id matches
+            query = issues_ref.where("run_id", "==", run_id)
+            issues = query.stream()
+            
+            deleted_count = 0
+            batch = client.batch()
+            batch_count = 0
+            
+            for issue_doc in issues:
+                batch.delete(issue_doc.reference)
+                batch_count += 1
+                deleted_count += 1
+                
+                # Firestore batch limit is 500 operations
+                if batch_count >= 500:
+                    batch.commit()
+                    batch = client.batch()
+                    batch_count = 0
+            
+            # Commit remaining issue deletions
+            if batch_count > 0:
+                batch.commit()
+            
+            logger.info(
+                "Deleted issues for run",
+                extra={
+                    "run_id": run_id,
+                    "deleted_count": deleted_count,
+                    "collection": self._config.issues_collection,
+                },
+            )
+            
+            return deleted_count
+        except Exception as exc:
+            logger.error(
+                "Failed to delete issues for run",
                 extra={"run_id": run_id, "error": str(exc)},
                 exc_info=True,
             )

@@ -81,7 +81,7 @@ class RulesService:
         relationships = {}
 
         # Query each entity collection
-        entities = ["students", "parents", "contractors", "classes", "attendance", "truth", "campuses", "payments"]
+        entities = ["students", "parents", "contractors"]
 
         for entity in entities:
             collection_path = f"rules/relationships/{entity}"
@@ -109,7 +109,7 @@ class RulesService:
         required_fields = {}
 
         # Query each entity collection
-        entities = ["students", "parents", "contractors", "classes", "attendance", "truth", "campuses", "payments"]
+        entities = ["students", "parents", "contractors"]
 
         for entity in entities:
             collection_path = f"rules/required_fields/{entity}"

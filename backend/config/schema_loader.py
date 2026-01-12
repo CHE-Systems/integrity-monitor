@@ -17,24 +17,39 @@ from .models import (
     RelationshipRule,
     SchemaConfig,
     SchemaMetadata,
+    ValueCheck,
 )
 
 logger = logging.getLogger(__name__)
 
+# DEPRECATED: schema.yaml has been removed. This constant is kept for backward compatibility
+# but should not be used. Rules are now managed in Firestore only.
 SCHEMA_PATH = Path(__file__).with_name("schema.yaml")
 
 
 def load_schema_from_yaml(path: Optional[Path] = None) -> SchemaConfig:
     """Load schema configuration directly from YAML file.
     
-    Used by migration scripts to read YAML rules before syncing to Firestore.
+    DEPRECATED: This function is kept only for reading snapshot/backup YAML files.
+    The main schema.yaml file has been removed. Rules are now managed in Firestore only.
+    
+    This function can be used to read snapshot files created by the snapshot tool,
+    but should not be used for production rule loading.
     
     Args:
-        path: Path to schema.yaml file. If None, uses default SCHEMA_PATH.
+        path: Path to YAML file. If None, uses default SCHEMA_PATH (which no longer exists).
         
     Returns:
         SchemaConfig instance built from YAML file.
     """
+    import warnings
+    warnings.warn(
+        "load_schema_from_yaml() is deprecated. Rules are now managed in Firestore only. "
+        "This function is kept only for reading snapshot/backup files.",
+        DeprecationWarning,
+        stacklevel=2
+    )
+    
     yaml_path = path or SCHEMA_PATH
     
     if not yaml_path.exists():
@@ -176,12 +191,14 @@ def _convert_firestore_rules_to_schema_config(rules_data: Dict[str, Any]) -> Sch
     # Build entities dict
     entities: Dict[str, EntitySchema] = {}
 
-    # Get all entity names from relationships and required_fields
+    # Get all entity names from relationships, required_fields, and value_checks
     all_entities = set()
     if "relationships" in rules_data:
         all_entities.update(rules_data["relationships"].keys())
     if "required_fields" in rules_data:
         all_entities.update(rules_data["required_fields"].keys())
+    if "value_checks" in rules_data:
+        all_entities.update(rules_data["value_checks"].keys())
     if "duplicates" in rules_data:
         all_entities.update(rules_data["duplicates"].keys())
 
@@ -224,12 +241,31 @@ def _convert_firestore_rules_to_schema_config(rules_data: Dict[str, Any]) -> Sch
                     rule_id=req_data.get("rule_id"),  # Now part of the model
                 ))
 
+        # Get value checks for this entity
+        value_checks: List[ValueCheck] = []
+        if "value_checks" in rules_data and entity in rules_data["value_checks"]:
+            for check_data in rules_data["value_checks"][entity]:
+                # Prefer field_id over field when both are present (field_id is more reliable)
+                field_reference = check_data.get("field_id") or check_data.get("field", "")
+                
+                # Include rule_id and source_entity in ValueCheck
+                value_checks.append(ValueCheck(
+                    field=field_reference,
+                    message=check_data.get("message", ""),
+                    severity=check_data.get("severity", "info"),
+                    rule_id=check_data.get("rule_id"),
+                    source_entity=check_data.get("source_entity"),
+                    condition_field=check_data.get("condition_field"),
+                    condition_value=check_data.get("condition_value"),
+                ))
+
         entities[entity] = EntitySchema(
             description=f"{entity.capitalize()} entity",
             key_identifiers=[],  # Not stored in Firestore rules
             identity_fields=[],  # Not stored in Firestore rules
             relationships=relationships,
             missing_key_data=missing_key_data,
+            value_checks=value_checks,
         )
 
     # Build duplicates dict

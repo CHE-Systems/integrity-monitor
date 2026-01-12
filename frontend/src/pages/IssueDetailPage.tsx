@@ -122,6 +122,7 @@ export function IssueDetailPage() {
 
   // Determine which record IDs to fetch for the record cards
   // For duplicates: fetch first 2 records (side-by-side display)
+  // For attendance duplicate absences: fetch both the duplicate and primary records
   // For other issues: fetch just the primary record
   const recordIdsToFetch = useMemo(() => {
     if (!issue) return [];
@@ -133,6 +134,16 @@ export function IssueDetailPage() {
         ids.push(issue.related_records[0]);
       }
       return ids.slice(0, 2); // Max 2 for side-by-side
+    }
+
+    // For attendance duplicate absences, show both the duplicate record and primary record
+    if (
+      issue.issue_type === "attendance" &&
+      issue.rule_id === "attendance.duplicate_absence" &&
+      issue.metadata?.primary_record_id
+    ) {
+      // Show the duplicate record (current) and the primary record
+      return [issue.record_id, issue.metadata.primary_record_id];
     }
 
     // For non-duplicate issues, just fetch the primary record
@@ -575,6 +586,94 @@ export function IssueDetailPage() {
             )}
           </div>
         )}
+
+        {issue.issue_type === "attendance" &&
+          issue.rule_id === "attendance.duplicate_absence" &&
+          metadata?.primary_record_id && (
+            <div>
+              <h3 className="text-sm font-medium text-[var(--text-muted)] mb-3">
+                Duplicate Absence Records (2 total)
+              </h3>
+              <div className="space-y-2">
+                {/* Show the duplicate record that triggered the flag */}
+                {(() => {
+                  const duplicateRecordId = issue.record_id;
+                  const duplicateRecordLinks = getAirtableLinksWithFallback(
+                    issue.entity,
+                    duplicateRecordId,
+                    schema
+                  );
+                  return (
+                    <div className="rounded-lg border-2 border-[var(--brand)] bg-[var(--brand)]/5 p-3 flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <span className="text-sm font-medium text-[var(--brand)]">
+                          Duplicate Record (Flagged)
+                        </span>
+                        <a
+                          href={
+                            duplicateRecordLinks?.primary ||
+                            `https://airtable.com`
+                          }
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="font-mono text-sm text-[var(--cta-blue)] hover:underline inline-flex items-center gap-1"
+                        >
+                          {duplicateRecordId}
+                          <img
+                            src={openInNewTabIcon}
+                            alt="Open in new tab"
+                            className="w-3 h-3 inline-block"
+                            style={{
+                              filter:
+                                "brightness(0) saturate(100%) invert(27%) sepia(96%) saturate(2598%) hue-rotate(210deg) brightness(97%) contrast(95%)",
+                            }}
+                          />
+                        </a>
+                      </div>
+                    </div>
+                  );
+                })()}
+                {/* Show the primary record */}
+                {(() => {
+                  const primaryRecordId = metadata.primary_record_id;
+                  const primaryRecordLinks = getAirtableLinksWithFallback(
+                    issue.entity,
+                    primaryRecordId,
+                    schema
+                  );
+                  return (
+                    <div className="rounded-lg border border-[var(--border)] bg-[var(--bg-mid)]/50 p-3 flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <span className="text-sm text-[var(--text-muted)]">
+                          Primary Record
+                        </span>
+                        <a
+                          href={
+                            primaryRecordLinks?.primary ||
+                            `https://airtable.com`
+                          }
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="font-mono text-sm text-[var(--cta-blue)] hover:underline inline-flex items-center gap-1"
+                        >
+                          {primaryRecordId}
+                          <img
+                            src={openInNewTabIcon}
+                            alt="Open in new tab"
+                            className="w-3 h-3 inline-block"
+                            style={{
+                              filter:
+                                "brightness(0) saturate(100%) invert(27%) sepia(96%) saturate(2598%) hue-rotate(210deg) brightness(97%) contrast(95%)",
+                            }}
+                          />
+                        </a>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+            </div>
+          )}
 
         {issue.issue_type === "missing_link" && metadata && (
           <div>

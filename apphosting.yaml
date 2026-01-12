@@ -4,8 +4,9 @@ runConfig:
   minInstances: 0
   # maxInstances: 100
   # concurrency: 80
-  # cpu: 1
-  # memoryMiB: 512
+  cpu: 8
+  memoryMiB: 8192
+  cpuThrottling: false  # CRITICAL: Always allocate CPU for background jobs
 
 # Environment variables and secrets.
 # env:

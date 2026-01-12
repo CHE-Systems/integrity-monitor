@@ -200,7 +200,7 @@ Optionally set a boolean Has Data Issues field on the affected record for easy f
 - Batch upsert (update existing, create new) with deduplication
 - Proper field mapping including JSON metadata serialization
 - Error handling with partial failure support
-- Added `data_issues` table configuration to `rules.yaml`
+- Added `data_issues` table configuration to `rules.yaml` (runtime config, not rules - rules are managed in Firestore)
 
 ---
 

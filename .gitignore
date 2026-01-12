@@ -13,6 +13,7 @@ dist/
 !.env.example
 backend/.env
 backend/.env.*
+backend/.env.backup
 frontend/.env
 frontend/.env.*
 frontend/.env.local
@@ -30,6 +31,18 @@ backend/data-integrity-service-account.json
 *.bak
 .env.backup
 
-# log fils
+# log files
 .cursor/debug.log
 .cursor/debug.*.log
+firebase-debug.log
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Development lock files
+.dev-lock
+# Snyk Security Extension - AI Rules (auto-generated)
+.cursor/rules/snyk_rules.mdc

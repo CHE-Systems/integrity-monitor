@@ -12,7 +12,8 @@ import { db } from "../config/firebase";
 
 export interface TrendDataItem {
   day: string;
-  [key: string]: number | string;
+  total?: number;
+  [key: string]: any;
 }
 
 export interface SeverityCounts {
@@ -33,7 +34,7 @@ export function useFirestoreMetrics(days: number = 14) {
     const cutoffDate = new Date();
     cutoffDate.setDate(cutoffDate.getDate() - days);
     const cutoffTimestamp = Timestamp.fromDate(cutoffDate);
-    
+
     const q = query(
       runsRef,
       where("started_at", ">=", cutoffTimestamp),
@@ -56,16 +57,16 @@ export function useFirestoreMetrics(days: number = 14) {
             const data = doc.data();
             const startedAt = data.started_at?.toDate?.() || new Date();
             const runDate = startedAt instanceof Date ? startedAt : new Date(startedAt);
-            
+
             // Get date key (YYYY-MM-DD format for grouping)
             const dateKey = runDate.toISOString().split('T')[0];
             const dayLabel = runDate.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-            
+
             // Get counts from run
             const counts = data.counts || {};
             const byType = counts.by_type || {};
             const bySeverity = counts.by_severity || {};
-            
+
             // Initialize day entry if not exists
             if (!dayMap.has(dateKey)) {
               dayMap.set(dateKey, {
@@ -75,15 +76,15 @@ export function useFirestoreMetrics(days: number = 14) {
                 severityCounts: { critical: 0, warning: 0, info: 0 },
               });
             }
-            
+
             const dayEntry = dayMap.get(dateKey)!;
-            
+
             // Since runs are sorted descending (newest first), the first run we see for each day
             // is the most recent run for that day. Use that run's counts.
             // For today specifically, always use the most recent run (first one we encounter)
             const isToday = dateKey === new Date().toISOString().split('T')[0];
             const isFirstRunForDay = Object.keys(dayEntry.typeCounts).length === 0;
-            
+
             if (isFirstRunForDay) {
               // Use this run's counts (most recent for this day)
               Object.entries(byType).forEach(([type, count]) => {
@@ -91,13 +92,17 @@ export function useFirestoreMetrics(days: number = 14) {
                   dayEntry.typeCounts[type] = count;
                 }
               });
-              
+
               // Update severity counts
               dayEntry.severityCounts = {
                 critical: bySeverity.critical || 0,
                 warning: bySeverity.warning || 0,
                 info: bySeverity.info || 0,
               };
+
+              // Store the pre-calculated total from the run
+              // We cast it as number because it might be undefined in older runs
+              (dayEntry as any).total = typeof counts.total === 'number' ? counts.total : 0;
             } else if (isToday) {
               // For today, if we see a newer run, update to use it (runs are sorted desc, so this shouldn't happen)
               // But just in case, we'll keep the first one (most recent) we saw
@@ -110,15 +115,16 @@ export function useFirestoreMetrics(days: number = 14) {
             .map((entry) => {
               const trendItem: TrendDataItem = {
                 day: entry.day,
+                total: (entry as any).total || 0,
               };
-              
+
               // Add all issue types
               Object.entries(entry.typeCounts).forEach(([type, count]) => {
                 if (count > 0) {
                   trendItem[type] = count;
                 }
               });
-              
+
               return trendItem;
             });
 

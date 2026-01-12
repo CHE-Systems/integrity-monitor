@@ -34,6 +34,7 @@ except ImportError:
     RequestException = Exception
 
 from ..config.settings import AirtableConfig
+from ..utils.secrets import get_secret
 
 logger = logging.getLogger(__name__)
 
@@ -56,11 +57,13 @@ class AirtableClient:
                     "pyairtable not installed. Install with: pip install pyairtable"
                 )
             # Use Personal Access Token (PAT) for Airtable authentication
-            pat = os.getenv("AIRTABLE_PAT")
+            # Try environment variable first, then Secret Manager for local development
+            pat = get_secret("AIRTABLE_PAT")
             
             if not pat:
                 raise ValueError(
-                    "AIRTABLE_PAT environment variable must be set"
+                    "AIRTABLE_PAT not found in environment variables or Secret Manager. "
+                    "Set AIRTABLE_PAT environment variable or ensure it exists in Google Cloud Secret Manager."
                 )
             
             token = pat
@@ -75,16 +78,17 @@ class AirtableClient:
     def _resolve_table(self, key: str) -> Dict[str, str]:
         """Resolve table configuration with validation."""
         table_cfg = self._config.table(key)
-        base_id = os.getenv(table_cfg.base_env)
-        table_id = os.getenv(table_cfg.table_env)
+        # Try environment variable first, then Secret Manager for local development
+        base_id = get_secret(table_cfg.base_env)
+        table_id = get_secret(table_cfg.table_env)
 
         if not base_id:
             raise ValueError(
-                f"Environment variable {table_cfg.base_env} not set (required for {key})"
+                f"{table_cfg.base_env} not found in environment variables or Secret Manager (required for {key})"
             )
         if not table_id:
             raise ValueError(
-                f"Environment variable {table_cfg.table_env} not set (required for {key})"
+                f"{table_cfg.table_env} not found in environment variables or Secret Manager (required for {key})"
             )
 
         return {
@@ -115,10 +119,74 @@ class AirtableClient:
                 extra={"base_id": base_id, "throttle_duration": throttle_duration}
             )
 
+    def build_school_year_filter(
+        self,
+        field_name: str,
+        active_years: List[str],
+        filter_type: str = "exact"
+    ) -> str:
+        """Build Airtable formula to filter by school years.
+
+        Args:
+            field_name: Name of the school year field in Airtable
+            active_years: List of school year strings (e.g., ["2025-2026", "2026-2027", ...])
+            filter_type: One of "exact", "exact_or_empty", "contains", "contains_or_empty"
+
+        Returns:
+            Airtable formula string for filtering
+
+        Examples:
+            exact: OR({School Year}="2025-2026", {School Year}="2026-2027")
+            exact_or_empty: OR({School Year}="2025-2026", {School Year}="2026-2027", OR({School Year}='', ISBLANK({School Year})))
+            contains: OR(FIND("2025-2026", {Field}), FIND("2026-2027", {Field}))
+            contains_or_empty: OR(FIND("2025-2026", {Field}), FIND("2026-2027", {Field}), OR({Field}='', ISBLANK({Field})))
+        """
+        if not active_years:
+            return ""
+
+        # Escape field name with curly braces for Airtable formula
+        field_ref = f"{{{field_name}}}"
+
+        if filter_type == "exact":
+            # For direct equality comparisons (students, student_truth)
+            if len(active_years) == 1:
+                return f"{field_ref}='{active_years[0]}'"
+            else:
+                conditions = [f"{field_ref}='{year}'" for year in active_years]
+                return f"OR({', '.join(conditions)})"
+
+        elif filter_type == "exact_or_empty":
+            # For direct equality that also includes empty/blank values (classes)
+            conditions = [f"{field_ref}='{year}'" for year in active_years]
+            # Add empty/blank condition - in Airtable, NOT() checks for empty/null/blank
+            conditions.append(f"NOT({field_ref})")
+            return f"OR({', '.join(conditions)})"
+
+        elif filter_type == "contains":
+            # For lookup/concatenated fields, use FIND() to check if year exists in string (absent - if no empty)
+            if len(active_years) == 1:
+                return f"FIND('{active_years[0]}', {field_ref})"
+            else:
+                conditions = [f"FIND('{year}', {field_ref})" for year in active_years]
+                return f"OR({', '.join(conditions)})"
+
+        elif filter_type == "contains_or_empty":
+            # For lookup fields that should also include empty values (parents, contractors, absent)
+            conditions = [f"FIND('{year}', {field_ref})" for year in active_years]
+            # Add empty/blank condition - in Airtable, NOT() checks for empty/null/blank
+            conditions.append(f"NOT({field_ref})")
+            return f"OR({', '.join(conditions)})"
+
+        else:
+            raise ValueError(
+                f"Invalid filter_type: {filter_type}. "
+                f"Must be 'exact', 'exact_or_empty', 'contains', or 'contains_or_empty'"
+            )
+
     @retry(
         retry=retry_if_exception_type((HTTPError, RequestException)),
-        stop=(stop_after_attempt(3) | stop_after_delay(API_TIMEOUT_SECONDS)),
-        wait=wait_exponential(multiplier=1, min=1, max=10),
+        stop=(stop_after_attempt(5) | stop_after_delay(API_TIMEOUT_SECONDS * 2)),  # More retries for 504 errors
+        wait=wait_exponential(multiplier=2, min=2, max=30),  # Longer waits for gateway timeouts
         reraise=True,
     )
     def _fetch_with_retry(
@@ -127,40 +195,78 @@ class AirtableClient:
         base_id: str,
         table_id: str,
         progress_callback: Optional[Callable[[str, Optional[Dict[str, Any]]], None]] = None,
+        cancel_check: Optional[Callable[[], None]] = None,
+        filter_formula: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Fetch records with retry logic and rate limiting.
-        
+
         Args:
             key: Entity key (e.g., "students", "parents")
             base_id: Airtable base ID
             table_id: Airtable table ID
             progress_callback: Optional callback function(message, metadata) called during pagination
+            cancel_check: Optional callback that raises an exception if the operation should be cancelled
+            filter_formula: Optional Airtable formula string for filtering records
         """
         self._throttle_request(base_id)
 
         api = self._get_api()
         table = api.table(base_id, table_id)
 
-        logger.info(
-            "Fetching Airtable records",
-            extra={
-                "entity": key,
-                "base": base_id,
-                "table": table_id,
-            },
-        )
+        log_extra = {
+            "entity": key,
+            "base": base_id,
+            "table": table_id,
+        }
+        if filter_formula:
+            log_extra["filter"] = filter_formula
+            # Log both to structured logs and to console for easy visibility
+            print(f"\n{'='*80}")
+            print(f"[AIRTABLE FETCH] Entity: {key}")
+            print(f"[AIRTABLE FETCH] Filter Formula:")
+            print(f"{filter_formula}")
+            print(f"{'='*80}\n")
+            logger.info(f"Fetching Airtable records with filter: {filter_formula}", extra=log_extra)
+        else:
+            logger.info("Fetching Airtable records (NO FILTER)", extra=log_extra)
 
         # Fetch all records with pagination, throttling between pages
         records = []
         page_count = 0
         total_records = 0
         fetch_start_time = time.time()
-        
+
+        # Log start of fetch to real-time status
+        if progress_callback:
+            try:
+                progress_callback(
+                    f"Starting to fetch {key} records from Airtable...",
+                    {"entity": key, "filter_applied": filter_formula is not None}
+                )
+            except Exception:
+                pass
+
         try:
             # Use iterate() directly so we can throttle between pages
-            for page in table.iterate(page_size=100):
+            # If filter_formula is provided, pass it to iterate()
+            iterate_kwargs = {"page_size": 100}
+            if filter_formula:
+                iterate_kwargs["formula"] = filter_formula
+
+            for page in table.iterate(**iterate_kwargs):
+                # Check for cancellation/timeout at the start of each page
+                if cancel_check:
+                    try:
+                        cancel_check()
+                    except Exception:
+                        logger.info(
+                            "Fetch cancelled during pagination",
+                            extra={"entity": key, "pages_fetched": page_count, "records_fetched": total_records}
+                        )
+                        raise
+
                 page_start_time = time.time()
-                
+
                 # Time the actual page fetch from Airtable
                 page_fetch_start = time.time()
                 records.extend(page)
@@ -232,12 +338,12 @@ class AirtableClient:
                         }
                     )
 
-            # Call completion callback
+            # Call completion callback with total count
             if progress_callback:
                 try:
                     progress_callback(
-                        f"Completed fetching {total_records} records in {page_count} pages",
-                        {"pages": page_count, "records": total_records, "entity": key}
+                        f"✓ Loaded {total_records} {key} records (from {page_count} pages)",
+                        {"pages": page_count, "records": total_records, "entity": key, "completed": True}
                     )
                 except Exception:
                     pass
@@ -255,6 +361,35 @@ class AirtableClient:
                 },
             )
 
+        except HTTPError as exc:
+            # Special handling for 504 Gateway Timeout - these are often transient
+            if exc.response is not None and exc.response.status_code == 504:
+                logger.warning(
+                    "Airtable Gateway Timeout (504) - this may be transient, retries will be attempted",
+                    extra={
+                        "entity": key,
+                        "base": base_id,
+                        "table": table_id,
+                        "pages_fetched": page_count,
+                        "records_fetched": total_records,
+                        "status_code": 504,
+                    },
+                )
+            else:
+                logger.error(
+                    "HTTP error fetching from Airtable",
+                    extra={
+                        "entity": key,
+                        "base": base_id,
+                        "table": table_id,
+                        "status_code": exc.response.status_code if exc.response else None,
+                        "error": str(exc),
+                        "pages_fetched": page_count,
+                        "records_fetched": total_records,
+                    },
+                    exc_info=True,
+                )
+            raise
         except Exception as exc:
             logger.error(
                 "Error fetching from Airtable",
@@ -276,12 +411,16 @@ class AirtableClient:
         self,
         key: str,
         progress_callback: Optional[Callable[[str, Optional[Dict[str, Any]]], None]] = None,
+        cancel_check: Optional[Callable[[], None]] = None,
+        filter_formula: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Fetch records for the given logical entity.
 
         Args:
             key: Entity key (e.g., "students", "parents")
             progress_callback: Optional callback function(message, metadata) called during pagination
+            cancel_check: Optional callback that raises an exception if the operation should be cancelled
+            filter_formula: Optional Airtable formula string for filtering records
 
         Returns:
             List of record dictionaries
@@ -291,7 +430,7 @@ class AirtableClient:
         table_id = table_meta["table_id"]
 
         try:
-            return self._fetch_with_retry(key, base_id, table_id, progress_callback)
+            return self._fetch_with_retry(key, base_id, table_id, progress_callback, cancel_check, filter_formula)
         except Exception as exc:
             logger.error(
                 "Failed to fetch Airtable records after retries",
@@ -305,6 +444,7 @@ class AirtableClient:
         base_id: str,
         table_id: str,
         progress_callback: Optional[Callable[[str, Optional[Dict[str, Any]]], None]] = None,
+        cancel_check: Optional[Callable[[], None]] = None,
     ) -> List[Dict[str, Any]]:
         """Fetch records directly by base_id and table_id.
 
@@ -312,12 +452,13 @@ class AirtableClient:
             base_id: Airtable base ID
             table_id: Airtable table ID
             progress_callback: Optional callback function(message, metadata) called during pagination
+            cancel_check: Optional callback that raises an exception if the operation should be cancelled
 
         Returns:
             List of record dictionaries
         """
         try:
-            return self._fetch_with_retry("direct", base_id, table_id, progress_callback)
+            return self._fetch_with_retry("direct", base_id, table_id, progress_callback, cancel_check)
         except Exception as exc:
             logger.error(
                 "Failed to fetch Airtable records by ID",

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useRules } from "../hooks/useRules";
+import { ACTIVE_ENTITIES, ENTITY_TABLE_MAPPING } from "../config/entities";
 
 interface AIRuleCreatorProps {
   isOpen: boolean;
@@ -12,16 +13,11 @@ interface AIRuleCreatorProps {
   currentEntity?: string; // Optional: pre-select the current table
 }
 
-const ENTITY_OPTIONS = [
-  { value: "students", label: "Students" },
-  { value: "parents", label: "Parents" },
-  { value: "contractors", label: "Contractors" },
-  { value: "classes", label: "Classes" },
-  { value: "attendance", label: "Attendance" },
-  { value: "truth", label: "Truth" },
-  { value: "student_truth", label: "Student Truth" },
-  { value: "payments", label: "Payments" },
-];
+// Generate entity options from central config
+const ENTITY_OPTIONS = ACTIVE_ENTITIES.map((entity) => ({
+  value: entity,
+  label: ENTITY_TABLE_MAPPING[entity] || entity,
+}));
 
 export function AIRuleCreator({
   isOpen,
@@ -271,8 +267,8 @@ export function AIRuleCreator({
                   </select>
                 </div>
 
-                 {/* Field Lookup Status Indicator */}
-                 {parsedRule?.rule_data?.field_lookup_status && (
+                 {/* Field Lookup Status Indicator - For required fields */}
+                 {parsedRule?.rule_data?.field_lookup_status && parsedRule.category === "required_fields" && (
                    <div className={`p-3 rounded-lg border ${
                      parsedRule.rule_data.field_lookup_status === "found" || parsedRule.rule_data.field_lookup_status === "found_partial"
                        ? "bg-green-50 border-green-200"
@@ -307,6 +303,59 @@ export function AIRuleCreator({
                          )}
                        </div>
                      </div>
+                   </div>
+                 )}
+
+                 {/* Field Lookup Status Indicator - For duplicate rules (conditions) */}
+                 {parsedRule?.rule_data?.conditions && parsedRule.category === "duplicates" && (
+                   <div className="space-y-2">
+                     {parsedRule.rule_data.conditions.map((condition: any, idx: number) => {
+                       const lookupStatus = condition.field_lookup_status;
+                       if (!lookupStatus) return null;
+                       
+                       return (
+                         <div key={idx} className={`p-3 rounded-lg border ${
+                           lookupStatus === "found" || lookupStatus === "found_partial"
+                             ? "bg-green-50 border-green-200"
+                             : lookupStatus === "field_not_found" || lookupStatus === "table_not_found"
+                             ? "bg-yellow-50 border-yellow-200"
+                             : "bg-red-50 border-red-200"
+                         }`}>
+                           <div className="flex items-start gap-2">
+                             {lookupStatus === "found" || lookupStatus === "found_partial" ? (
+                               <span className="text-green-600">✓</span>
+                             ) : (
+                               <span className="text-yellow-600">⚠</span>
+                             )}
+                             <div className="flex-1">
+                               <div className="text-sm font-medium text-[var(--text-main)] mb-1">
+                                 Condition {idx + 1} ({condition.type}): {lookupStatus === "found" ? "Found" : 
+                                         lookupStatus === "found_partial" ? "Found (Partial Match)" :
+                                         lookupStatus === "field_not_found" ? "Field Not Found" :
+                                         lookupStatus === "table_not_found" ? "Table Not Found" :
+                                         lookupStatus === "schema_not_found" ? "Schema Not Found" :
+                                         "Error"}
+                               </div>
+                               {condition.field_lookup_message && (
+                                 <div className="text-xs text-[var(--text-muted)]">
+                                   {condition.field_lookup_message}
+                                 </div>
+                               )}
+                               {condition.field_id && (
+                                 <div className="text-xs font-mono text-[var(--text-muted)] mt-1">
+                                   Field ID: {condition.field_id}
+                                 </div>
+                               )}
+                               {condition.field_ids && condition.field_ids.length > 0 && (
+                                 <div className="text-xs font-mono text-[var(--text-muted)] mt-1">
+                                   Field IDs: {condition.field_ids.join(", ")}
+                                 </div>
+                               )}
+                             </div>
+                           </div>
+                         </div>
+                       );
+                     })}
                    </div>
                  )}
 

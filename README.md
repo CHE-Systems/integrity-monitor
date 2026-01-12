@@ -22,7 +22,7 @@ AI-driven monitoring pipeline that keeps Airtable enrollment data accurate for S
   - Write structured issues to Airtable `Data Issues` table and mirrored summaries into Firestore (`integrity_runs`, `integrity_metrics_daily`, optional `integrity_issues`).
   - Serve a secured `POST /integrity/run` endpoint for Cloud Scheduler → Cloud Run jobs, plus lightweight health endpoints (`/health` ready today).
 - Config scaffolding now lives under `backend/config/`:
-  - `schema.yaml` codifies the entity identifiers, relationships, duplicate hints, and required key fields from `docs/prompt-1-schema-spec.md`.
+  - Rules are managed in Firestore only. The `schema.yaml` file has been removed. Use the Rules UI or API to manage rules.
   - `schema_loader.py` (with Pydantic models in `models.py`) lets the backend load strongly typed configs. `/schema` endpoint currently dumps the config for dev validation.
   - `rules.yaml` + `config_loader.py`/`settings.py` capture runtime scheduling + Airtable/Firestore mapping described in `docs/prompt-2-architecture-plan.md`, plus attendance thresholds from `docs/prompt-5-attendance-rules.md`.
 - Service layout created per prompt 2:

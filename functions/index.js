@@ -1,13 +1,13 @@
-const {initializeApp} = require("firebase-admin/app");
-const {getAuth} = require("firebase-admin/auth");
-const {getFirestore, Timestamp} = require("firebase-admin/firestore");
-const {onCall, HttpsError} = require("firebase-functions/v2/https");
-const {onSchedule} = require("firebase-functions/v2/scheduler");
-const {onDocumentUpdated} = require("firebase-functions/v2/firestore");
-const {setGlobalOptions} = require("firebase-functions");
-const {defineSecret} = require("firebase-functions/params");
+const { initializeApp } = require("firebase-admin/app");
+const { getAuth } = require("firebase-admin/auth");
+const { getFirestore, Timestamp } = require("firebase-admin/firestore");
+const { onCall, HttpsError } = require("firebase-functions/v2/https");
+const { onSchedule } = require("firebase-functions/v2/scheduler");
+const { onDocumentUpdated } = require("firebase-functions/v2/firestore");
+const { setGlobalOptions } = require("firebase-functions");
+const { defineSecret } = require("firebase-functions/params");
 const logger = require("firebase-functions/logger");
-const {DateTime} = require("luxon");
+const { DateTime } = require("luxon");
 
 initializeApp();
 const db = getFirestore();
@@ -117,6 +117,7 @@ exports.runScheduledScans = onSchedule(
           let nextRunTimestamp = null;
           let scheduledFor = null;
           let runConfig = null;
+          let notifySlack = false;
 
           // Claim the schedule in a transaction
           await db.runTransaction(async (transaction) => {
@@ -207,6 +208,7 @@ exports.runScheduledScans = onSchedule(
             // Store values for use outside transaction
             scheduledFor = nextRunAt;
             runConfig = currentData.run_config;
+            notifySlack = currentData.notify_slack || false;
 
             // Create execution record
             const executionRef = db.collection("schedule_executions").doc(executionId);
@@ -244,11 +246,23 @@ exports.runScheduledScans = onSchedule(
           logger.info(`Claimed schedule ${scheduleId}`, {
             nextRunAt: nextRunTimestamp.toDate().toISOString(),
             executionId: executionId,
+            has_run_config: !!runConfig,
+            run_config_keys: runConfig ? Object.keys(runConfig) : [],
           });
 
           // Trigger the backend run
-          const entities = runConfig.entities || [];
-          const rules = runConfig.rules;
+          // Safely extract entities and rules with null checks
+          const entities = (runConfig && runConfig.entities) || [];
+          const rules = (runConfig && runConfig.rules) || null;
+
+          // Log what we're about to send
+          logger.info(`Preparing run request for schedule ${scheduleId}`, {
+            entities_count: entities.length,
+            entities: entities,
+            has_rules: !!rules,
+            rules_keys: rules ? Object.keys(rules) : [],
+            rules_content: rules ? JSON.stringify(rules) : null,
+          });
 
           const params = new URLSearchParams({
             trigger: "schedule",
@@ -263,12 +277,81 @@ exports.runScheduledScans = onSchedule(
               params.append("entities", entity);
             });
           }
-          if (rules) {
+          
+          // Only include rules if they exist and have content
+          if (rules && typeof rules === 'object' && Object.keys(rules).length > 0) {
             requestBody.rules = rules;
+
+            // Build checks object based on which rule categories have selections
+            // This enables the backend to know which check types to run
+            const checks = {};
+
+            // Check if duplicates has any rules selected
+            if (rules.duplicates && typeof rules.duplicates === 'object') {
+              const hasSelectedDuplicates = Object.values(rules.duplicates).some(
+                arr => Array.isArray(arr) && arr.length > 0
+              );
+              checks.duplicates = hasSelectedDuplicates;
+            }
+
+            // Check if relationships has any rules selected
+            if (rules.relationships && typeof rules.relationships === 'object') {
+              const hasSelectedRelationships = Object.values(rules.relationships).some(
+                arr => Array.isArray(arr) && arr.length > 0
+              );
+              checks.links = hasSelectedRelationships;
+            }
+
+            // Check if required_fields has any rules selected
+            if (rules.required_fields && typeof rules.required_fields === 'object') {
+              const hasSelectedRequiredFields = Object.values(rules.required_fields).some(
+                arr => Array.isArray(arr) && arr.length > 0
+              );
+              checks.required_fields = hasSelectedRequiredFields;
+            }
+
+            // Check if value_checks has any rules selected
+            if (rules.value_checks && typeof rules.value_checks === 'object') {
+              const hasSelectedValueChecks = Object.values(rules.value_checks).some(
+                arr => Array.isArray(arr) && arr.length > 0
+              );
+              checks.value_checks = hasSelectedValueChecks;
+            }
+
+            // Check if attendance_rules is enabled
+            if (rules.attendance_rules === true) {
+              checks.attendance = true;
+            }
+
+            // Only add checks if at least one is enabled
+            if (Object.keys(checks).length > 0) {
+              requestBody.checks = checks;
+            }
+          }
+          // Include notify_slack if enabled on the schedule
+          if (notifySlack) {
+            requestBody.notify_slack = true;
           }
 
           const url = `${INTEGRITY_RUNNER_URL}/integrity/run?${params.toString()}`;
-          logger.info(`Triggering run for schedule ${scheduleId}`, { url, entities, has_rules: !!rules });
+          logger.info(`Triggering run for schedule ${scheduleId}`, {
+            url,
+            entities,
+            entities_count: entities.length,
+            has_rules: !!rules,
+            rules_structure: rules ? {
+              has_duplicates: !!(rules.duplicates && Object.keys(rules.duplicates).length > 0),
+              has_relationships: !!(rules.relationships && Object.keys(rules.relationships).length > 0),
+              has_required_fields: !!(rules.required_fields && Object.keys(rules.required_fields).length > 0),
+              has_value_checks: !!(rules.value_checks && Object.keys(rules.value_checks).length > 0),
+              has_attendance_rules: rules.attendance_rules === true,
+            } : null,
+            has_checks: !!requestBody.checks,
+            checks: requestBody.checks,
+            notify_slack: notifySlack,
+            requestBody: JSON.stringify(requestBody),
+            requestBody_keys: Object.keys(requestBody),
+          });
 
           let runId = null;
           let timeoutId = null;
@@ -277,16 +360,20 @@ exports.runScheduledScans = onSchedule(
             const controller = new AbortController();
             timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
 
+            // Serialize the body for the request
+            const bodyString = JSON.stringify(requestBody);
+
             const response = await fetch(url, {
-              method: "POST",
+              method: 'POST',
               headers: {
-                Authorization: `Bearer ${API_AUTH_TOKEN}`,
-                "Content-Type": "application/json",
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${API_AUTH_TOKEN}`,
+                'Content-Length': String(Buffer.byteLength(bodyString, 'utf8')),
               },
-              body: Object.keys(requestBody).length > 0 ? JSON.stringify({ run_config: requestBody }) : undefined,
+              body: bodyString,
               signal: controller.signal,
             });
-            
+
             clearTimeout(timeoutId);
             timeoutId = null;
 
@@ -325,7 +412,7 @@ exports.runScheduledScans = onSchedule(
             if (timeoutId !== null) {
               clearTimeout(timeoutId);
             }
-            
+
             // Handle timeout errors specifically
             if (error.name === 'AbortError') {
               logger.error(`Request to backend timed out after 30 seconds for schedule ${scheduleId}`, {
@@ -389,7 +476,7 @@ exports.runScheduledScans = onSchedule(
 function computeNextRunAt(frequency, timeOfDay, timezone, daysOfWeek, intervalMinutes, timesOfDay, previousNextRunAt) {
   // If previousNextRunAt is provided, use it as the base time (for incrementing)
   // Otherwise, use current time (for initial calculation)
-  const tz = previousNextRunAt 
+  const tz = previousNextRunAt
     ? DateTime.fromJSDate(previousNextRunAt.toDate()).setZone(timezone)
     : DateTime.now().setZone(timezone);
   let nextRun;
@@ -411,7 +498,7 @@ function computeNextRunAt(frequency, timeOfDay, timezone, daysOfWeek, intervalMi
       // Then calculate how many intervals have passed since that time today
       const [startHours, startMinutes] = timeOfDay.split(":").map(Number);
       const startTimeToday = tz.set({ hour: startHours, minute: startMinutes, second: 0, millisecond: 0 });
-      
+
       // If start time hasn't passed today, use it
       if (startTimeToday > tz) {
         nextRun = startTimeToday;
@@ -420,13 +507,13 @@ function computeNextRunAt(frequency, timeOfDay, timezone, daysOfWeek, intervalMi
         // Find how many intervals have passed since start time
         const minutesSinceStart = tz.diff(startTimeToday, "minutes").minutes;
         const intervalsPassed = Math.floor(minutesSinceStart / intervalMinutes);
-        
+
         // Next run is start time + (intervalsPassed + 1) * intervalMinutes
         nextRun = startTimeToday.plus({ minutes: (intervalsPassed + 1) * intervalMinutes });
-      
+
         // Safety check: if next run is in the past (shouldn't happen, but just in case)
-      if (nextRun <= tz) {
-        nextRun = nextRun.plus({ minutes: intervalMinutes });
+        if (nextRun <= tz) {
+          nextRun = nextRun.plus({ minutes: intervalMinutes });
         }
       }
     }
@@ -434,10 +521,10 @@ function computeNextRunAt(frequency, timeOfDay, timezone, daysOfWeek, intervalMi
     // For custom_times, find the next time from the array that hasn't passed today
     const sortedTimes = [...timesOfDay].sort();
     const currentTimeStr = `${String(tz.hour).padStart(2, "0")}:${String(tz.minute).padStart(2, "0")}`;
-    
+
     // Find next time today
     let nextTimeStr = sortedTimes.find((time) => time > currentTimeStr);
-    
+
     if (!nextTimeStr) {
       // No more times today, use first time tomorrow
       nextTimeStr = sortedTimes[0];

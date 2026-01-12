@@ -172,26 +172,56 @@ class FirestoreWriter:
             Structured counts with total, by_type, and by_severity
         """
         by_type: Dict[str, int] = {}
-        by_severity: Dict[str, int] = {}
-        total = 0
+        by_severity: Dict[str, int] = {
+            "critical": 0,
+            "warning": 0,
+            "info": 0
+        }
+        
+        # Valid severity values
+        valid_severities = {"critical", "warning", "info"}
 
         for key, count in summary.items():
             # Skip special aggregate keys
-            if key in ["duplicate_groups_formed"] or key.startswith("attendance:"):
+            if key == "duplicate_groups_formed":
+                continue
+            
+            # Handle attendance keys
+            if key.startswith("attendance:"):
+                parts = key.split(":")
+                # Case: "attendance:severity" (already aggregated by severity)
+                if len(parts) == 2 and parts[1] in valid_severities:
+                    severity = parts[1]
+                    by_severity[severity] += count
+                    # Don't add to by_type here to avoid double-counting "attendance"
+                
+                # Case: "attendance:metric:severity" (detailed attendance issue)
+                elif len(parts) == 3 and parts[2] in valid_severities:
+                    # We don't add these to severity counts here because "attendance:severity"
+                    # already carries the aggregate. But we do want to ensure they aren't
+                    # double-counted in total if we were to sum by_type.
+                    pass
                 continue
 
-            # Parse keys like "missing_field:info" or "missing_link"
+            # Parse regular issue keys like "missing_field:info" or "missing_link"
             if ":" in key:
-                issue_type, severity = key.split(":", 1)
+                parts = key.split(":", 1)
+                issue_type, severity = parts
+                
+                # Aggregate by severity
+                if severity in valid_severities:
+                    by_severity[severity] += count
+                
                 # Aggregate by type
                 by_type[issue_type] = by_type.get(issue_type, 0) + count
-                # Aggregate by severity
-                by_severity[severity] = by_severity.get(severity, 0) + count
-                # Add to total
-                total += count
             else:
-                # Keys without severity (like "missing_field") - this is already aggregated by type
+                # Keys without severity (like "missing_field" or "attendance")
+                # These are type-level aggregates
                 by_type[key] = count
+
+        # Calculate total as the sum of all issues including info-level
+        # This ensures total count is never less than any individual severity count
+        total = by_severity["critical"] + by_severity["warning"] + by_severity["info"]
 
         return {
             "total": total,

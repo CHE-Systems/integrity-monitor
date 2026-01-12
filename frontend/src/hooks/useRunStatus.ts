@@ -5,7 +5,7 @@ import { db } from "../config/firebase";
 export interface RunStatus {
   id: string;
   run_id?: string;
-  status: "running" | "success" | "error" | "warning" | "timeout";
+  status: "running" | "success" | "error" | "warning" | "timeout" | "cancelled" | "failed" | "critical";
   started_at?: any;
   ended_at?: any;
   cancelled_at?: any;
@@ -18,6 +18,8 @@ export interface RunStatus {
     by_type?: Record<string, number>;
     by_severity?: Record<string, number>;
   };
+  new_issues_count?: number;
+  new_issues_by_severity?: Record<string, number>;
   error_message?: string;
   failed_checks?: string[];
   duration_fetch?: number;
@@ -32,6 +34,7 @@ export interface RunStatus {
       required_fields?: Record<string, string[]>;
       attendance_rules?: boolean;
     };
+    notify_slack?: boolean;
   };
 }
 
@@ -78,28 +81,25 @@ export function useRunStatus(runId: string | null) {
       runRef,
       (snapshot) => {
         const elapsed = Date.now() - startTime;
-        
+
         console.log(`[useRunStatus] Snapshot for runId ${runId}:`, {
           exists: snapshot.exists(),
-          elapsed: `${Math.floor(elapsed/1000)}s`,
+          elapsed: `${Math.floor(elapsed / 1000)}s`,
           data: snapshot.exists() ? snapshot.data() : null,
         });
-        
+
         if (snapshot.exists()) {
           // Clear any pending error timeout
           if (errorTimeout) {
             clearTimeout(errorTimeout);
             errorTimeout = null;
           }
-          
+
           const data = snapshot.data();
           const newStatus = {
             id: snapshot.id,
             ...data,
           } as RunStatus;
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/5d5f825f-e8a4-412f-af68-47be30198b26',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useRunStatus.ts:87',message:'Status update received from Firestore',data:{runId,status:newStatus.status,ended_at:newStatus.ended_at,cancelled_at:newStatus.cancelled_at},timestamp:Date.now(),sessionId:'debug-session',runId:'status-update',hypothesisId:'H5'})}).catch(()=>{});
-          // #endregion agent log
           setRunStatus(newStatus);
           setLoading(false);
           setError(null);
@@ -111,7 +111,7 @@ export function useRunStatus(runId: string | null) {
 
           // Only show error after max wait time
           if (elapsed < MAX_WAIT_TIME) {
-            console.log(`[useRunStatus] Run ${runId} not found yet, waiting... (elapsed: ${Math.floor(elapsed/1000)}s)`);
+            console.log(`[useRunStatus] Run ${runId} not found yet, waiting... (elapsed: ${Math.floor(elapsed / 1000)}s)`);
             // Clear any existing timeout
             if (errorTimeout) {
               clearTimeout(errorTimeout);
@@ -120,13 +120,13 @@ export function useRunStatus(runId: string | null) {
             errorTimeout = setTimeout(() => {
               const finalElapsed = Date.now() - startTime;
               if (finalElapsed >= MAX_WAIT_TIME) {
-                console.error(`[useRunStatus] Run ${runId} not found after ${Math.floor(finalElapsed/1000)}s`);
+                console.error(`[useRunStatus] Run ${runId} not found after ${Math.floor(finalElapsed / 1000)}s`);
                 setError("Run not found. The run may still be initializing. Please check the Runs page to see if it appears there.");
                 setLoading(false);
               }
             }, MAX_WAIT_TIME - elapsed);
           } else {
-            console.error(`[useRunStatus] Run ${runId} not found after ${Math.floor(elapsed/1000)}s`);
+            console.error(`[useRunStatus] Run ${runId} not found after ${Math.floor(elapsed / 1000)}s`);
             setError("Run not found. The run may still be initializing. Please check the Runs page to see if it appears there.");
             setLoading(false);
           }

@@ -27,9 +27,6 @@
       "**/.*",
       "**/node_modules/**"
     ],
-    "predeploy": [
-      "./build-frontend.sh"
-    ],
     "rewrites": [
       {
         "source": "**",

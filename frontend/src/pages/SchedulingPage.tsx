@@ -1,4 +1,5 @@
 import { useState, useMemo, Fragment, useRef, useEffect } from "react";
+import type { Dispatch, SetStateAction } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Timestamp, deleteField } from "firebase/firestore";
 import { useFirestoreScheduleGroups } from "../hooks/useFirestoreScheduleGroups";
@@ -8,29 +9,41 @@ import { useAuth } from "../hooks/useAuth";
 import { useRunStatus } from "../hooks/useRunStatus";
 import { useRules } from "../hooks/useRules";
 import ConfirmModal from "../components/ConfirmModal";
-import { RuleSelectionPanel } from "../components/RuleSelectionPanel";
 import type { AirtableSchema, AirtableTable } from "../utils/airtable";
 import { API_BASE } from "../config/api";
+import {
+  ACTIVE_ENTITIES,
+  ENTITY_TABLE_MAPPING,
+  TABLE_ENTITY_MAPPING,
+} from "../config/entities";
 import arrowLeftIcon from "../assets/keyboard_arrow_left.svg";
 import arrowRightIcon from "../assets/keyboard_arrow_right.svg";
 import doubleArrowLeftIcon from "../assets/keyboard_double_arrow_left.svg";
 import doubleArrowRightIcon from "../assets/keyboard_double_arrow_right.svg";
 
-const ENTITY_TABLE_MAPPING: Record<string, string> = {
-  students: "Students",
-  parents: "Parents",
-  contractors: "Contractors/Volunteers",
-  classes: "Classes",
-  attendance: "Attendance",
-  truth: "Truth",
-  payments: "Contractor/Vendor Invoices",
-  data_issues: "Help Tickets",
+type ScheduleForm = {
+  group_id: string;
+  name: string;
+  enabled: boolean;
+  timezone: string;
+  frequency: "daily" | "weekly" | "hourly" | "custom_times";
+  time_of_day: string;
+  days_of_week: number[];
+  interval_minutes?: number;
+  times_of_day?: string[];
+  entities: string[];
+  rules?: {
+    duplicates?: Record<string, string[]>;
+    relationships?: Record<string, string[]>;
+    required_fields?: Record<string, string[]>;
+    value_checks?: Record<string, string[]>;
+    attendance_rules?: boolean;
+  };
+  notify_slack: boolean;
+  stop_condition_type: "none" | "max_runs" | "stop_at";
+  max_runs?: number;
+  stop_at?: string;
 };
-
-// Reverse mapping: table name to entity
-const TABLE_ENTITY_MAPPING: Record<string, string> = Object.fromEntries(
-  Object.entries(ENTITY_TABLE_MAPPING).map(([entity, table]) => [table, entity])
-);
 
 const TIMEZONES = [
   { value: "America/Denver", label: "Mountain Time (MT)" },
@@ -76,13 +89,8 @@ function computeNextRunAt(
   const month = parseInt(today.month) - 1; // 0-indexed
   const day = parseInt(today.day);
 
-  // Create a date string for "today at HH:mm" in the target timezone
-  // Format: "YYYY-MM-DDTHH:mm:ss" - we'll use this to create a date
-  const dateStr = `${year}-${String(month + 1).padStart(2, "0")}-${String(
-    day
-  ).padStart(2, "0")}T${String(hours).padStart(2, "0")}:${String(
-    minutes
-  ).padStart(2, "0")}:00`;
+  // Create a local Date for "today at HH:mm" in the target timezone
+  // to help calculate the offset between UTC and the target timezone.
 
   // To convert a time in a specific timezone to UTC, we need to:
   // 1. Get what "now" is in the target timezone
@@ -503,9 +511,7 @@ function NextRunTooltip({
 }
 
 export function SchedulingPage() {
-  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const { user } = useAuth();
   const {
     data: groups,
     loading: groupsLoading,
@@ -537,7 +543,7 @@ export function SchedulingPage() {
   );
 
   const [groupForm, setGroupForm] = useState({ name: "", description: "" });
-  const [scheduleForm, setScheduleForm] = useState({
+  const [scheduleForm, setScheduleForm] = useState<ScheduleForm>({
     group_id: "",
     name: "",
     enabled: true,
@@ -556,6 +562,7 @@ export function SchedulingPage() {
           attendance_rules?: boolean;
         }
       | undefined,
+    notify_slack: false,
     stop_condition_type: "none" as "none" | "max_runs" | "stop_at",
     max_runs: undefined as number | undefined,
     stop_at: undefined as string | undefined,
@@ -663,9 +670,39 @@ export function SchedulingPage() {
         scheduleData.run_config.entities = scheduleForm.entities;
       }
 
-      // Include rules if specified
+      // Include rules if specified and has actual content
       if (scheduleForm.rules) {
-        scheduleData.run_config.rules = scheduleForm.rules;
+        // Validate that rules object has actual selections
+        const hasRules =
+          (scheduleForm.rules.duplicates &&
+            Object.keys(scheduleForm.rules.duplicates).length > 0 &&
+            Object.values(scheduleForm.rules.duplicates).some(
+              (arr) => Array.isArray(arr) && arr.length > 0
+            )) ||
+          (scheduleForm.rules.relationships &&
+            Object.keys(scheduleForm.rules.relationships).length > 0 &&
+            Object.values(scheduleForm.rules.relationships).some(
+              (arr) => Array.isArray(arr) && arr.length > 0
+            )) ||
+          (scheduleForm.rules.required_fields &&
+            Object.keys(scheduleForm.rules.required_fields).length > 0 &&
+            Object.values(scheduleForm.rules.required_fields).some(
+              (arr) => Array.isArray(arr) && arr.length > 0
+            )) ||
+          (scheduleForm.rules.value_checks &&
+            Object.keys(scheduleForm.rules.value_checks).length > 0 &&
+            Object.values(scheduleForm.rules.value_checks).some(
+              (arr) => Array.isArray(arr) && arr.length > 0
+            )) ||
+          scheduleForm.rules.attendance_rules === true;
+
+        if (hasRules) {
+          scheduleData.run_config.rules = scheduleForm.rules;
+        } else {
+          console.warn(
+            "Schedule form has rules object but no actual rule selections, skipping rules"
+          );
+        }
       }
 
       // Include stop condition fields if set
@@ -684,6 +721,11 @@ export function SchedulingPage() {
         scheduleData.stop_at = Timestamp.fromDate(stopAtDate);
       }
 
+      // Include notify_slack if enabled
+      if (scheduleForm.notify_slack) {
+        scheduleData.notify_slack = true;
+      }
+
       await createSchedule(scheduleData);
 
       setShowScheduleModal(false);
@@ -699,6 +741,7 @@ export function SchedulingPage() {
         times_of_day: undefined,
         entities: [],
         rules: undefined,
+        notify_slack: false,
         stop_condition_type: "none",
         max_runs: undefined,
         stop_at: undefined,
@@ -765,9 +808,39 @@ export function SchedulingPage() {
         updateData.run_config.entities = scheduleForm.entities;
       }
 
-      // Include rules if specified
+      // Include rules if specified and has actual content
       if (scheduleForm.rules) {
-        updateData.run_config.rules = scheduleForm.rules;
+        // Validate that rules object has actual selections
+        const hasRules =
+          (scheduleForm.rules.duplicates &&
+            Object.keys(scheduleForm.rules.duplicates).length > 0 &&
+            Object.values(scheduleForm.rules.duplicates).some(
+              (arr) => Array.isArray(arr) && arr.length > 0
+            )) ||
+          (scheduleForm.rules.relationships &&
+            Object.keys(scheduleForm.rules.relationships).length > 0 &&
+            Object.values(scheduleForm.rules.relationships).some(
+              (arr) => Array.isArray(arr) && arr.length > 0
+            )) ||
+          (scheduleForm.rules.required_fields &&
+            Object.keys(scheduleForm.rules.required_fields).length > 0 &&
+            Object.values(scheduleForm.rules.required_fields).some(
+              (arr) => Array.isArray(arr) && arr.length > 0
+            )) ||
+          (scheduleForm.rules.value_checks &&
+            Object.keys(scheduleForm.rules.value_checks).length > 0 &&
+            Object.values(scheduleForm.rules.value_checks).some(
+              (arr) => Array.isArray(arr) && arr.length > 0
+            )) ||
+          scheduleForm.rules.attendance_rules === true;
+
+        if (hasRules) {
+          updateData.run_config.rules = scheduleForm.rules;
+        } else {
+          console.warn(
+            "Schedule form has rules object but no actual rule selections, skipping rules"
+          );
+        }
       }
 
       // Handle stop condition fields
@@ -789,6 +862,9 @@ export function SchedulingPage() {
         updateData.max_runs = deleteField();
       }
 
+      // Include notify_slack setting
+      updateData.notify_slack = scheduleForm.notify_slack;
+
       await updateSchedule(scheduleId, updateData);
 
       setEditingSchedule(null);
@@ -804,6 +880,7 @@ export function SchedulingPage() {
         times_of_day: undefined,
         entities: [],
         rules: undefined,
+        notify_slack: false,
         stop_condition_type: "none",
         max_runs: undefined,
         stop_at: undefined,
@@ -885,6 +962,7 @@ export function SchedulingPage() {
       times_of_day: schedule.times_of_day,
       entities: schedule.run_config.entities || [],
       rules: schedule.run_config.rules,
+      notify_slack: schedule.notify_slack || false,
       stop_condition_type: stopConditionType,
       max_runs: maxRuns,
       stop_at: stopAt,
@@ -1007,6 +1085,7 @@ export function SchedulingPage() {
                   times_of_day: undefined,
                   entities: [],
                   rules: undefined,
+                  notify_slack: false,
                   stop_condition_type: "none",
                   max_runs: undefined,
                   stop_at: undefined,
@@ -1314,6 +1393,7 @@ export function SchedulingPage() {
               times_of_day: undefined,
               entities: [],
               rules: undefined,
+              notify_slack: false,
               stop_condition_type: "none",
               max_runs: undefined,
               stop_at: undefined,
@@ -1660,28 +1740,8 @@ function CreateScheduleModal({
 }: {
   isOpen: boolean;
   groups: ReturnType<typeof useFirestoreScheduleGroups>["data"];
-  form: {
-    group_id: string;
-    name: string;
-    enabled: boolean;
-    timezone: string;
-    frequency: "daily" | "weekly" | "hourly" | "custom_times";
-    time_of_day: string;
-    days_of_week: number[];
-    interval_minutes?: number;
-    times_of_day?: string[];
-    entities: string[];
-    rules?: {
-      duplicates?: Record<string, string[]>;
-      relationships?: Record<string, string[]>;
-      required_fields?: Record<string, string[]>;
-      attendance_rules?: boolean;
-    };
-    stop_condition_type: "none" | "max_runs" | "stop_at";
-    max_runs?: number;
-    stop_at?: string;
-  };
-  setForm: (form: typeof form) => void;
+  form: ScheduleForm;
+  setForm: Dispatch<SetStateAction<ScheduleForm>>;
   onConfirm: () => void;
   onCancel: () => void;
   isEditing: boolean;
@@ -1696,11 +1756,42 @@ function CreateScheduleModal({
   const [schema, setSchema] = useState<AirtableSchema | null>(null);
   const [schemaLoading, setSchemaLoading] = useState(false);
   const [rules, setRules] = useState<any>(null);
+  const [rulesError, setRulesError] = useState<string | null>(null);
   const [expandedTables, setExpandedTables] = useState<Set<string>>(
     new Set() // Start empty, expand as tables are selected
   );
   const { loadRules, loading: rulesLoading } = useRules();
   const { getToken, loading: authLoading, user: authUser } = useAuth();
+
+  // Helper to find matching entity name in rules (handles singular/plural mismatches)
+  const findEntityInRules = (
+    category: "duplicates" | "relationships" | "required_fields",
+    entityName: string
+  ): string | null => {
+    if (!rules || !rules[category]) return null;
+
+    const availableEntities = Object.keys(rules[category]);
+
+    // Try exact match first
+    if (availableEntities.includes(entityName)) {
+      return entityName;
+    }
+
+    // Try singular/plural variations
+    const entityLower = entityName.toLowerCase();
+    const matchingEntity = availableEntities.find((e) => {
+      const eLower = e.toLowerCase();
+      return (
+        eLower === entityLower ||
+        eLower === entityLower.slice(0, -1) || // entity is singular of entityName
+        eLower === entityLower + "s" || // entity is plural of entityName
+        entityLower === eLower + "s" || // entityName is plural of entity
+        entityLower === eLower.slice(0, -1) // entityName is singular of entity
+      );
+    });
+
+    return matchingEntity || null;
+  };
 
   // Fetch schema when modal opens - load from local JSON first for instant display
   useEffect(() => {
@@ -1764,7 +1855,6 @@ function CreateScheduleModal({
     currentRules: any
   ): typeof form.rules => {
     const cleaned: typeof formRules = {};
-    let hasChanges = false;
 
     // Validate duplicates
     if (formRules.duplicates) {
@@ -1785,11 +1875,6 @@ function CreateScheduleModal({
           if (validRuleIds.length > 0) {
             cleaned.duplicates[entity] = validRuleIds;
           }
-          if (validRuleIds.length !== ruleIds.length) {
-            hasChanges = true;
-          }
-        } else {
-          hasChanges = true;
         }
       }
       if (Object.keys(cleaned.duplicates).length === 0) {
@@ -1808,11 +1893,6 @@ function CreateScheduleModal({
           if (validRuleIds.length > 0) {
             cleaned.relationships[entity] = validRuleIds;
           }
-          if (validRuleIds.length !== ruleIds.length) {
-            hasChanges = true;
-          }
-        } else {
-          hasChanges = true;
         }
       }
       if (Object.keys(cleaned.relationships).length === 0) {
@@ -1839,11 +1919,6 @@ function CreateScheduleModal({
           if (validRuleIds.length > 0) {
             cleaned.required_fields[entity] = validRuleIds;
           }
-          if (validRuleIds.length !== ruleIds.length) {
-            hasChanges = true;
-          }
-        } else {
-          hasChanges = true;
         }
       }
       if (Object.keys(cleaned.required_fields).length === 0) {
@@ -1870,9 +1945,17 @@ function CreateScheduleModal({
     if (!isOpen || authLoading || !authUser) return;
 
     const loadRulesData = async () => {
+      setRulesError(null);
       try {
         const rulesData = await loadRules();
-        setRules(rulesData);
+        setRules(
+          rulesData || {
+            duplicates: {},
+            relationships: {},
+            required_fields: {},
+            attendance_rules: {},
+          }
+        );
 
         // Validate and clean up form rules against current rules
         if (rulesData && form.rules) {
@@ -1883,6 +1966,16 @@ function CreateScheduleModal({
         }
       } catch (error) {
         console.error("Failed to load rules:", error);
+        const errorMessage =
+          error instanceof Error ? error.message : "Failed to load rules";
+        setRulesError(errorMessage);
+        // Set empty rules structure so UI doesn't hang
+        setRules({
+          duplicates: {},
+          relationships: {},
+          required_fields: {},
+          attendance_rules: {},
+        });
       }
     };
 
@@ -1904,36 +1997,18 @@ function CreateScheduleModal({
     return map;
   }, [schema]);
 
-  // Get available entities (those that have tables in schema AND have rules enabled)
+  // Get available entities (all active entities that exist in schema, regardless of rules)
   const availableEntities = useMemo(() => {
     const entitiesFromSchema = Array.from(entityTableMap.keys());
 
-    // Filter to only entities that have rules enabled
-    if (!rules) {
-      return entitiesFromSchema;
-    }
-
+    // Show all active entities that exist in schema, regardless of rules
+    // This ensures entities don't disappear when rules load and allows
+    // users to see and select entities even before rules are created
+    const activeEntitiesSet = new Set<string>(ACTIVE_ENTITIES);
     return entitiesFromSchema
-      .filter((entity) => {
-        // Check if entity has any rules in any category
-        const hasDuplicates =
-          rules.duplicates?.[entity] &&
-          ((rules.duplicates[entity].likely &&
-            rules.duplicates[entity].likely.length > 0) ||
-            (rules.duplicates[entity].possible &&
-              rules.duplicates[entity].possible.length > 0));
-        const hasRelationships =
-          rules.relationships?.[entity] &&
-          Object.keys(rules.relationships[entity]).length > 0;
-        const hasRequiredFields =
-          rules.required_fields?.[entity] &&
-          Array.isArray(rules.required_fields[entity]) &&
-          rules.required_fields[entity].length > 0;
-
-        return hasDuplicates || hasRelationships || hasRequiredFields;
-      })
+      .filter((entity) => activeEntitiesSet.has(entity))
       .sort();
-  }, [entityTableMap, rules]);
+  }, [entityTableMap]);
 
   // Initialize selected entities when schema loads or form changes
   useEffect(() => {
@@ -1952,7 +2027,12 @@ function CreateScheduleModal({
     entityName: string
   ): string[] => {
     if (!rules) return [];
-    const categoryRules = rules[category]?.[entityName];
+
+    // Find the actual entity name in the rules (handles name mismatches)
+    const actualEntityName = findEntityInRules(category, entityName);
+    if (!actualEntityName) return [];
+
+    const categoryRules = rules[category]?.[actualEntityName];
     if (!categoryRules) return [];
 
     if (category === "duplicates") {
@@ -2000,31 +2080,6 @@ function CreateScheduleModal({
     });
 
     return allSelected;
-  };
-
-  // Check if any rules are selected for a check type (for indeterminate state)
-  const areAnyRulesSelectedForCheckType = (
-    checkType: "duplicates" | "links" | "required_fields" | "attendance"
-  ): boolean => {
-    if (checkType === "attendance") {
-      return form.rules?.attendance_rules === true;
-    }
-
-    const category =
-      checkType === "duplicates"
-        ? "duplicates"
-        : checkType === "links"
-        ? "relationships"
-        : "required_fields";
-
-    if (selectedEntities.size === 0) return false;
-    if (!rules) return false;
-
-    // Check if any entity has any rules selected
-    return Array.from(selectedEntities).some((entity) => {
-      const selectedIds = form.rules?.[category]?.[entity] || [];
-      return selectedIds.length > 0;
-    });
   };
 
   // Check if all rules are selected for a specific table and rule type
@@ -2179,23 +2234,30 @@ function CreateScheduleModal({
   const initializeRulesForEntity = (entity: string) => {
     if (!rules) return;
 
+    const nextRules = {
+      ...form.rules,
+      duplicates: {
+        ...form.rules?.duplicates,
+        [entity]: getAllRuleIds("duplicates", entity),
+      },
+      relationships: {
+        ...form.rules?.relationships,
+        [entity]: getAllRuleIds("relationships", entity),
+      },
+      required_fields: {
+        ...form.rules?.required_fields,
+        [entity]: getAllRuleIds("required_fields", entity),
+      },
+    };
+
+    // Auto-enable attendance rules if selecting absent or attendance
+    if (entity === "absent" || entity === "attendance") {
+      nextRules.attendance_rules = true;
+    }
+
     setForm({
       ...form,
-      rules: {
-        ...form.rules,
-        duplicates: {
-          ...form.rules?.duplicates,
-          [entity]: getAllRuleIds("duplicates", entity),
-        },
-        relationships: {
-          ...form.rules?.relationships,
-          [entity]: getAllRuleIds("relationships", entity),
-        },
-        required_fields: {
-          ...form.rules?.required_fields,
-          [entity]: getAllRuleIds("required_fields", entity),
-        },
-      },
+      rules: nextRules,
     });
   };
 
@@ -2211,6 +2273,16 @@ function CreateScheduleModal({
     if (nextRules?.required_fields) {
       delete nextRules.required_fields[entity];
     }
+
+    // Auto-disable attendance rules if deselecting absent/attendance and the other isn't selected
+    if (entity === "absent" || entity === "attendance") {
+      const otherEntity = entity === "absent" ? "attendance" : "absent";
+      // If the other entity is NOT in the selected set (meaning neither will be selected after this toggle)
+      if (!selectedEntities.has(otherEntity)) {
+        nextRules.attendance_rules = false;
+      }
+    }
+
     setForm({ ...form, rules: nextRules });
   };
 
@@ -2292,6 +2364,46 @@ function CreateScheduleModal({
       }
     }
     return false;
+  })();
+
+  // Count total number of selected rules
+  const totalRuleCount = (() => {
+    let count = 0;
+
+    // Count attendance rules (1 if enabled, 0 if not)
+    if (form.rules?.attendance_rules === true) {
+      count += 1;
+    }
+
+    // Count duplicate rules
+    if (form.rules?.duplicates) {
+      for (const entity in form.rules.duplicates) {
+        count += form.rules.duplicates[entity].length;
+      }
+    }
+
+    // Count relationship rules
+    if (form.rules?.relationships) {
+      for (const entity in form.rules.relationships) {
+        count += form.rules.relationships[entity].length;
+      }
+    }
+
+    // Count required field rules
+    if (form.rules?.required_fields) {
+      for (const entity in form.rules.required_fields) {
+        count += form.rules.required_fields[entity].length;
+      }
+    }
+
+    // Count value check rules
+    if (form.rules?.value_checks) {
+      for (const entity in form.rules.value_checks) {
+        count += form.rules.value_checks[entity].length;
+      }
+    }
+
+    return count;
   })();
 
   return (
@@ -2746,7 +2858,12 @@ function CreateScheduleModal({
                 <div className="text-sm text-[var(--text-muted)] py-8 text-center border border-[var(--border)] rounded-lg">
                   Please select a table to see available rules
                 </div>
-              ) : !rules ? (
+              ) : rulesError ? (
+                <div className="text-sm text-red-600 py-8 text-center border border-red-300 rounded-lg bg-red-50">
+                  <div className="font-medium mb-1">Failed to load rules</div>
+                  <div className="text-xs">{rulesError}</div>
+                </div>
+              ) : rulesLoading || !rules ? (
                 <div className="text-sm text-[var(--text-muted)] py-8 text-center border border-[var(--border)] rounded-lg">
                   Loading rules...
                 </div>
@@ -2788,9 +2905,15 @@ function CreateScheduleModal({
                           <div className="px-3 pb-3 pt-2 space-y-4 border-t border-[var(--border)] bg-[var(--bg-mid)]/20">
                             {/* Duplicate Detection Rules */}
                             {(() => {
-                              const dupDef = rules?.duplicates?.[entity] as
-                                | { likely?: any[]; possible?: any[] }
-                                | undefined;
+                              const actualEntityName = findEntityInRules(
+                                "duplicates",
+                                entity
+                              );
+                              const dupDef = actualEntityName
+                                ? (rules?.duplicates?.[actualEntityName] as
+                                    | { likely?: any[]; possible?: any[] }
+                                    | undefined)
+                                : undefined;
                               if (!dupDef) return null;
 
                               const likelyRules = dupDef.likely || [];
@@ -2926,7 +3049,13 @@ function CreateScheduleModal({
 
                             {/* Relationship Rules */}
                             {(() => {
-                              const relRules = rules?.relationships?.[entity];
+                              const actualEntityName = findEntityInRules(
+                                "relationships",
+                                entity
+                              );
+                              const relRules = actualEntityName
+                                ? rules?.relationships?.[actualEntityName]
+                                : undefined;
                               if (
                                 !relRules ||
                                 Object.keys(relRules).length === 0
@@ -3003,8 +3132,13 @@ function CreateScheduleModal({
 
                             {/* Required Field Rules */}
                             {(() => {
-                              const reqFields =
-                                rules?.required_fields?.[entity];
+                              const actualEntityName = findEntityInRules(
+                                "required_fields",
+                                entity
+                              );
+                              const reqFields = actualEntityName
+                                ? rules?.required_fields?.[actualEntityName]
+                                : undefined;
                               if (
                                 !reqFields ||
                                 !Array.isArray(reqFields) ||
@@ -3084,32 +3218,57 @@ function CreateScheduleModal({
                               );
                             })()}
 
-                            {/* Attendance Rules (global, not per-table) */}
-                            {entity === Array.from(selectedEntities)[0] &&
+                            {/* Attendance Rules (for attendance and absent tables) */}
+                            {(entity === "attendance" || entity === "absent") &&
+                              (selectedEntities.has("attendance") ||
+                                selectedEntities.has("absent")) &&
                               rules?.attendance_rules && (
                                 <div className="space-y-2">
                                   <div className="text-sm font-medium text-[var(--text-main)]">
                                     Attendance Rules
                                   </div>
-                                  <label className="flex items-center gap-2 p-2 rounded-md hover:bg-[var(--bg-mid)]/40 cursor-pointer transition-colors">
-                                    <input
-                                      type="checkbox"
-                                      checked={
-                                        form.rules?.attendance_rules ?? false
-                                      }
-                                      onChange={(e) =>
-                                        handleRulesChange(
-                                          "attendance_rules",
-                                          "",
-                                          e.target.checked
-                                        )
-                                      }
-                                      className="w-3.5 h-3.5"
-                                    />
-                                    <span className="text-xs font-medium text-[var(--text-main)]">
-                                      Attendance Anomalies
-                                    </span>
-                                  </label>
+                                  {entity === "attendance" && (
+                                    <label className="flex items-center gap-2 p-2 rounded-md hover:bg-[var(--bg-mid)]/40 cursor-pointer transition-colors">
+                                      <input
+                                        type="checkbox"
+                                        checked={
+                                          form.rules?.attendance_rules ?? false
+                                        }
+                                        onChange={(e) =>
+                                          handleRulesChange(
+                                            "attendance_rules",
+                                            "",
+                                            e.target.checked
+                                          )
+                                        }
+                                        className="w-3.5 h-3.5"
+                                      />
+                                      <span className="text-xs font-medium text-[var(--text-main)]">
+                                        Attendance Anomalies
+                                      </span>
+                                    </label>
+                                  )}
+                                  {entity === "absent" && (
+                                    <label className="flex items-center gap-2 p-2 rounded-md hover:bg-[var(--bg-mid)]/40 cursor-pointer transition-colors">
+                                      <input
+                                        type="checkbox"
+                                        checked={
+                                          form.rules?.attendance_rules ?? false
+                                        }
+                                        onChange={(e) =>
+                                          handleRulesChange(
+                                            "attendance_rules",
+                                            "",
+                                            e.target.checked
+                                          )
+                                        }
+                                        className="w-3.5 h-3.5"
+                                      />
+                                      <span className="text-xs font-medium text-[var(--text-main)]">
+                                        Duplicate Absence Detection
+                                      </span>
+                                    </label>
+                                  )}
                                 </div>
                               )}
                           </div>
@@ -3126,6 +3285,40 @@ function CreateScheduleModal({
               )}
             </div>
           </div>
+        </div>
+
+        {/* Rule Count */}
+        <div className="mt-6 pt-4 border-t border-[var(--border)]">
+          <div className="text-sm text-[var(--text-muted)] text-center">
+            {totalRuleCount === 0 ? (
+              "No rules selected"
+            ) : (
+              <>
+                <span className="font-medium text-[var(--text-main)]">
+                  {totalRuleCount}
+                </span>{" "}
+                {totalRuleCount === 1 ? "rule" : "rules"} will be used for this
+                scan
+              </>
+            )}
+          </div>
+        </div>
+
+        {/* Slack Notification Toggle */}
+        <div className="mt-4 flex items-center justify-center">
+          <label className="flex items-center gap-2 cursor-pointer p-2 rounded-lg hover:bg-[var(--bg-mid)]/50">
+            <input
+              type="checkbox"
+              checked={form.notify_slack}
+              onChange={(e) =>
+                setForm({ ...form, notify_slack: e.target.checked })
+              }
+              className="w-4 h-4"
+            />
+            <span className="text-sm text-[var(--text-main)]">
+              Send Slack notification when scan completes with issues
+            </span>
+          </label>
         </div>
 
         <div className="flex justify-end space-x-3 mt-6">

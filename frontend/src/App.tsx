@@ -96,48 +96,81 @@ export default function App({ children }: AppProps) {
     runId: string,
     maxWait = 30000
   ): Promise<void> => {
-    const { doc, onSnapshot } = await import("firebase/firestore");
+    const { doc, onSnapshot, getDoc } = await import("firebase/firestore");
     const { db } = await import("./config/firebase");
     const startTime = Date.now();
+    const checkInterval = 500; // Poll every 500ms as fallback
 
     return new Promise((resolve) => {
       const runRef = doc(db, "integrity_runs", runId);
       let unsubscribe: (() => void) | null = null;
+      let pollInterval: NodeJS.Timeout | null = null;
+      let resolved = false;
 
-      // Set up timeout to resolve after maxWait even if document doesn't appear
-      const timeout = setTimeout(() => {
+      const checkAndResolve = (source: string) => {
+        if (resolved) return;
+        resolved = true;
+        clearTimeout(timeout);
         if (unsubscribe) {
           unsubscribe();
         }
+        if (pollInterval) {
+          clearInterval(pollInterval);
+        }
         console.log(
-          `[App] Run document not found after ${maxWait}ms, navigating anyway`
+          `[App] Run document found after ${
+            Date.now() - startTime
+          }ms (${source})`
         );
         resolve();
+      };
+
+      // Set up timeout to resolve after maxWait even if document doesn't appear
+      const timeout = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          if (unsubscribe) {
+            unsubscribe();
+          }
+          if (pollInterval) {
+            clearInterval(pollInterval);
+          }
+          console.log(
+            `[App] Run document not found after ${maxWait}ms, navigating anyway`
+          );
+          resolve();
+        }
       }, maxWait);
+
+      // Polling fallback: check periodically with getDoc
+      const pollDocument = async () => {
+        if (resolved) return;
+        try {
+          const snapshot = await getDoc(runRef);
+          if (snapshot.exists()) {
+            checkAndResolve("polling");
+          }
+        } catch (error) {
+          // Continue polling on error
+          console.error("[App] Error polling for run document:", error);
+        }
+      };
+
+      // Start polling immediately and then every checkInterval
+      pollDocument();
+      pollInterval = setInterval(pollDocument, checkInterval);
 
       // Use onSnapshot for real-time updates - fires immediately when document is created
       unsubscribe = onSnapshot(
         runRef,
         (snapshot) => {
           if (snapshot.exists()) {
-            clearTimeout(timeout);
-            if (unsubscribe) {
-              unsubscribe();
-            }
-            console.log(
-              `[App] Run document found after ${Date.now() - startTime}ms`
-            );
-            resolve();
+            checkAndResolve("onSnapshot");
           }
         },
         (error) => {
-          // On error, resolve anyway and let the page handle it
-          clearTimeout(timeout);
-          if (unsubscribe) {
-            unsubscribe();
-          }
-          console.error("[App] Error waiting for run document:", error);
-          resolve();
+          // On error, continue with polling fallback
+          console.error("[App] Error in onSnapshot listener:", error);
         }
       );
     });
@@ -167,29 +200,7 @@ export default function App({ children }: AppProps) {
         });
       }
 
-      // #region agent log
-      fetch(
-        "http://127.0.0.1:7242/ingest/5d5f825f-e8a4-412f-af68-47be30198b26",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            location: "App.tsx:107",
-            message: "Before fetch request",
-            data: {
-              url: `${API_BASE}/integrity/run?${params.toString()}`,
-              hasToken: !!token,
-            },
-            timestamp: Date.now(),
-            sessionId: "debug-session",
-            runId: "fetch-attempt",
-            hypothesisId: "C",
-          }),
-        }
-      ).catch(() => {});
-      // #endregion agent log
-
-      // Build run_config with entities, rules, and checks
+      // Build run_config with entities, rules, checks, and notify_slack
       const runConfig: any = {};
       if (config.entities && config.entities.length > 0) {
         runConfig.entities = config.entities;
@@ -200,22 +211,13 @@ export default function App({ children }: AppProps) {
       if (config.checks) {
         runConfig.checks = config.checks;
       }
-
-      // DEBUG LOGGING: Show what's being sent to backend
-      console.log("=".repeat(80));
-      console.log("FRONTEND: Starting Scan - Config Being Sent");
-      console.log("=".repeat(80));
-      console.log("Config from modal:", JSON.stringify(config, null, 2));
-      console.log("Run config to send:", JSON.stringify(runConfig, null, 2));
-      console.log("=".repeat(80));
+      if (config.notify_slack !== undefined) {
+        runConfig.notify_slack = config.notify_slack;
+      }
 
       // Build request body - send runConfig directly as the body
-      // FastAPI's Body(default=None) will receive this as the run_config parameter
       const requestBody =
         Object.keys(runConfig).length > 0 ? runConfig : undefined;
-
-      console.log("Request body:", JSON.stringify(requestBody, null, 2));
-      console.log("=".repeat(80));
 
       const response = await fetch(
         `${API_BASE}/integrity/run?${params.toString()}`,
@@ -227,31 +229,7 @@ export default function App({ children }: AppProps) {
           },
           body: requestBody ? JSON.stringify(requestBody) : undefined,
         }
-      ).catch((error) => {
-        // #region agent log
-        fetch(
-          "http://127.0.0.1:7242/ingest/5d5f825f-e8a4-412f-af68-47be30198b26",
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              location: "App.tsx:117",
-              message: "Fetch error caught",
-              data: {
-                error: error.message,
-                errorType: error.name,
-                errorStack: error.stack,
-              },
-              timestamp: Date.now(),
-              sessionId: "debug-session",
-              runId: "fetch-attempt",
-              hypothesisId: "C",
-            }),
-          }
-        ).catch(() => {});
-        // #endregion agent log
-        throw error;
-      });
+      );
 
       if (!response.ok) {
         const errorText = await response.text();
@@ -412,6 +390,7 @@ export default function App({ children }: AppProps) {
                 <div className="inline-flex rounded-full border border-[var(--border)] bg-white/80 p-1 text-sm">
                   <NavLink
                     to="/"
+                    end
                     className={({ isActive }) =>
                       `rounded-full px-4 py-1.5 font-medium transition-colors ${
                         isActive
@@ -420,7 +399,19 @@ export default function App({ children }: AppProps) {
                       }`
                     }
                   >
-                    Dashboard
+                    Overview
+                  </NavLink>
+                  <NavLink
+                    to="/admin"
+                    className={({ isActive }) =>
+                      `rounded-full px-4 py-1.5 font-medium transition-colors ${
+                        isActive
+                          ? "bg-[var(--brand)] text-white"
+                          : "text-[var(--text-muted)] hover:text-[var(--text-main)]"
+                      }`
+                    }
+                  >
+                    Admin
                   </NavLink>
                   <NavLink
                     to="/runs"
@@ -511,6 +502,7 @@ export default function App({ children }: AppProps) {
                     {runScanLoading ? "Starting..." : ""}
                   </button>
                 )}
+                {/* Reports tab disabled - uncomment to re-enable
                 <NavLink
                   to="/reports"
                   className={({ isActive }) =>
@@ -530,6 +522,7 @@ export default function App({ children }: AppProps) {
                     <path d="M280-280h80v-200h-80v200Zm320 0h80v-400h-80v400Zm-160 0h80v-120h-80v120Zm0-200h80v-80h-80v80ZM200-120q-33 0-56.5-23.5T120-200v-560q0-33 23.5-56.5T200-840h560q33 0 56.5 23.5T840-760v560q0 33-23.5 56.5T760-120H200Zm0-80h560v-560H200v560Zm0-560v560-560Z" />
                   </svg>
                 </NavLink>
+                */}
                 <NavLink
                   to="/scheduling"
                   className={({ isActive }) =>

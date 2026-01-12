@@ -29,27 +29,6 @@ const COLORS = {
 };
 
 export async function generateRunReport(run: RunHistoryItem): Promise<Blob> {
-  // #region agent log
-  fetch("http://127.0.0.1:7242/ingest/5d5f825f-e8a4-412f-af68-47be30198b26", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      location: "pdfReportService.tsx:28",
-      message: "generateRunReport entry",
-      data: {
-        runId: run.id,
-        hasCounts: !!run.counts,
-        hasByType: !!run.counts?.by_type,
-        hasBySeverity: !!run.counts?.by_severity,
-      },
-      timestamp: Date.now(),
-      sessionId: "debug-session",
-      runId: "run1",
-      hypothesisId: "A",
-    }),
-  }).catch(() => {});
-  // #endregion
-
   const byType = run.counts?.by_type || {};
   const bySeverity = run.counts?.by_severity || {};
 
@@ -71,26 +50,6 @@ export async function generateRunReport(run: RunHistoryItem): Promise<Blob> {
   } catch (error) {
     console.error("Failed to generate severity chart:", error);
   }
-
-  // #region agent log
-  fetch("http://127.0.0.1:7242/ingest/5d5f825f-e8a4-412f-af68-47be30198b26", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      location: "pdfReportService.tsx:60",
-      message: "Before creating PDF",
-      data: {
-        hasTypeChart: !!typeChartImage,
-        hasSeverityChart: !!severityChartImage,
-        jsPDFDefined: typeof jsPDF !== "undefined",
-      },
-      timestamp: Date.now(),
-      sessionId: "debug-session",
-      runId: "run1",
-      hypothesisId: "B",
-    }),
-  }).catch(() => {});
-  // #endregion
 
   const doc = new jsPDF({
     orientation: "portrait",
@@ -383,24 +342,6 @@ export async function generateRunReport(run: RunHistoryItem): Promise<Blob> {
       { align: "center" }
     );
   }
-
-  // #region agent log
-  fetch("http://127.0.0.1:7242/ingest/5d5f825f-e8a4-412f-af68-47be30198b26", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      location: "pdfReportService.tsx:350",
-      message: "PDF generation complete",
-      data: {
-        totalPages: doc.getNumberOfPages(),
-      },
-      timestamp: Date.now(),
-      sessionId: "debug-session",
-      runId: "run1",
-      hypothesisId: "C",
-    }),
-  }).catch(() => {});
-  // #endregion
 
   const blob = doc.output("blob");
   return blob;

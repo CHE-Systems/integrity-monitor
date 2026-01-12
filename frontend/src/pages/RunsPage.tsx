@@ -249,43 +249,76 @@ export function RunsPage() {
   };
 
   const handleDelete = async (runId: string) => {
-    if (
-      !confirm(
-        "Are you sure you want to delete this run? This action cannot be undone."
-      )
-    ) {
-      return;
-    }
+    // First confirmation: Delete run?
+    const confirmDelete = window.confirm(
+      "Are you sure you want to delete this run? This action cannot be undone."
+    );
+    if (!confirmDelete) return;
+
+    // Second confirmation: Delete issues?
+    const deleteIssues = window.confirm(
+      "Also delete ALL issues found in this run? This will only delete issues associated with this specific run."
+    );
 
     setDeletingRunId(runId);
     try {
       const token = await getToken();
-      const response = await fetch(`${API_BASE}/integrity/run/${runId}`, {
-        method: "DELETE",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-      });
-
-      if (!response.ok) {
-        const errorData = await response
-          .json()
-          .catch(() => ({ error: "Failed to delete run" }));
-        throw new Error(errorData.error || "Failed to delete run");
+      if (!token) {
+        alert("Authentication required. Please sign in again.");
+        setDeletingRunId(null);
+        return;
       }
 
+      const response = await fetch(
+        `${API_BASE}/integrity/run/${runId}?delete_issues=${deleteIssues}`,
+        {
+          method: "DELETE",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+        }
+      );
+
+      if (!response.ok) {
+        let errorData;
+        try {
+          errorData = await response.json();
+        } catch {
+          errorData = {
+            error: `Server returned ${response.status}: ${response.statusText}`,
+          };
+        }
+
+        const errorMessage =
+          errorData.detail?.error ||
+          errorData.detail?.message ||
+          errorData.error ||
+          errorData.message ||
+          `Failed to delete run (${response.status})`;
+
+        throw new Error(errorMessage);
+      }
+
+      const result = await response.json();
+      const successMessage = deleteIssues && result.deleted_issues_count !== undefined
+        ? `Run deleted successfully. ${result.deleted_issues_count} issues were also deleted.`
+        : "Run deleted successfully.";
+
+      alert(successMessage);
       // The Firestore subscription will automatically update the list
     } catch (error) {
       console.error("Failed to delete run:", error);
-      let errorMessage = "Unknown error";
+      let errorMessage = "Failed to delete run. Please try again.";
+
       if (error instanceof TypeError && error.message.includes("fetch")) {
         errorMessage =
           "Backend server is not available. Please ensure the backend is running.";
       } else if (error instanceof Error) {
         errorMessage = error.message;
       }
-      alert(`Failed to delete run: ${errorMessage}`);
+
+      alert(errorMessage);
     } finally {
       setDeletingRunId(null);
     }
@@ -532,27 +565,41 @@ export function RunsPage() {
   // Wait for Firestore document to be created
   const waitForRunDocument = async (
     runId: string,
-    maxWait = 10000
+    maxWait = 30000
   ): Promise<void> => {
     const { doc, getDoc } = await import("firebase/firestore");
     const { db } = await import("../config/firebase");
     const checkInterval = 500;
     const startTime = Date.now();
 
+    console.log(
+      `[RunsPage] Starting to wait for run document: ${runId} (maxWait: ${maxWait}ms)`
+    );
+
     return new Promise((resolve) => {
       const checkDocument = async () => {
         try {
           const runRef = doc(db, "integrity_runs", runId);
           const snapshot = await getDoc(runRef);
+          const elapsed = Date.now() - startTime;
+          const exists = snapshot.exists();
 
-          if (snapshot.exists()) {
+          console.log(
+            `[RunsPage] Polling check: exists=${exists}, elapsed=${elapsed}ms`
+          );
+
+          if (exists) {
+            console.log(`[RunsPage] Run document found after ${elapsed}ms`);
             resolve();
             return;
           }
 
-          if (Date.now() - startTime >= maxWait) {
+          if (elapsed >= maxWait) {
             // Document still doesn't exist after maxWait, but navigate anyway
             // The useRunStatus hook will handle retrying
+            console.log(
+              `[RunsPage] Timeout reached after ${elapsed}ms, navigating anyway`
+            );
             resolve();
             return;
           }
@@ -560,6 +607,7 @@ export function RunsPage() {
           setTimeout(checkDocument, checkInterval);
         } catch (error) {
           // On error, resolve anyway and let the page handle it
+          console.error("[RunsPage] Error checking for run document:", error);
           resolve();
         }
       };
@@ -904,9 +952,6 @@ export function RunsPage() {
           <div className="space-y-2">
             {paginatedRuns.map((run) => {
               const isExpanded = expandedRun === run.id;
-              const startTime =
-                run.started_at?.toDate?.() ||
-                new Date(run.started_at || Date.now());
               const endTime = run.ended_at?.toDate?.() || null;
               const statusLower = (run.status || "").toLowerCase();
               const isRunning =
@@ -954,6 +999,15 @@ export function RunsPage() {
                               Trigger: {getTriggerLabel(run.trigger || "")}
                             </span>
                             <span>Duration: {run.duration}</span>
+                            {run.counts?.total !== undefined && (
+                              <span className={
+                                (run.counts.by_severity?.critical || 0) > 0 ? "text-red-600 font-medium" :
+                                (run.counts.by_severity?.warning || 0) > 0 ? "text-yellow-600 font-medium" :
+                                "text-green-600"
+                              }>
+                                Issues: {run.counts.total.toLocaleString()}
+                              </span>
+                            )}
                             {run.run_id && (
                               <span className="font-mono text-xs">
                                 ID: {run.run_id.substring(0, 8)}...
@@ -1014,17 +1068,18 @@ export function RunsPage() {
                             )}
                           </button>
                         )}
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            if (run.run_id || run.id) {
-                              handleDelete(run.run_id || run.id);
-                            }
-                          }}
-                          disabled={deletingRunId === (run.run_id || run.id)}
-                          className="text-sm text-red-600 hover:text-red-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
-                          title="Delete run"
-                        >
+                        {!isRunning && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (run.run_id || run.id) {
+                                handleDelete(run.run_id || run.id);
+                              }
+                            }}
+                            disabled={deletingRunId === (run.run_id || run.id)}
+                            className="text-sm text-red-600 hover:text-red-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
+                            title="Delete run"
+                          >
                           {deletingRunId === (run.run_id || run.id) ? (
                             "Deleting..."
                           ) : (
@@ -1045,7 +1100,8 @@ export function RunsPage() {
                               Delete
                             </>
                           )}
-                        </button>
+                          </button>
+                        )}
                         <svg
                           className={`w-5 h-5 text-[var(--text-muted)] transition-transform ${
                             isExpanded ? "rotate-180" : ""

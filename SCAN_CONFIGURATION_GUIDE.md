@@ -11,10 +11,12 @@ Your data integrity monitor now supports **custom rule selection for every scan*
 The system is currently simplified to **contractors table only** with the following rules:
 
 #### Duplicate Detection (2 rules)
+
 1. **dup.contractor.ein** - EIN or business ID matches
 2. **dup.contractor.email_phone** - Email or phone matches plus name similarity
 
 #### Required Fields (5 rules)
+
 1. **required_field.contractors.email** - Email is required
 2. **required_field.contractors.cell_phone** - Cell phone is required
 3. **required_field.contractors.contractor_vol** - Contractor/Vol role type is required
@@ -22,9 +24,11 @@ The system is currently simplified to **contractors table only** with the follow
 5. **required_field.contractors.approval_status** - Approval status is required
 
 #### Relationships (0 rules)
+
 - No relationship rules configured for contractors
 
 #### Attendance (0 rules)
+
 - No attendance threshold rules configured
 
 **Total: 7 active rules** (2 duplicates + 5 required fields)
@@ -93,6 +97,7 @@ Click "Run Scan" button (only enabled if you have at least 1 table and 1 rule se
 ### Key Principle: Explicit Selection Only
 
 **The system uses a whitelist approach**:
+
 - If a category (duplicates, relationships, required_fields) is **not present** in your selection → **ALL rules in that category are skipped**
 - If a category **is present but has an empty array** for an entity → **All rules for that entity are skipped**
 - If a category has specific rule IDs → **Only those rule IDs are executed**
@@ -100,6 +105,7 @@ Click "Run Scan" button (only enabled if you have at least 1 table and 1 rule se
 ### Example Configurations
 
 #### Configuration 1: Only Duplicate Detection
+
 ```json
 {
   "entities": ["contractors"],
@@ -110,9 +116,11 @@ Click "Run Scan" button (only enabled if you have at least 1 table and 1 rule se
   }
 }
 ```
+
 **Result**: Scans contractors for duplicates only. No required field checks, no relationship checks.
 
 #### Configuration 2: Only Email Validation
+
 ```json
 {
   "entities": ["contractors"],
@@ -123,9 +131,11 @@ Click "Run Scan" button (only enabled if you have at least 1 table and 1 rule se
   }
 }
 ```
+
 **Result**: Scans contractors for missing email only. All other required field checks skipped.
 
 #### Configuration 3: Full Scan
+
 ```json
 {
   "entities": ["contractors"],
@@ -145,6 +155,7 @@ Click "Run Scan" button (only enabled if you have at least 1 table and 1 rule se
   }
 }
 ```
+
 **Result**: Scans contractors for all duplicate rules and all required field rules.
 
 ---
@@ -166,6 +177,7 @@ After a scan completes, view the run details to see:
 Previously, if a rule was selected but found no issues, it wouldn't appear in "Rules Used". This was confusing and made it seem like different rules were running.
 
 Now:
+
 - If you select 7 rules, you'll see all 7 rules listed
 - Rules with 0 issues will show "0 issues found"
 - This gives you complete visibility into what actually ran
@@ -223,16 +235,19 @@ rules/
 ## Maintenance Scripts
 
 ### Verify Contractors-Only Setup
+
 ```bash
 python -m backend.scripts.verify_contractors_only
 ```
 
 Checks that:
+
 - schema.yaml only has contractors entity
 - rules.yaml only has contractors Airtable config
 - Firestore only has contractors rules
 
 ### List All Firestore Rules
+
 ```bash
 python -m backend.scripts.list_firestore_rules
 ```
@@ -240,18 +255,21 @@ python -m backend.scripts.list_firestore_rules
 Shows detailed inventory of all rules in Firestore.
 
 ### Clean Non-Contractor Rules
+
 ```bash
 python -m backend.scripts.cleanup_non_contractor_rules --confirm
 ```
 
 Removes all non-contractor rules from Firestore (use if other entities accidentally get added).
 
-### Sync Schema to Firestore
+### Create Rules Snapshot (Backup)
+
 ```bash
-python -m backend.scripts.migrate_rules --action=sync --confirm
+python -m backend.scripts.migrate_rules --output schema.yaml.snapshot
 ```
 
-Syncs schema.yaml changes to Firestore.
+Creates a read-only snapshot/backup of Firestore rules to YAML file.
+**Note:** Rules are managed in Firestore only. schema.yaml has been removed.
 
 ---
 
@@ -260,26 +278,27 @@ Syncs schema.yaml changes to Firestore.
 ### Problem: Rules not appearing in scan config modal
 
 **Solution**: Check that rules are in Firestore
+
 ```bash
 python -m backend.scripts.list_firestore_rules
 ```
 
-If rules are missing, run:
-```bash
-python -m backend.scripts.migrate_rules --action=sync --confirm
-```
+If rules are missing, create them using the Rules UI or API.
+Rules are managed in Firestore only - there is no YAML file to sync from.
 
 ### Problem: Seeing different rules than selected
 
 **Diagnosis**: This was the original bug that has now been fixed.
 
 **Verification**:
+
 1. Check the run details page - it should show rules from `run_config` not inferred from issues
 2. Look at backend logs for "Selected rules from run_config" and "Rule filtering: after filtering"
 
 ### Problem: Can't run scan (Run Scan button disabled)
 
 **Causes**:
+
 - No tables selected → Select at least 1 table
 - No rules selected → Select at least 1 rule
 - Rules count shows "0 rules" → Check individual checkboxes
@@ -287,6 +306,7 @@ python -m backend.scripts.migrate_rules --action=sync --confirm
 ### Problem: Non-contractor entities appearing
 
 **Solution**: Run cleanup script
+
 ```bash
 python -m backend.scripts.cleanup_non_contractor_rules --confirm
 python -m backend.scripts.verify_contractors_only
@@ -297,22 +317,25 @@ python -m backend.scripts.verify_contractors_only
 ## Key Files
 
 ### Frontend
+
 - `frontend/src/components/ScanConfigModal.tsx` - Scan configuration UI
 - `frontend/src/hooks/useRules.ts` - Loads rules from backend
 - `frontend/src/hooks/useRunStatus.ts` - TypeScript interface for run_config
 - `frontend/src/pages/RunStatusPage.tsx` - Displays selected rules
 
 ### Backend
-- `backend/services/integrity_runner.py` - Rule filtering logic (_filter_rules_by_selection method)
-- `backend/config/schema.yaml` - Rule definitions
+
+- `backend/services/integrity_runner.py` - Rule filtering logic (\_filter_rules_by_selection method)
+- Rules are managed in Firestore only (schema.yaml has been removed)
 - `backend/config/rules.yaml` - Runtime configuration
 - `backend/fetchers/registry.py` - Entity fetcher registry
 
 ### Scripts
+
 - `backend/scripts/verify_contractors_only.py` - Verification script
 - `backend/scripts/list_firestore_rules.py` - Inventory script
 - `backend/scripts/cleanup_non_contractor_rules.py` - Cleanup script
-- `backend/scripts/migrate_rules.py` - Migration script
+- `backend/scripts/migrate_rules.py` - Snapshot/backup script (read-only)
 
 ---
 

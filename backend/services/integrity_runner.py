@@ -9,10 +9,10 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..analyzers import scorer
-from ..checks import attendance, duplicates, links, required_fields
+from ..checks import attendance, duplicates, links, required_fields, value_checks
 from ..clients.airtable import AirtableClient
 from ..clients.firestore import FirestoreClient
 from ..clients.logging import get_logger, log_check, log_config_load, log_fetch, log_write
@@ -29,6 +29,8 @@ from ..services.feedback_analyzer import get_feedback_analyzer
 from ..services.table_id_discovery import discover_table_ids
 from ..services.config_updater import update_config
 from ..services.status_calculator import calculate_result_status
+from ..services.slack_notifier import get_slack_notifier
+from ..services.school_year_service import SchoolYearService
 
 logger = get_logger(__name__)
 
@@ -42,43 +44,10 @@ class IntegrityRunner:
         self,
         runtime_config: RuntimeConfig | None = None,
     ):
-        # #region agent log
-        import json as _json
-        debug_log_path = '/Users/joshuaedwards/Library/CloudStorage/GoogleDrive-jedwards@che.school/My Drive/CHE/che-data-integrity-monitor/.cursor/debug.log'
-        try:
-            with open(debug_log_path, 'a') as f:
-                f.write(_json.dumps({"sessionId":"debug-session","runId":"startup","hypothesisId":"B","location":"integrity_runner.py:33","message":"IntegrityRunner.__init__ entry","data":{"has_runtime_config":runtime_config is not None},"timestamp":int(time.time()*1000)})+'\n')
-        except: pass
-        # #endregion agent log
-        
         # Load config without Firestore overrides first to get Firestore config
-        # #region agent log
-        try:
-            import json as _json
-            with open(debug_log_path, 'a') as f:
-                f.write(_json.dumps({"sessionId":"debug-session","runId":"startup","hypothesisId":"B","location":"integrity_runner.py:38","message":"Before load_runtime_config","data":{"step":"before_load_runtime_config"},"timestamp":int(time.time()*1000)})+'\n')
-        except: pass
-        # #endregion agent log
-        
         temp_config = runtime_config or load_runtime_config(attempt_discovery=True)
         
-        # #region agent log
-        try:
-            import json as _json
-            with open(debug_log_path, 'a') as f:
-                f.write(_json.dumps({"sessionId":"debug-session","runId":"startup","hypothesisId":"B","location":"integrity_runner.py:40","message":"After load_runtime_config, before FirestoreClient","data":{"step":"before_firestore_client"},"timestamp":int(time.time()*1000)})+'\n')
-        except: pass
-        # #endregion agent log
-        
         self._firestore_client = FirestoreClient(temp_config.firestore)
-        
-        # #region agent log
-        try:
-            import json as _json
-            with open(debug_log_path, 'a') as f:
-                f.write(_json.dumps({"sessionId":"debug-session","runId":"startup","hypothesisId":"B","location":"integrity_runner.py:42","message":"After FirestoreClient init (lazy, not connected yet)","data":{"step":"after_firestore_client_init"},"timestamp":int(time.time()*1000)})+'\n')
-        except: pass
-        # #endregion agent log
         
         # Reload config with Firestore client to get overrides
         if runtime_config is None:
@@ -86,43 +55,19 @@ class IntegrityRunner:
         else:
             self._runtime_config = runtime_config
         
-        # #region agent log
-        try:
-            import json as _json
-            with open(debug_log_path, 'a') as f:
-                f.write(_json.dumps({"sessionId":"debug-session","runId":"startup","hypothesisId":"B","location":"integrity_runner.py:50","message":"After reload config, before schema_config","data":{"step":"before_schema_config"},"timestamp":int(time.time()*1000)})+'\n')
-        except: pass
-        # #endregion agent log
-        
         self._schema_config = load_schema_config(firestore_client=self._firestore_client)
-        
-        # #region agent log
-        try:
-            import json as _json
-            with open(debug_log_path, 'a') as f:
-                f.write(_json.dumps({"sessionId":"debug-session","runId":"startup","hypothesisId":"B","location":"integrity_runner.py:52","message":"After schema_config, before AirtableClient","data":{"step":"before_airtable_client"},"timestamp":int(time.time()*1000)})+'\n')
-        except: pass
-        # #endregion agent log
         
         self._airtable_client = AirtableClient(self._runtime_config.airtable)
         
-        # #region agent log
-        try:
-            import json as _json
-            with open(debug_log_path, 'a') as f:
-                f.write(_json.dumps({"sessionId":"debug-session","runId":"startup","hypothesisId":"B","location":"integrity_runner.py:54","message":"After AirtableClient, before FirestoreWriter","data":{"step":"before_firestore_writer"},"timestamp":int(time.time()*1000)})+'\n')
-        except: pass
-        # #endregion agent log
-        
         self._firestore_writer = FirestoreWriter(self._firestore_client)
-        
-        # #region agent log
+
+        # Initialize school year service for automatic filtering
         try:
-            import json as _json
-            with open(debug_log_path, 'a') as f:
-                f.write(_json.dumps({"sessionId":"debug-session","runId":"startup","hypothesisId":"B","location":"integrity_runner.py:56","message":"IntegrityRunner.__init__ complete","data":{"step":"after_init"},"timestamp":int(time.time()*1000)})+'\n')
-        except: pass
-        # #endregion agent log
+            self._school_year_service = SchoolYearService(self._firestore_client)
+            logger.info("Initialized SchoolYearService for automatic school year filtering")
+        except Exception as e:
+            logger.warning(f"Could not initialize SchoolYearService: {e}. School year filtering will be disabled.", exc_info=True)
+            self._school_year_service = None
 
     def run(
         self,
@@ -152,33 +97,109 @@ class IntegrityRunner:
         # Store run_id for use in _fetch_records
         self._current_run_id = run_id
         
+        # Create initial run document immediately to ensure it exists even if fetch fails
+        try:
+            initial_metadata = {
+                "status": "running",
+                "trigger": trigger,
+                "started_at": start_time,
+            }
+            if run_config:
+                initial_metadata["run_config"] = run_config
+            self._firestore_writer.write_run(run_id, {}, initial_metadata)
+        except Exception as exc:
+            # Non-blocking - log but don't fail the run
+            logger.warning(
+                "Failed to create initial run document",
+                extra={"run_id": run_id, "error": str(exc)},
+            )
+        
         # Store selected entities for use in _fetch_records
         # Prefer entities from run_config if provided
         if run_config and run_config.get("entities"):
-            self._selected_entities = run_config["entities"]
+            selected_entities = run_config["entities"]
         else:
-            self._selected_entities = entities
+            selected_entities = entities
+        
+        # Automatically include required entities for specific checks
+        if run_config:
+            checks = run_config.get("checks", {})
+            rules = run_config.get("rules", {})
+
+            # Include "absent" entity when attendance check is selected
+            attendance_selected = (
+                checks.get("attendance", False) or
+                rules.get("attendance_rules", False)
+            )
+            if attendance_selected:
+                # Ensure "absent" is included for attendance checks
+                if selected_entities is None:
+                    # If no entities specified, fetch all (including absent)
+                    selected_entities = None
+                elif isinstance(selected_entities, list) and "absent" not in selected_entities:
+                    # Add "absent" if not already present
+                    selected_entities = selected_entities + ["absent"]
+
+            # Include source entities for cross-entity value check rules
+            # E.g., if a rule is stored under "absent" but checks "students" records
+            value_checks_selected = checks.get("value_checks", False)
+            if value_checks_selected and selected_entities:
+                # Get value check rules to find cross-entity dependencies
+                value_check_rules = rules.get("value_checks", {})
+                if value_check_rules:
+                    additional_entities = set()
+
+                    # For each selected entity, check if it has value check rules
+                    for entity in selected_entities:
+                        entity_rule_ids = value_check_rules.get(entity, [])
+                        if entity_rule_ids:
+                            # Load the actual rules to check for source_entity
+                            try:
+                                entity_schema = self._schema_config.entities.get(entity)
+                                if entity_schema and entity_schema.value_checks:
+                                    for check in entity_schema.value_checks:
+                                        # If rule has source_entity, we need to fetch those records too
+                                        if check.source_entity and check.source_entity != entity:
+                                            additional_entities.add(check.source_entity)
+                                            logger.info(
+                                                f"Auto-including '{check.source_entity}' entity for cross-entity rule",
+                                                extra={
+                                                    "rule_id": check.rule_id,
+                                                    "rule_entity": entity,
+                                                    "source_entity": check.source_entity,
+                                                }
+                                            )
+                            except Exception as exc:
+                                logger.debug(f"Could not check cross-entity rules for {entity}: {exc}")
+
+                    # Add any additional entities needed
+                    if additional_entities:
+                        selected_entities = list(set(selected_entities) | additional_entities)
+                        logger.info(
+                            "Auto-included source entities for cross-entity rules",
+                            extra={
+                                "run_id": run_id,
+                                "additional_entities": list(additional_entities),
+                                "final_entities": selected_entities,
+                            }
+                        )
+
+            # Note: Relationship checks can validate min_links without fetching target entities.
+            # Orphan detection (validating linked records exist) requires target entities,
+            # but that's optional. The links check will gracefully skip orphan detection
+            # if target entities aren't available.
+
+        self._selected_entities = selected_entities
         
         # Store run_config for use in filtering
         self._run_config = run_config
-
-        # CRITICAL DEBUG: Use logger.warning so it definitely shows up
-        logger.warning("=" * 80)
-        logger.warning("STORING RUN_CONFIG in IntegrityRunner.run()")
-        logger.warning(f"run_config parameter: {run_config}")
-        if run_config:
-            logger.warning(f"run_config keys: {list(run_config.keys())}")
-            logger.warning(f"Has 'rules' key: {'rules' in run_config}")
-            if 'rules' in run_config:
-                logger.warning(f"run_config['rules']: {run_config['rules']}")
-        logger.warning(f"self._run_config after assignment: {self._run_config}")
-        logger.warning("=" * 80)
 
         # Initialize summary to empty dict so it's always available in finally block
         summary: Dict[str, Any] = {}
 
         # Setup timeout mechanism
         timeout_triggered = threading.Event()
+        timeout_cancel_sent = threading.Event()
         timeout_timer = None
 
         def handle_timeout():
@@ -192,8 +213,24 @@ class IntegrityRunner:
                 self._firestore_writer.write_log(
                     run_id,
                     "error",
-                    f"Run exceeded maximum duration ({MAX_RUN_DURATION_SECONDS}s) and will be terminated"
+                    f"Run exceeded maximum duration ({MAX_RUN_DURATION_SECONDS}s). Cancelling and marking as timeout."
                 )
+            except Exception:
+                pass
+
+            # Signal cancellation so long-running loops can stop ASAP
+            try:
+                if cancel_event and not cancel_event.is_set():
+                    cancel_event.set()
+                    timeout_cancel_sent.set()
+                    try:
+                        self._firestore_writer.write_log(
+                            run_id,
+                            "error",
+                            "Timeout cancellation signal sent. Stopping as soon as current operation allows."
+                        )
+                    except Exception:
+                        pass
             except Exception:
                 pass
 
@@ -205,8 +242,16 @@ class IntegrityRunner:
 
         # Helper to check cancellation and timeout
         def check_cancelled():
+            nonlocal status, error_message
             # Check timeout first
             if timeout_triggered.is_set():
+                # Ensure cancellation signal is set (some code paths only call check_cancelled)
+                try:
+                    if cancel_event and not cancel_event.is_set():
+                        cancel_event.set()
+                        timeout_cancel_sent.set()
+                except Exception:
+                    pass
                 raise TimeoutError(f"Run exceeded maximum duration of {MAX_RUN_DURATION_SECONDS} seconds")
             # Then check cancellation
             if cancel_event and cancel_event.is_set():
@@ -276,15 +321,6 @@ class IntegrityRunner:
                         extra={"run_id": run_id},
                     )
                 else:
-                    # #region agent log
-                    import json as _json
-                    debug_log_path = '/Users/joshuaedwards/Library/CloudStorage/GoogleDrive-jedwards@che.school/My Drive/CHE/che-data-integrity-monitor/.cursor/debug.log'
-                    try:
-                        with open(debug_log_path, 'a') as f:
-                            f.write(_json.dumps({"sessionId":"debug-session","runId":"scan","hypothesisId":"E","location":"integrity_runner.py:159","message":"Setting base IDs in environment","data":{"base_id":base_id,"entity_count":len(entities)},"timestamp":int(_time_module.time()*1000)})+'\n')
-                    except: pass
-                    # #endregion agent log
-                    
                     for entity in entities:
                         base_var = get_env_var_name(entity, is_base=True)
                         os.environ[base_var] = base_id
@@ -292,14 +328,6 @@ class IntegrityRunner:
                             f"Set {base_var}={base_id} in process environment",
                             extra={"run_id": run_id, "entity": entity},
                         )
-                        
-                        # #region agent log
-                        try:
-                            import json as _json
-                            with open(debug_log_path, 'a') as f:
-                                f.write(_json.dumps({"sessionId":"debug-session","runId":"scan","hypothesisId":"E","location":"integrity_runner.py:172","message":"Base ID env var set","data":{"var":base_var,"value":base_id,"verified":os.getenv(base_var)==base_id},"timestamp":int(_time_module.time()*1000)})+'\n')
-                        except: pass
-                        # #endregion agent log
                 
                 # Set table IDs in current process environment
                 for entity, table_id in table_ids.items():
@@ -356,14 +384,6 @@ class IntegrityRunner:
                     base_val = os.getenv(base_var)
                     table_val = os.getenv(table_var)
                     
-                    # #region agent log
-                    try:
-                        import json as _json
-                        with open(debug_log_path, 'a') as f:
-                            f.write(_json.dumps({"sessionId":"debug-session","runId":"scan","hypothesisId":"E","location":"integrity_runner.py:195","message":"Verifying env vars","data":{"entity":entity,"base_var":base_var,"base_set":bool(base_val),"table_var":table_var,"table_set":bool(table_val)},"timestamp":int(_time_module.time()*1000)})+'\n')
-                    except: pass
-                    # #endregion agent log
-                    
                     if base_id and not base_val:
                         missing_vars.append(base_var)
                     if not table_val:
@@ -374,25 +394,11 @@ class IntegrityRunner:
                         f"Failed to set environment variables: {missing_vars}",
                         extra={"run_id": run_id},
                     )
-                    # #region agent log
-                    try:
-                        import json as _json
-                        with open(debug_log_path, 'a') as f:
-                            f.write(_json.dumps({"sessionId":"debug-session","runId":"scan","hypothesisId":"E","location":"integrity_runner.py:210","message":"Missing env vars detected","data":{"missing":missing_vars},"timestamp":int(_time_module.time()*1000)})+'\n')
-                    except: pass
-                    # #endregion agent log
                 else:
                     logger.info(
                         f"Successfully set all environment variables for {len(entities)} entities",
                         extra={"run_id": run_id},
                     )
-                    # #region agent log
-                    try:
-                        import json as _json
-                        with open(debug_log_path, 'a') as f:
-                            f.write(_json.dumps({"sessionId":"debug-session","runId":"scan","hypothesisId":"E","location":"integrity_runner.py:217","message":"All env vars verified","data":{"entity_count":len(entities)},"timestamp":int(_time_module.time()*1000)})+'\n')
-                    except: pass
-                    # #endregion agent log
                 
                 # Reload configs dynamically to get latest rules from Firestore
                 self._runtime_config = load_runtime_config(firestore_client=self._firestore_client, attempt_discovery=True)
@@ -459,8 +465,39 @@ class IntegrityRunner:
                     extra={"run_id": run_id}
                 )
 
-                # Log selected entities
+                # Write selected rules to real-time Firestore logs
                 selected_entities = run_config.get("entities", [])
+                rules_config = run_config.get("rules", {})
+                checks_config = run_config.get("checks", {})
+                
+                # Build summary of selected rules for real-time log
+                rules_summary = []
+                if rules_config.get("duplicates"):
+                    dup_count = sum(len(r) for r in rules_config["duplicates"].values())
+                    if dup_count > 0:
+                        rules_summary.append(f"duplicates: {dup_count}")
+                if rules_config.get("relationships"):
+                    rel_count = sum(len(r) for r in rules_config["relationships"].values())
+                    if rel_count > 0:
+                        rules_summary.append(f"relationships: {rel_count}")
+                if rules_config.get("required_fields"):
+                    req_count = sum(len(r) for r in rules_config["required_fields"].values())
+                    if req_count > 0:
+                        rules_summary.append(f"required_fields: {req_count}")
+                if rules_config.get("value_checks"):
+                    val_count = sum(len(r) for r in rules_config["value_checks"].values())
+                    if val_count > 0:
+                        rules_summary.append(f"value_checks: {val_count}")
+                if rules_config.get("attendance_rules"):
+                    rules_summary.append("attendance: enabled")
+                
+                # Write to real-time Firestore log
+                self._firestore_writer.write_log(
+                    run_id, "info",
+                    f"SCAN CONFIG: entities={selected_entities}, rules=[{', '.join(rules_summary) if rules_summary else 'NONE'}], checks={checks_config}"
+                )
+
+                # Log selected entities
                 logger.info(
                     f"Selected Entities: {', '.join(selected_entities) if selected_entities else 'ALL'}",
                     extra={"run_id": run_id, "selected_entities": selected_entities}
@@ -548,6 +585,11 @@ class IntegrityRunner:
                     "SCAN STARTED - No rule filtering (all rules will be used)",
                     extra={"run_id": run_id}
                 )
+                # Write to real-time Firestore log that no run_config was received
+                self._firestore_writer.write_log(
+                    run_id, "warning",
+                    f"SCAN CONFIG: run_config is {'None' if run_config is None else 'empty'} - no rule filtering applied, ALL rules will be used"
+                )
         except Exception as exc:
             # Logging failures should not affect the run
             logger.warning(
@@ -567,12 +609,9 @@ class IntegrityRunner:
             # Fetch records
             try:
                 entities_param = getattr(self, '_selected_entities', None)
-                if entities_param:
-                    self._firestore_writer.write_log(run_id, "info", f"Starting to fetch records (entities: {', '.join(entities_param)})...")
-                else:
-                    self._firestore_writer.write_log(run_id, "info", "Starting to fetch records...")
+                # Note: _fetch_records() will log the start message, so we don't duplicate it here
                 with timed("fetch", metrics):
-                    records, entity_counts = self._fetch_records(entities_param)
+                    records, entity_counts = self._fetch_records(entities_param, cancel_check=check_cancelled)
                 fetch_duration = metrics.get("duration_fetch", 0)
                 total_records = sum(entity_counts.values())
                 log_fetch(logger, run_id, entity_counts, fetch_duration)
@@ -618,119 +657,22 @@ class IntegrityRunner:
                             self._run_config
                         )
                     
-                    # Duplicates check
-                    # #region agent log
-                    try:
-                        import json as _json
-                        import time as _time_module
-                        debug_log_path = '/Users/joshuaedwards/Library/CloudStorage/GoogleDrive-jedwards@che.school/My Drive/CHE/che-data-integrity-monitor/.cursor/debug.log'
-                        with open(debug_log_path, 'a') as f:
-                            f.write(_json.dumps({"sessionId":"debug-session","runId":run_id,"hypothesisId":"A","location":"integrity_runner.py:621","message":"Duplicates check decision - entry","data":{"has_run_config":hasattr(self, "_run_config"),"run_config_is_none":not (hasattr(self, "_run_config") and self._run_config)},"timestamp":int(_time_module.time()*1000)})+'\n')
-                    except: pass
-                    # #endregion agent log
-                    should_run_duplicates = False  # Default to False - only run when explicitly selected
+                    should_run_duplicates = False
                     if hasattr(self, "_run_config") and self._run_config:
                         checks = self._run_config.get("checks", {})
-                        logger.warning(
-                            f"Checks received in run_config: {checks}",
-                            extra={
-                                "has_checks": "checks" in self._run_config,
-                                "checks_keys": list(checks.keys()) if checks else [],
-                                "checks_duplicates": checks.get("duplicates") if checks else None,
-                            }
-                        )
-                        # #region agent log
-                        try:
-                            import json as _json
-                            import time as _time_module
-                            debug_log_path = '/Users/joshuaedwards/Library/CloudStorage/GoogleDrive-jedwards@che.school/My Drive/CHE/che-data-integrity-monitor/.cursor/debug.log'
-                            with open(debug_log_path, 'a') as f:
-                                f.write(_json.dumps({"sessionId":"debug-session","runId":run_id,"hypothesisId":"A","location":"integrity_runner.py:628","message":"Duplicates check - run_config exists","data":{"has_checks":"checks" in self._run_config,"checks_keys":list(checks.keys()) if checks else [],"checks_duplicates_value":checks.get("duplicates") if checks else None,"checks_duplicates_type":type(checks.get("duplicates")).__name__ if checks and "duplicates" in checks else None},"timestamp":int(_time_module.time()*1000)})+'\n')
-                        except: pass
-                        # #endregion agent log
                         # Explicitly check if duplicates key exists and respect its value (including False)
                         # This ensures False values from frontend are properly respected
                         if "duplicates" in checks:
                             should_run_duplicates = bool(checks["duplicates"])
-                            logger.warning(f"Duplicates check decision: run_config.checks.duplicates = {checks['duplicates']}, should_run = {should_run_duplicates}")
-                            # #region agent log
-                            try:
-                                import json as _json
-                                import time as _time_module
-                                debug_log_path = '/Users/joshuaedwards/Library/CloudStorage/GoogleDrive-jedwards@che.school/My Drive/CHE/che-data-integrity-monitor/.cursor/debug.log'
-                                with open(debug_log_path, 'a') as f:
-                                    f.write(_json.dumps({"sessionId":"debug-session","runId":run_id,"hypothesisId":"A","location":"integrity_runner.py:633","message":"Duplicates check - key found in checks","data":{"checks_duplicates_raw":checks["duplicates"],"should_run_duplicates":should_run_duplicates},"timestamp":int(_time_module.time()*1000)})+'\n')
-                            except: pass
-                            # #endregion agent log
-                        else:
-                            logger.warning(f"Duplicates check decision: 'duplicates' key not in checks, using default False. checks keys: {list(checks.keys())}")
-                            # #region agent log
-                            try:
-                                import json as _json
-                                import time as _time_module
-                                debug_log_path = '/Users/joshuaedwards/Library/CloudStorage/GoogleDrive-jedwards@che.school/My Drive/CHE/che-data-integrity-monitor/.cursor/debug.log'
-                                with open(debug_log_path, 'a') as f:
-                                    f.write(_json.dumps({"sessionId":"debug-session","runId":run_id,"hypothesisId":"B","location":"integrity_runner.py:640","message":"Duplicates check - key NOT found, using default False","data":{"checks_keys":list(checks.keys())},"timestamp":int(_time_module.time()*1000)})+'\n')
-                            except: pass
-                            # #endregion agent log
-                        # If key doesn't exist, keep default False
-                    else:
-                        logger.warning(f"Duplicates check decision: No run_config, using default False")
-                        # #region agent log
-                        try:
-                            import json as _json
-                            import time as _time_module
-                            debug_log_path = '/Users/joshuaedwards/Library/CloudStorage/GoogleDrive-jedwards@che.school/My Drive/CHE/che-data-integrity-monitor/.cursor/debug.log'
-                            with open(debug_log_path, 'a') as f:
-                                f.write(_json.dumps({"sessionId":"debug-session","runId":run_id,"hypothesisId":"C","location":"integrity_runner.py:647","message":"Duplicates check - no run_config, using default False","data":{},"timestamp":int(_time_module.time()*1000)})+'\n')
-                        except: pass
-                        # #endregion agent log
-                    # #region agent log
-                    try:
-                        import json as _json
-                        import time as _time_module
-                        debug_log_path = '/Users/joshuaedwards/Library/CloudStorage/GoogleDrive-jedwards@che.school/My Drive/CHE/che-data-integrity-monitor/.cursor/debug.log'
-                        with open(debug_log_path, 'a') as f:
-                            f.write(_json.dumps({"sessionId":"debug-session","runId":run_id,"hypothesisId":"A","location":"integrity_runner.py:650","message":"Duplicates check - final decision","data":{"should_run_duplicates":should_run_duplicates},"timestamp":int(_time_module.time()*1000)})+'\n')
-                    except: pass
-                    # #endregion agent log
+                        elif "rules" in self._run_config and "duplicates" in self._run_config["rules"]:
+                            # If checks.duplicates is missing, check if rules.duplicates has any rules selected
+                            rules_dup = self._run_config["rules"]["duplicates"]
+                            should_run_duplicates = any(rules_dup.values()) if isinstance(rules_dup, dict) else bool(rules_dup)
                     
                     if should_run_duplicates:
                         import time as _time_module
                         import json
                         self._firestore_writer.write_log(run_id, "info", "Running duplicates check...")
-                        
-                        # Log what we're passing to duplicates.run() - send to browser console
-                        if schema_config_to_use and schema_config_to_use.duplicates:
-                            contractors_dup = schema_config_to_use.duplicates.get("contractors")
-                            contractors_info = None
-                            if contractors_dup:
-                                contractors_info = {
-                                    "likely_count": len(contractors_dup.likely) if contractors_dup.likely else 0,
-                                    "possible_count": len(contractors_dup.possible) if contractors_dup.possible else 0,
-                                    "likely_rule_ids": [r.rule_id for r in contractors_dup.likely] if contractors_dup.likely else [],
-                                    "possible_rule_ids": [r.rule_id for r in contractors_dup.possible] if contractors_dup.possible else [],
-                                }
-                            
-                            log_msg = f"[DUPLICATES DEBUG] Passing schema config to duplicates.run()\n"
-                            log_msg += f"  - Duplicates keys: {list(schema_config_to_use.duplicates.keys())}\n"
-                            log_msg += f"  - Contractors in duplicates: {'contractors' in schema_config_to_use.duplicates}\n"
-                            if contractors_info:
-                                log_msg += f"  - Contractors dup_def: {json.dumps(contractors_info, indent=2)}"
-                            else:
-                                log_msg += f"  - Contractors dup_def: None"
-                            self._firestore_writer.write_log(run_id, "info", log_msg)
-                            logger.info(
-                                "Passing schema config to duplicates.run()",
-                                extra={
-                                    "duplicates_keys": list(schema_config_to_use.duplicates.keys()),
-                                    "contractors_in_duplicates": "contractors" in schema_config_to_use.duplicates,
-                                    "contractors_dup_def": contractors_info,
-                                }
-                            )
-                        else:
-                            self._firestore_writer.write_log(run_id, "warning", "[DUPLICATES DEBUG] No schema_config_to_use or no duplicates in schema_config_to_use")
-                            logger.warning("No schema_config_to_use or no duplicates in schema_config_to_use")
                         
                         check_start = _time_module.time()
                         dup_issues = duplicates.run(records, schema_config_to_use, run_id=run_id, firestore_writer=self._firestore_writer)
@@ -759,7 +701,10 @@ class IntegrityRunner:
                         # This ensures False values from frontend are properly respected
                         if "links" in checks:
                             should_run_links = bool(checks["links"])
-                        # If key doesn't exist, keep default False
+                        elif "rules" in self._run_config and "relationships" in self._run_config["rules"]:
+                            # If checks.links is missing, check if rules.relationships has any rules selected
+                            rules_rel = self._run_config["rules"]["relationships"]
+                            should_run_links = any(rules_rel.values()) if isinstance(rules_rel, dict) else bool(rules_rel)
                     
                     if should_run_links:
                         import time as _time_module
@@ -791,7 +736,10 @@ class IntegrityRunner:
                         # This ensures False values from frontend are properly respected
                         if "required_fields" in checks:
                             should_run_required_fields = bool(checks["required_fields"])
-                        # If key doesn't exist, keep default False
+                        elif "rules" in self._run_config and "required_fields" in self._run_config["rules"]:
+                            # If checks.required_fields is missing, check if rules.required_fields has any rules selected
+                            rules_req = self._run_config["rules"]["required_fields"]
+                            should_run_required_fields = any(rules_req.values()) if isinstance(rules_req, dict) else bool(rules_req)
                     
                     if should_run_required_fields:
                         import time as _time_module
@@ -815,6 +763,55 @@ class IntegrityRunner:
                         self._firestore_writer.write_log(run_id, "info", "Required fields check skipped (not selected in checks)")
                     check_cancelled()
                     
+                    # Value checks
+                    should_run_value_checks = False  # Default to False - only run when explicitly selected
+                    if hasattr(self, "_run_config") and self._run_config:
+                        checks = self._run_config.get("checks", {})
+                        logger.info(
+                            "Checking value_checks configuration",
+                            extra={
+                                "has_run_config": True,
+                                "checks_keys": list(checks.keys()) if checks else [],
+                                "checks_value_checks": checks.get("value_checks") if checks else None,
+                                "has_rules": "rules" in self._run_config,
+                                "rules_value_checks": self._run_config.get("rules", {}).get("value_checks") if "rules" in self._run_config else None,
+                            }
+                        )
+                        # Explicitly check if value_checks key exists and respect its value (including False)
+                        # This ensures False values from frontend are properly respected
+                        if "value_checks" in checks:
+                            should_run_value_checks = bool(checks["value_checks"])
+                            logger.info(f"value_checks from checks config: {should_run_value_checks}")
+                        elif "rules" in self._run_config and "value_checks" in self._run_config["rules"]:
+                            # If checks.value_checks is missing, check if rules.value_checks has any rules selected
+                            rules_val = self._run_config["rules"]["value_checks"]
+                            should_run_value_checks = any(rules_val.values()) if isinstance(rules_val, dict) else bool(rules_val)
+                            logger.info(f"value_checks from rules config: {should_run_value_checks} (rules_val: {rules_val})")
+                    else:
+                        logger.info("No run_config available for value_checks check")
+                    
+                    if should_run_value_checks:
+                        import time as _time_module
+                        self._firestore_writer.write_log(run_id, "info", "Running value checks...")
+                        check_start = _time_module.time()
+                        val_issues = value_checks.run(records, schema_config_to_use)
+                        check_results.extend(val_issues)
+                        val_summary = scorer.summarize(val_issues)
+                        val_duration = int((_time_module.time() - check_start) * 1000)
+                        log_check(
+                            logger,
+                            run_id,
+                            "value_checks",
+                            len(val_issues),
+                            val_duration,
+                            {k: v for k, v in val_summary.items() if "value" in k},
+                        )
+                        self._firestore_writer.write_log(run_id, "info", f"Value checks: {len(val_issues)} issues found in {(val_duration/1000):.1f}s")
+                    else:
+                        val_issues = []
+                        self._firestore_writer.write_log(run_id, "info", "Value checks check skipped (not selected in checks)")
+                    check_cancelled()
+                    
                     # Attendance check
                     should_run_attendance = False  # Default to False - only run when explicitly selected
                     if hasattr(self, "_run_config") and self._run_config:
@@ -823,7 +820,9 @@ class IntegrityRunner:
                         # This ensures False values from frontend are properly respected
                         if "attendance" in checks:
                             should_run_attendance = bool(checks["attendance"])
-                        # If key doesn't exist, keep default False
+                        elif "rules" in self._run_config and "attendance_rules" in self._run_config["rules"]:
+                            # If checks.attendance is missing, check if rules.attendance_rules is enabled
+                            should_run_attendance = bool(self._run_config["rules"]["attendance_rules"])
 
                     attendance_rules_to_use = None
                     if should_run_attendance:
@@ -955,6 +954,7 @@ class IntegrityRunner:
                     
                     # Write individual issues to Firestore
                     new_issues_count = 0
+                    new_issues_by_severity = None
                     if issues:
                         check_cancelled()  # Check before starting long write operation
                         try:
@@ -966,6 +966,37 @@ class IntegrityRunner:
                             updated_count = total_issues_to_write - new_issues_count
                             log_write(logger, run_id, "firestore_issues", total_issues_to_write, write_issues_duration)
                             self._firestore_writer.write_log(run_id, "info", f"Wrote {total_issues_to_write:,} issues to Firestore ({new_issues_count:,} new, {updated_count:,} updated) in {(write_issues_duration/1000):.1f}s")
+                            
+                            # Calculate new_issues_by_severity by querying Firestore for new issues
+                            if new_issues_count > 0:
+                                try:
+                                    client = self._firestore_client._get_client()
+                                    issues_ref = client.collection(self._firestore_client._config.issues_collection)
+                                    query = issues_ref.where("first_seen_in_run", "==", run_id)
+                                    
+                                    by_severity = {"critical": 0, "warning": 0, "info": 0}
+                                    for doc in query.stream():
+                                        issue_data = doc.to_dict()
+                                        severity = issue_data.get("severity", "info")
+                                        if severity in by_severity:
+                                            by_severity[severity] += 1
+                                    
+                                    new_issues_by_severity = by_severity
+                                    logger.info(
+                                        "Calculated new_issues_by_severity",
+                                        extra={
+                                            "run_id": run_id,
+                                            "new_issues_count": new_issues_count,
+                                            "by_severity": by_severity,
+                                        }
+                                    )
+                                except Exception as severity_exc:
+                                    logger.warning(
+                                        "Failed to calculate new_issues_by_severity",
+                                        extra={"run_id": run_id, "error": str(severity_exc)},
+                                        exc_info=True
+                                    )
+                                    # Don't fail the run if severity calculation fails
                         except Exception as exc:
                             logger.error("Failed to write issues to Firestore", extra={"run_id": run_id}, exc_info=True)
                             try:
@@ -1158,6 +1189,7 @@ class IntegrityRunner:
             try:
                 final_metadata = {
                     "status": status,
+                    "started_at": start_time,  # Always include to prevent fallback from overwriting
                     "ended_at": end_time,
                     "duration_ms": elapsed_ms,
                 }
@@ -1168,6 +1200,9 @@ class IntegrityRunner:
                 # Include new_issues_count if it was captured
                 if "new_issues_count" in locals():
                     final_metadata["new_issues_count"] = new_issues_count
+                # Include new_issues_by_severity if it was calculated
+                if "new_issues_by_severity" in locals() and new_issues_by_severity:
+                    final_metadata["new_issues_by_severity"] = new_issues_by_severity
                 # Include run_config in final metadata if provided
                 if hasattr(self, "_run_config") and self._run_config:
                     final_metadata["run_config"] = self._run_config
@@ -1175,6 +1210,35 @@ class IntegrityRunner:
                 self._firestore_writer.write_run(run_id, summary, final_metadata)
             except Exception:
                 pass  # Already logged above
+
+            # Send Slack notification if enabled
+            notify_slack = False
+            if hasattr(self, "_run_config") and self._run_config:
+                notify_slack = self._run_config.get("notify_slack", False)
+
+            if notify_slack:
+                try:
+                    notifier = get_slack_notifier(firestore_client=self._firestore_client)
+                    issue_summary = summary if "summary" in locals() else {}
+                    # Get new_issues_count if it was captured during issue writing
+                    new_count = new_issues_count if "new_issues_count" in locals() else None
+                    result = notifier.send_notification(
+                        run_id=run_id,
+                        status=status,
+                        issue_counts=issue_summary,
+                        trigger=trigger,
+                        duration_ms=elapsed_ms,
+                        error_message=error_message,
+                        run_config=self._run_config,
+                        new_issues_count=new_count,
+                        started_at=start_time,
+                    )
+                except Exception as slack_exc:
+                    logger.warning(
+                        f"Exception in Slack notification: {type(slack_exc).__name__}: {slack_exc}",
+                        extra={"run_id": run_id, "error": str(slack_exc)},
+                        exc_info=True,
+                    )
 
         logger.info(
             "Integrity run completed",
@@ -1203,16 +1267,21 @@ class IntegrityRunner:
 
         return result
 
-    def _fetch_records(self, entities: List[str] | None = None) -> Tuple[Dict[str, List[dict]], Dict[str, int]]:
+    def _fetch_records(
+        self,
+        entities: List[str] | None = None,
+        cancel_check: Optional[Callable[[], None]] = None,
+    ) -> Tuple[Dict[str, List[dict]], Dict[str, int]]:
         """Fetch records for the specified entities using parallel fetching.
-        
+
         Args:
             entities: Optional list of entity names to fetch. If None, fetches all entities.
+            cancel_check: Optional callback that raises an exception if the operation should be cancelled.
         """
         logger.info("Performing full scan")
-        
-        fetchers = build_fetchers(self._airtable_client)
-        
+
+        fetchers = build_fetchers(self._airtable_client, self._school_year_service)
+
         # Filter fetchers by selected entities if provided
         if entities:
             fetchers = {key: fetcher for key, fetcher in fetchers.items() if key in entities}
@@ -1286,7 +1355,10 @@ class IntegrityRunner:
                         )
                 
                 fetch_start = time.time()
-                data = fetcher.fetch(progress_callback=log_progress if async_buffer else None)
+                data = fetcher.fetch(
+                    progress_callback=log_progress if async_buffer else None,
+                    cancel_check=cancel_check,
+                )
                 fetch_duration = time.time() - fetch_start
                 
                 total_callback_time = sum(callback_times)
@@ -1320,7 +1392,8 @@ class IntegrityRunner:
                 return (key, [], exc)
         
         # Execute parallel fetches
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        executor = ThreadPoolExecutor(max_workers=max_workers)
+        try:
             submit_start = time.time()
             futures = {executor.submit(fetch_entity, key, fetcher): key for key, fetcher in fetchers.items()}
             submit_duration = time.time() - submit_start
@@ -1330,22 +1403,58 @@ class IntegrityRunner:
             )
             
             completion_times = {}
-            for future in as_completed(futures):
-                result_start = time.time()
-                key, data, error = future.result()
-                result_duration = time.time() - result_start
-                completion_times[key] = time.time() - parallel_fetch_start
-                
-                logger.info(
-                    f"[TIMING] Entity '{key}' result retrieved: {result_duration:.3f}s (completed at {completion_times[key]:.3f}s from start)",
-                    extra={"entity": key, "result_duration": result_duration, "completion_time": completion_times[key]}
-                )
-                
-                if error:
-                    errors[key] = error
-                else:
-                    records[key] = data
-                    counts[key] = len(data)
+            # Use a cancellable wait loop so timeouts/cancellations stop waiting on hung futures.
+            pending = set(futures.keys())
+            while pending:
+                # Check cancellation/timeout frequently while waiting for futures
+                if cancel_check:
+                    cancel_check()
+
+                done, pending = set(), pending
+                try:
+                    # Wait briefly for any futures to complete, then re-check cancellation.
+                    from concurrent.futures import wait, FIRST_COMPLETED
+                    done, pending = wait(pending, timeout=1.0, return_when=FIRST_COMPLETED)
+                except Exception:
+                    # If wait itself fails, bail out and let outer error handling handle it.
+                    raise
+
+                for future in done:
+                    result_start = time.time()
+                    key, data, error = future.result()
+                    result_duration = time.time() - result_start
+                    completion_times[key] = time.time() - parallel_fetch_start
+
+                    logger.info(
+                        f"[TIMING] Entity '{key}' result retrieved: {result_duration:.3f}s (completed at {completion_times[key]:.3f}s from start)",
+                        extra={"entity": key, "result_duration": result_duration, "completion_time": completion_times[key]}
+                    )
+
+                    if error:
+                        errors[key] = error
+                    else:
+                        records[key] = data
+                        counts[key] = len(data)
+
+            # If we were cancelled mid-wait, attempt to stop outstanding futures quickly.
+            # Note: running thread tasks cannot be forcibly killed, but this cancels queued work.
+            if cancel_check:
+                cancel_check()
+        except Exception:
+            # Critical: on timeout/cancel we must NOT block waiting for worker threads.
+            # Worker threads should stop quickly because Airtable pagination calls cancel_check each page.
+            try:
+                executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+            raise
+        finally:
+            # Normal completion path: wait for threads to finish cleanly.
+            # If the executor was already shutdown in the exception path, this is a no-op.
+            try:
+                executor.shutdown(wait=True, cancel_futures=False)
+            except Exception:
+                pass
         
         parallel_fetch_duration = time.time() - parallel_fetch_start
         logger.info(
@@ -1372,7 +1481,19 @@ class IntegrityRunner:
         if errors:
             failed_entity = next(iter(errors.keys()))
             error = errors[failed_entity]
-            raise FetchError(failed_entity, f"Failed to fetch {failed_entity}: {str(error)}", "unknown") from error
+            # Include full error details in message
+            error_msg = str(error)
+            if not error_msg or error_msg == failed_entity:
+                # If error message is just the entity name, try to get more details
+                error_type = type(error).__name__
+                error_repr = repr(error)
+                if error_repr != error_msg:
+                    error_msg = f"{error_type}: {error_repr}"
+                else:
+                    error_msg = f"{error_type}: {error_msg}"
+            # Use current_run_id if available, otherwise None
+            current_run_id = getattr(self, '_current_run_id', None)
+            raise FetchError(failed_entity, error_msg, current_run_id) from error
         
         total_records_fetched = sum(counts.values())
         logger.info(
@@ -1401,16 +1522,6 @@ class IntegrityRunner:
         Returns:
             Filtered SchemaConfig with only selected rules that exist
         """
-        # CRITICAL DEBUG: Use logger.warning so it definitely shows up
-        logger.warning("=" * 80)
-        logger.warning("FILTER METHOD CALLED")
-        logger.warning(f"run_config is None: {run_config is None}")
-        if run_config:
-            logger.warning(f"run_config keys: {list(run_config.keys())}")
-            logger.warning(f"run_config contents: {run_config}")
-            logger.warning(f"run_config.get('rules'): {run_config.get('rules')}")
-        logger.warning("=" * 80)
-
         if not run_config:
             # No run_config at all = use all rules (backwards compatibility)
             logger.info(
@@ -1445,6 +1556,7 @@ class IntegrityRunner:
             "duplicates": {},
             "relationships": {},
             "required_fields": {},
+            "value_checks": {},
         }
         
         if "duplicates" in rules_selection:
@@ -1455,6 +1567,9 @@ class IntegrityRunner:
         
         if "required_fields" in rules_selection:
             selected_rules["required_fields"] = rules_selection.get("required_fields", {})
+        
+        if "value_checks" in rules_selection:
+            selected_rules["value_checks"] = rules_selection.get("value_checks", {})
         
         logger.info(
             "Selected rules from run_config",
@@ -1480,6 +1595,9 @@ class IntegrityRunner:
         total_required_fields = sum(
             len(e.missing_key_data) for e in schema_config.entities.values()
         )
+        total_value_checks = sum(
+            len(e.value_checks) for e in schema_config.entities.values()
+        )
         
         logger.info(
             "Rule filtering: before filtering",
@@ -1487,6 +1605,7 @@ class IntegrityRunner:
                 "duplicates_count": total_duplicates,
                 "relationships_count": total_relationships,
                 "required_fields_count": total_required_fields,
+                "value_checks_count": total_value_checks,
                 "rules_selection": rules_selection,
             }
         )
@@ -1778,6 +1897,103 @@ class IntegrityRunner:
             for entity in filtered_config.entities:
                 filtered_config.entities[entity].missing_key_data = []
         
+        # Filter value_checks
+        if "value_checks" in rules_selection:
+            selected_value = rules_selection.get("value_checks", {})
+            if selected_value:
+                # User selected specific value check rules
+                for entity, rule_ids in selected_value.items():
+                    if entity not in filtered_config.entities:
+                        missing_rules.extend([
+                            f"value_checks.{entity}.{rule_id}" 
+                            for rule_id in rule_ids
+                        ])
+                        continue
+                        
+                    entity_schema = filtered_config.entities[entity]
+                    
+                    # Log before filtering
+                    total_rules_before = len(entity_schema.value_checks or [])
+                    logger.info(
+                        f"Filtering value checks for {entity}",
+                        extra={
+                            "entity": entity,
+                            "selected_rule_ids": rule_ids,
+                            "selected_rule_count": len(rule_ids),
+                            "total_rules_before": total_rules_before,
+                        }
+                    )
+                    
+                    # Get all existing rule identifiers for validation
+                    existing_identifiers = set()
+                    for check in (entity_schema.value_checks or []):
+                        existing_identifiers.add(f"value_check.{entity}.{check.field}")
+                        if hasattr(check, "rule_id") and check.rule_id:
+                            existing_identifiers.add(check.rule_id)
+                    
+                    # Check for missing rule IDs
+                    for rule_id in rule_ids:
+                        if rule_id not in existing_identifiers:
+                            missing_rules.append(f"value_checks.{entity}.{rule_id}")
+                            logger.warning(
+                                f"Selected value check rule ID not found in schema for {entity}",
+                                extra={
+                                    "entity": entity,
+                                    "rule_id": rule_id,
+                                    "existing_identifiers": list(existing_identifiers),
+                                }
+                            )
+                    
+                    # Filter value_checks array - match by rule_id or constructed format
+                    filtered_rules = []
+                    for check in (entity_schema.value_checks or []):
+                        rule_id = getattr(check, "rule_id", None)
+                        matched = False
+                        matched_by = None
+                        
+                        # Primary: Match by exact rule_id (most reliable)
+                        if rule_id and rule_id in rule_ids:
+                            matched = True
+                            matched_by = "rule_id"
+                        # Secondary: Match by constructed format (for rules without rule_id)
+                        elif f"value_check.{entity}.{check.field}" in rule_ids:
+                            matched = True
+                            matched_by = "constructed_format"
+                        
+                        if matched:
+                            filtered_rules.append(check)
+                            logger.debug(
+                                f"Value check rule matched for {entity}",
+                                extra={
+                                    "rule_id": rule_id,
+                                    "field": check.field,
+                                    "matched_by": matched_by,
+                                }
+                            )
+                    
+                    entity_schema.value_checks = filtered_rules
+                    
+                    # Log after filtering
+                    logger.info(
+                        f"Filtered value checks for {entity}",
+                        extra={
+                            "entity": entity,
+                            "selected_rule_ids": rule_ids,
+                            "total_rules_before": total_rules_before,
+                            "total_rules_after": len(filtered_rules),
+                            "rules_filtered_out": total_rules_before - len(filtered_rules),
+                        }
+                    )
+            
+            # Clear value checks for entities not in selection
+            for entity in filtered_config.entities:
+                if entity not in selected_value:
+                    filtered_config.entities[entity].value_checks = []
+        else:
+            # Key absent = user didn't select any value checks - clear all
+            for entity in filtered_config.entities:
+                filtered_config.entities[entity].value_checks = []
+        
         # Log warnings for missing rules
         if missing_rules:
             logger.warning(
@@ -1799,12 +2015,16 @@ class IntegrityRunner:
         filtered_required_fields = sum(
             len(e.missing_key_data) for e in filtered_config.entities.values()
         )
+        filtered_value_checks = sum(
+            len(e.value_checks) for e in filtered_config.entities.values()
+        )
         
         # Extract all rule IDs that passed filtering
         filtered_rule_ids = {
             "duplicates": {},
             "relationships": {},
             "required_fields": {},
+            "value_checks": {},
         }
         
         # Extract duplicate rule IDs
@@ -1830,12 +2050,22 @@ class IntegrityRunner:
                 ]
                 filtered_rule_ids["required_fields"][entity] = req_ids
         
+        # Extract value check rule IDs
+        for entity, entity_schema in filtered_config.entities.items():
+            if entity_schema.value_checks:
+                check_ids = [
+                    check.rule_id or f"value_check.{entity}.{check.field}"
+                    for check in entity_schema.value_checks
+                ]
+                filtered_rule_ids["value_checks"][entity] = check_ids
+        
         logger.info(
             "Rule filtering: after filtering",
             extra={
                 "duplicates_count": filtered_duplicates,
                 "relationships_count": filtered_relationships,
                 "required_fields_count": filtered_required_fields,
+                "value_checks_count": filtered_value_checks,
                 "duplicates_filtered": total_duplicates - filtered_duplicates,
                 "relationships_filtered": total_relationships - filtered_relationships,
                 "required_fields_filtered": total_required_fields - filtered_required_fields,
@@ -1881,19 +2111,6 @@ class IntegrityRunner:
 
         logger.info("=" * 80)
 
-        # CRITICAL DEBUG: Print the ACTUAL missing_key_data arrays
-        print("=" * 80)
-        print("FILTER DEBUG: ACTUAL missing_key_data in filtered_config")
-        print("=" * 80)
-        for entity_name, entity_schema in filtered_config.entities.items():
-            if entity_schema.missing_key_data:
-                print(f"{entity_name} has {len(entity_schema.missing_key_data)} rules:")
-                for req in entity_schema.missing_key_data:
-                    print(f"  - {req.rule_id or req.field}")
-            else:
-                print(f"{entity_name} has NO required field rules")
-        print("=" * 80)
-
         # Note: attendance_rules is handled separately in attendance.run()
         # since it's not part of SchemaConfig
 
@@ -1919,6 +2136,9 @@ class IntegrityRunner:
         required_fields_count = sum(
             len(e.missing_key_data) for e in schema_config_to_use.entities.values()
         )
+        value_checks_count = sum(
+            len(e.value_checks) for e in schema_config_to_use.entities.values()
+        )
         
         logger.info(
             "Executing checks with filtered rules",
@@ -1926,6 +2146,7 @@ class IntegrityRunner:
                 "duplicates_rules": duplicates_count,
                 "relationships_rules": relationships_count,
                 "required_fields_rules": required_fields_count,
+                "value_checks_rules": value_checks_count,
             }
         )
         
@@ -1964,6 +2185,18 @@ class IntegrityRunner:
             extra={
                 "category": "required_fields",
                 "issues_found": len(req_results),
+            }
+        )
+        
+        # Execute value checks
+        logger.info("Executing value checks")
+        value_results = value_checks.run(records, schema_config_to_use)
+        results.extend(value_results)
+        logger.info(
+            "Value checks completed",
+            extra={
+                "category": "value_checks",
+                "issues_found": len(value_results),
             }
         )
         

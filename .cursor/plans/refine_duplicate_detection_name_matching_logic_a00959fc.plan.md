@@ -1,36 +1,3 @@
----
-name: Refine duplicate detection name matching logic
-overview: "Update duplicate detection to use stricter name matching rules: require exact match on both first and last names, OR exact match on one name part with >80% similarity on the other part. This prevents false positives like husband/wife pairs with same last name but different first names."
-todos:
-  - id: "1"
-    content: Add first_name and last_name fields to StudentRecord, ParentRecord, and ContractorRecord dataclasses
-    status: completed
-  - id: "2"
-    content: Update _normalize_students() to extract and store first_name and last_name separately
-    status: completed
-  - id: "3"
-    content: Update _normalize_parents() to parse full_name into first_name and last_name
-    status: completed
-  - id: "4"
-    content: Update _normalize_contractors() to parse legal_name into first_name and last_name
-    status: completed
-  - id: "5"
-    content: Create _check_name_match() helper function with the new matching logic (exact + >80% similarity rules)
-    status: completed
-  - id: "6"
-    content: Update _classify_student_pair() to use new name matching logic
-    status: completed
-  - id: "7"
-    content: Update _classify_parent_pair() to use new name matching logic
-    status: completed
-  - id: "8"
-    content: Update _classify_contractor_pair() to use new name matching logic
-    status: completed
-  - id: "9"
-    content: Update ruleFormatter.ts to handle new rule IDs
-    status: completed
----
-
 # Refine Duplicate Detection Name Matching Logic
 
 ## Problem
@@ -107,9 +74,3 @@ Implement stricter name matching that requires:
 - Exact match on one + <80% on other → NOT duplicate
 
 3. **Email/Phone Override**: Exact email or phone matches still mark as duplicate regardless of name similarity
-4. **Threshold**: Use 0.8 (80%) as the similarity threshold for the non-matching name part
-
-## Testing Considerations
-
-- Test husband/wife case: same last name, different first names → should NOT be duplicate
-- Test same person with slight name variation → should be duplicate if >80% similar

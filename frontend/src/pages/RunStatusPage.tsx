@@ -24,6 +24,7 @@ export function RunStatusPage() {
   const { logs, loading: logsLoading } = useRunLogs(runId || null);
   const { getToken } = useAuth();
   const [isCancelling, setIsCancelling] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
   const [activeIssueTab, setActiveIssueTab] = useState<"new" | "all">("new");
   const logsContainerRef = useRef<HTMLDivElement>(null);
   const shouldAutoScrollRef = useRef(true);
@@ -61,24 +62,6 @@ export function RunStatusPage() {
       isCancelling &&
       (statusLower === "cancelled" || statusLower === "canceled")
     ) {
-      // #region agent log
-      fetch(
-        "http://127.0.0.1:7242/ingest/5d5f825f-e8a4-412f-af68-47be30198b26",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            location: "RunStatusPage.tsx:39",
-            message: "Status changed to cancelled, resetting isCancelling",
-            data: { statusLower, previousIsCancelling: isCancelling },
-            timestamp: Date.now(),
-            sessionId: "debug-session",
-            runId: "cancel-action",
-            hypothesisId: "H5",
-          }),
-        }
-      ).catch(() => {});
-      // #endregion agent log
       setIsCancelling(false);
     }
   }, [statusLower, isCancelling]);
@@ -508,29 +491,6 @@ export function RunStatusPage() {
             <button
               onClick={async () => {
                 if (!runId || isCancelling) return;
-                // #region agent log
-                fetch(
-                  "http://127.0.0.1:7242/ingest/5d5f825f-e8a4-412f-af68-47be30198b26",
-                  {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                      location: "RunStatusPage.tsx:247",
-                      message: "Cancel button clicked",
-                      data: {
-                        runId,
-                        isCancelling,
-                        currentStatus: runStatus?.status,
-                        isRunning,
-                      },
-                      timestamp: Date.now(),
-                      sessionId: "debug-session",
-                      runId: "cancel-action",
-                      hypothesisId: "H4",
-                    }),
-                  }
-                ).catch(() => {});
-                // #endregion agent log
                 setIsCancelling(true);
                 try {
                   const token = await getToken();
@@ -540,24 +500,6 @@ export function RunStatusPage() {
                     return;
                   }
 
-                  // #region agent log
-                  fetch(
-                    "http://127.0.0.1:7242/ingest/5d5f825f-e8a4-412f-af68-47be30198b26",
-                    {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({
-                        location: "RunStatusPage.tsx:257",
-                        message: "Sending cancel request",
-                        data: { runId, apiBase: API_BASE },
-                        timestamp: Date.now(),
-                        sessionId: "debug-session",
-                        runId: "cancel-action",
-                        hypothesisId: "H6",
-                      }),
-                    }
-                  ).catch(() => {});
-                  // #endregion agent log
                   const response = await fetch(
                     `${API_BASE}/integrity/run/${runId}/cancel`,
                     {
@@ -568,29 +510,6 @@ export function RunStatusPage() {
                       },
                     }
                   );
-
-                  // #region agent log
-                  fetch(
-                    "http://127.0.0.1:7242/ingest/5d5f825f-e8a4-412f-af68-47be30198b26",
-                    {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({
-                        location: "RunStatusPage.tsx:268",
-                        message: "Cancel response received",
-                        data: {
-                          ok: response.ok,
-                          status: response.status,
-                          statusText: response.statusText,
-                        },
-                        timestamp: Date.now(),
-                        sessionId: "debug-session",
-                        runId: "cancel-action",
-                        hypothesisId: "H6",
-                      }),
-                    }
-                  ).catch(() => {});
-                  // #endregion agent log
 
                   if (!response.ok) {
                     let errorData;
@@ -612,51 +531,9 @@ export function RunStatusPage() {
                     throw new Error(errorMessage);
                   }
 
-                  // #region agent log
-                  fetch(
-                    "http://127.0.0.1:7242/ingest/5d5f825f-e8a4-412f-af68-47be30198b26",
-                    {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({
-                        location: "RunStatusPage.tsx:288",
-                        message:
-                          "Cancel request succeeded, waiting for status update",
-                        data: { runId, currentStatus: runStatus?.status },
-                        timestamp: Date.now(),
-                        sessionId: "debug-session",
-                        runId: "cancel-action",
-                        hypothesisId: "H5",
-                      }),
-                    }
-                  ).catch(() => {});
-                  // #endregion agent log
                   // Status will update via real-time subscription
                   // Keep isCancelling true until status actually changes
                 } catch (error) {
-                  // #region agent log
-                  fetch(
-                    "http://127.0.0.1:7242/ingest/5d5f825f-e8a4-412f-af68-47be30198b26",
-                    {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({
-                        location: "RunStatusPage.tsx:293",
-                        message: "Cancel request failed",
-                        data: {
-                          error:
-                            error instanceof Error
-                              ? error.message
-                              : String(error),
-                        },
-                        timestamp: Date.now(),
-                        sessionId: "debug-session",
-                        runId: "cancel-action",
-                        hypothesisId: "H6",
-                      }),
-                    }
-                  ).catch(() => {});
-                  // #endregion agent log
                   console.error("Failed to cancel run:", error);
                   let errorMessage = "Failed to cancel run. Please try again.";
 
@@ -678,6 +555,93 @@ export function RunStatusPage() {
               className="rounded-lg border border-red-500 px-4 py-2 text-red-600 hover:bg-red-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isCancelling ? "Cancelling..." : "Cancel Scan"}
+            </button>
+          )}
+          {!isRunning && (
+            <button
+              onClick={async () => {
+                if (!runId || isDeleting) return;
+
+                // First confirmation: Delete run?
+                const confirmDelete = window.confirm(
+                  "Are you sure you want to delete this run? This action cannot be undone."
+                );
+                if (!confirmDelete) return;
+
+                // Second confirmation: Delete issues?
+                const deleteIssues = window.confirm(
+                  "Also delete ALL issues found in this run? This will only delete issues associated with this specific run."
+                );
+
+                setIsDeleting(true);
+                try {
+                  const token = await getToken();
+                  if (!token) {
+                    alert("Authentication required. Please sign in again.");
+                    setIsDeleting(false);
+                    return;
+                  }
+
+                  const response = await fetch(
+                    `${API_BASE}/integrity/run/${runId}?delete_issues=${deleteIssues}`,
+                    {
+                      method: "DELETE",
+                      headers: {
+                        Authorization: `Bearer ${token}`,
+                        "Content-Type": "application/json",
+                      },
+                    }
+                  );
+
+                  if (!response.ok) {
+                    let errorData;
+                    try {
+                      errorData = await response.json();
+                    } catch {
+                      errorData = {
+                        error: `Server returned ${response.status}: ${response.statusText}`,
+                      };
+                    }
+
+                    const errorMessage =
+                      errorData.detail?.error ||
+                      errorData.detail?.message ||
+                      errorData.error ||
+                      errorData.message ||
+                      `Failed to delete run (${response.status})`;
+
+                    throw new Error(errorMessage);
+                  }
+
+                  const result = await response.json();
+                  const successMessage = deleteIssues && result.deleted_issues_count !== undefined
+                    ? `Run deleted successfully. ${result.deleted_issues_count} issues were also deleted.`
+                    : "Run deleted successfully.";
+
+                  alert(successMessage);
+                  navigate("/runs");
+                } catch (error) {
+                  console.error("Failed to delete run:", error);
+                  let errorMessage = "Failed to delete run. Please try again.";
+
+                  if (
+                    error instanceof TypeError &&
+                    error.message.includes("fetch")
+                  ) {
+                    errorMessage =
+                      "Backend server is not available. Please ensure the backend is running.";
+                  } else if (error instanceof Error) {
+                    errorMessage = error.message;
+                  }
+
+                  alert(errorMessage);
+                  setIsDeleting(false);
+                }
+              }}
+              disabled={isDeleting}
+              className="rounded-lg border border-red-500 px-4 py-2 text-red-600 hover:bg-red-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isDeleting ? "Deleting..." : "Delete Run"}
             </button>
           )}
         </div>
@@ -782,19 +746,64 @@ export function RunStatusPage() {
             </div>
           )}
 
+        {/* New Issues Count */}
+        <div className="mb-6">
+          <div className="text-sm font-medium text-[var(--text-main)] mb-3">
+            New Issues Found
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div className="rounded-lg border border-[var(--border)] p-4 bg-[var(--bg-mid)]/30">
+              <div className="text-xs text-[var(--text-muted)] mb-1">Total</div>
+              <div className="text-2xl font-semibold text-[var(--text-main)]">
+                {(() => {
+                  // Calculate total from severity counts to ensure it matches displayed values
+                  const critical = runStatus.new_issues_by_severity?.critical || 0;
+                  const warning = runStatus.new_issues_by_severity?.warning || 0;
+                  const info = runStatus.new_issues_by_severity?.info || 0;
+                  return critical + warning + info;
+                })()}
+              </div>
+            </div>
+            <div className="rounded-lg border border-red-200 p-4 bg-red-50">
+              <div className="text-xs text-red-700 mb-1">Critical</div>
+              <div className="text-2xl font-semibold text-red-800">
+                {runStatus.new_issues_by_severity?.critical || 0}
+              </div>
+            </div>
+            <div className="rounded-lg border border-yellow-200 p-4 bg-yellow-50">
+              <div className="text-xs text-yellow-700 mb-1">Warning</div>
+              <div className="text-2xl font-semibold text-yellow-800">
+                {runStatus.new_issues_by_severity?.warning || 0}
+              </div>
+            </div>
+            <div className="rounded-lg border border-blue-200 p-4 bg-blue-50">
+              <div className="text-xs text-blue-700 mb-1">Info</div>
+              <div className="text-2xl font-semibold text-blue-800">
+                {runStatus.new_issues_by_severity?.info || 0}
+              </div>
+            </div>
+          </div>
+        </div>
+
         {/* Issue Counts */}
         {runStatus.counts && (
           <div className="mb-6">
             <div className="text-sm font-medium text-[var(--text-main)] mb-3">
-              Issues Found
+              Total Issues Found
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               <div className="rounded-lg border border-[var(--border)] p-4 bg-[var(--bg-mid)]/30">
                 <div className="text-xs text-[var(--text-muted)] mb-1">
                   Total
                 </div>
                 <div className="text-2xl font-semibold text-[var(--text-main)]">
-                  {runStatus.counts.total || 0}
+                  {(() => {
+                    // Calculate total from severity counts to ensure it matches displayed values
+                    const critical = runStatus.counts.by_severity?.critical || 0;
+                    const warning = runStatus.counts.by_severity?.warning || 0;
+                    const info = runStatus.counts.by_severity?.info || 0;
+                    return critical + warning + info;
+                  })()}
                 </div>
               </div>
               {runStatus.counts.by_severity && (
@@ -809,6 +818,12 @@ export function RunStatusPage() {
                     <div className="text-xs text-yellow-700 mb-1">Warning</div>
                     <div className="text-2xl font-semibold text-yellow-800">
                       {runStatus.counts.by_severity.warning || 0}
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-blue-200 p-4 bg-blue-50">
+                    <div className="text-xs text-blue-700 mb-1">Info</div>
+                    <div className="text-2xl font-semibold text-blue-800">
+                      {runStatus.counts.by_severity.info || 0}
                     </div>
                   </div>
                 </>
@@ -887,15 +902,32 @@ export function RunStatusPage() {
           </div>
         )}
 
-        {/* Rules Used */}
+        {/* Slack Notifications & Rules Used */}
         <div className="mt-6 pt-6 border-t border-[var(--border)]">
-          <div className="text-sm font-medium text-[var(--text-main)] mb-3">
-            Rules Selected for This Scan
-            {runStatus?.run_config?.rules && (
-              <span className="ml-2 text-xs font-normal text-[var(--text-muted)]">
-                ({rulesUsed.length} {rulesUsed.length === 1 ? 'rule' : 'rules'} selected)
-              </span>
-            )}
+          <div className="flex items-center justify-between mb-3">
+            <div className="text-sm font-medium text-[var(--text-main)]">
+              Rules Selected for This Scan
+              {runStatus?.run_config?.rules && (
+                <span className="ml-2 text-xs font-normal text-[var(--text-muted)]">
+                  ({rulesUsed.length} {rulesUsed.length === 1 ? 'rule' : 'rules'} selected)
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-1.5 text-xs">
+              <span className="text-[var(--text-muted)]">Slack:</span>
+              {runStatus?.run_config?.notify_slack ? (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-green-100 text-green-700 font-medium">
+                  <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                    <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                  </svg>
+                  Enabled
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-gray-100 text-gray-500 font-medium">
+                  Disabled
+                </span>
+              )}
+            </div>
           </div>
           {loadingRules ? (
             <div className="text-xs text-[var(--text-muted)]">
@@ -1115,11 +1147,15 @@ export function RunStatusPage() {
                   first_seen_in_run: runId,
                   status: "all",
                 }}
+                totalItems={runStatus.new_issues_count || 0}
+                itemsPerPage={50}
               />
             ) : (
               <IssueList
                 key={`all-issues-${runId}`}
                 filters={{ run_id: runId, status: "all" }}
+                totalItems={runStatus.counts?.total || 0}
+                itemsPerPage={50}
               />
             )}
             {/* Debug info */}

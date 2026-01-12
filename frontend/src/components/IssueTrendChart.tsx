@@ -58,7 +58,7 @@ export function IssueTrendChart({
   const issueTypes = useMemo(() => {
     const types = Array.from(
       new Set(
-        data.flatMap((item) => Object.keys(item).filter((key) => key !== "day"))
+        data.flatMap((item) => Object.keys(item).filter((key) => key !== "day" && key !== "total"))
       )
     );
     return types;
@@ -266,29 +266,6 @@ export function IssueTrendChart({
               />
               {issueTypes.map((type) => {
                 const isEnabled = enabledTypes.has(type);
-                // #region agent log
-                fetch(
-                  "http://127.0.0.1:7242/ingest/5d5f825f-e8a4-412f-af68-47be30198b26",
-                  {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                      location: "IssueTrendChart.tsx:267",
-                      message: "Rendering Line component",
-                      data: {
-                        type,
-                        isEnabled,
-                        issueTypesLength: issueTypes.length,
-                        enabledTypesSize: enabledTypes.size,
-                      },
-                      timestamp: Date.now(),
-                      sessionId: "debug-session",
-                      runId: "run1",
-                      hypothesisId: "A",
-                    }),
-                  }
-                ).catch(() => {});
-                // #endregion
                 const color = getColor(type);
                 const totalPoints = data.length;
                 // Create dot render function that receives props with index
@@ -341,24 +318,6 @@ export function IssueTrendChart({
                   };
                 };
                 // Use stable key based only on type, not isEnabled state
-                // #region agent log
-                fetch(
-                  "http://127.0.0.1:7242/ingest/5d5f825f-e8a4-412f-af68-47be30198b26",
-                  {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                      location: "IssueTrendChart.tsx:319",
-                      message: "Creating Line with key",
-                      data: { type, key: `line-${type}`, isEnabled },
-                      timestamp: Date.now(),
-                      sessionId: "debug-session",
-                      runId: "run1",
-                      hypothesisId: "A",
-                    }),
-                  }
-                ).catch(() => {});
-                // #endregion
                 return (
                   <Line
                     key={`line-${type}`}

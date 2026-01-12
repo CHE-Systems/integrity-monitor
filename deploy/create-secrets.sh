@@ -25,6 +25,9 @@ SECRETS=(
 
 echo "Creating secrets in Secret Manager for project: ${PROJECT_ID}"
 echo ""
+echo "Note: slack-webhook-url is protected and will not be modified by this script."
+echo "      It should be managed via the API endpoint or manually."
+echo ""
 
 # Check if .env file exists
 if [ -f "$ENV_FILE" ]; then
@@ -47,6 +50,11 @@ create_secret() {
     local secret_name=$1
     local secret_value=$2
     
+    # PROTECTED: Never touch slack-webhook-url - it's managed separately via the API
+    if [ "$secret_name" = "slack-webhook-url" ]; then
+        echo "⚠  ${secret_name}: Protected secret - skipping (managed via API)"
+        return 1
+    fi
     
     if [ -z "$secret_value" ]; then
         echo "⚠  ${secret_name}: No value found, skipping..."

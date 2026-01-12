@@ -33,59 +33,15 @@ DISALLOWED_ENTITIES = [
 
 
 def verify_schema_yaml():
-    """Verify schema.yaml only has contractor entities."""
+    """Verify schema.yaml only has contractor entities.
+    
+    NOTE: schema.yaml has been removed. This check is skipped.
+    Rules are now managed in Firestore only.
+    """
     logger.info("\n=== Checking schema.yaml ===")
-
-    try:
-        import yaml
-        from pathlib import Path
-
-        schema_path = Path(__file__).parent.parent / "config" / "schema.yaml"
-        with open(schema_path) as f:
-            schema = yaml.safe_load(f)
-
-        entities = list(schema.get("entities", {}).keys())
-        duplicate_entities = list(schema.get("duplicates", {}).keys())
-
-        issues = []
-
-        # Check entities
-        for entity in entities:
-            if entity != ALLOWED_ENTITY:
-                issues.append(f"  ✗ Found non-contractor entity: {entity}")
-
-        # Check duplicates
-        for entity in duplicate_entities:
-            if entity != ALLOWED_ENTITY:
-                issues.append(f"  ✗ Found non-contractor duplicate rules: {entity}")
-
-        if issues:
-            for issue in issues:
-                logger.error(issue)
-            return False
-        else:
-            logger.info(f"  ✓ Only {ALLOWED_ENTITY} entity found")
-            logger.info(f"  ✓ Entities: {entities}")
-            logger.info(f"  ✓ Duplicate entities: {duplicate_entities}")
-
-            # Count rules
-            contractor_entity = schema.get("entities", {}).get(ALLOWED_ENTITY, {})
-            if contractor_entity:
-                required_fields = len(contractor_entity.get("missing_key_data", []))
-                relationships = len(contractor_entity.get("relationships", {}))
-                logger.info(f"  ✓ Required fields: {required_fields}")
-                logger.info(f"  ✓ Relationships: {relationships}")
-
-            contractor_dups = schema.get("duplicates", {}).get(ALLOWED_ENTITY, {})
-            if contractor_dups:
-                likely = len(contractor_dups.get("likely", []))
-                possible = len(contractor_dups.get("possible", []))
-                logger.info(f"  ✓ Duplicate rules: {likely} likely, {possible} possible")
-
-            return True
-    except Exception as exc:
-        logger.error(f"Failed to verify schema: {exc}", exc_info=True)
-        return False
+    logger.info("  ⚠️  schema.yaml has been removed. Rules are managed in Firestore only.")
+    logger.info("  ✓ Skipping schema.yaml check")
+    return True
 
 
 def verify_rules_yaml():

@@ -11,17 +11,15 @@ const BASE_MAPPINGS: Record<string, string> = {
   truth: import.meta.env.VITE_AIRTABLE_TRUTH_BASE || "",
   payments: import.meta.env.VITE_AIRTABLE_PAYMENTS_BASE || "",
   data_issues: import.meta.env.VITE_AIRTABLE_DATA_ISSUES_BASE || "",
+  student_truth: import.meta.env.VITE_AIRTABLE_STUDENT_TRUTH_BASE || "",
 };
 
 const TABLE_MAPPINGS: Record<string, string> = {
   students: import.meta.env.VITE_AIRTABLE_STUDENTS_TABLE || "",
   parents: import.meta.env.VITE_AIRTABLE_PARENTS_TABLE || "",
   contractors: import.meta.env.VITE_AIRTABLE_CONTRACTORS_TABLE || "",
-  classes: import.meta.env.VITE_AIRTABLE_CLASSES_TABLE || "",
-  attendance: import.meta.env.VITE_AIRTABLE_ATTENDANCE_TABLE || "",
-  truth: import.meta.env.VITE_AIRTABLE_TRUTH_TABLE || "",
-  payments: import.meta.env.VITE_AIRTABLE_PAYMENTS_TABLE || "",
-  data_issues: import.meta.env.VITE_AIRTABLE_DATA_ISSUES_TABLE || "",
+  absent: import.meta.env.VITE_AIRTABLE_ABSENT_TABLE || "",
+  student_truth: import.meta.env.VITE_AIRTABLE_STUDENT_TRUTH_TABLE || "",
 };
 
 /**

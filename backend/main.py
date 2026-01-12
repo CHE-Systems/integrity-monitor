@@ -3,6 +3,7 @@ import os
 import json
 import time
 import threading
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Dict, Any
@@ -68,13 +69,6 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(RequestIDMiddleware)
 
-# #region agent log
-try:
-    with open(debug_log, 'a') as f:
-        f.write(json.dumps({"sessionId":"debug-session","runId":"startup","hypothesisId":"A","location":"main.py:104","message":"Starting schema config load","data":{"step":"before_load_schema_config"},"timestamp":int(time.time()*1000)})+'\n')
-except: pass
-# #endregion agent log
-
 # Load schema config with error handling
 try:
     schema_config = load_schema_config()
@@ -85,13 +79,6 @@ except Exception as e:
     from .config.models import SchemaConfig
     schema_config = SchemaConfig(entities={})
     logger.warning("Using empty schema config due to load failure")
-
-# #region agent log
-try:
-    with open(debug_log, 'a') as f:
-        f.write(json.dumps({"sessionId":"debug-session","runId":"startup","hypothesisId":"B","location":"main.py:120","message":"Schema config loaded, starting IntegrityRunner init","data":{"step":"before_integrity_runner","schema_loaded":True},"timestamp":int(time.time()*1000)})+'\n')
-except: pass
-# #endregion agent log
 
 # Initialize IntegrityRunner with error handling
 try:
@@ -106,13 +93,6 @@ except Exception as e:
 # Global dictionary to track running scans: {run_id: threading.Event}
 running_scans: dict[str, threading.Event] = {}
 running_scans_lock = threading.Lock()
-
-# #region agent log
-try:
-    with open(debug_log, 'a') as f:
-        f.write(json.dumps({"sessionId":"debug-session","runId":"startup","hypothesisId":"C","location":"main.py:135","message":"Startup complete","data":{"step":"after_integrity_runner","runner_available":runner is not None},"timestamp":int(time.time()*1000)})+'\n')
-except: pass
-# #endregion agent log
 
 logger.info("FastAPI application startup complete")
 
@@ -350,12 +330,21 @@ def _run_integrity_background(
     run_config: Optional[Dict[str, Any]] = None
 ):
     """Run integrity scan in background thread."""
+    thread_runner = None
     try:
         # Create a new runner instance for this thread
         if runner is None:
             logger.error("IntegrityRunner not available - cannot start scan", extra={"run_id": run_id})
-            return
-        thread_runner = IntegrityRunner()
+            # Try to create runner anyway for error handling
+            try:
+                thread_runner = IntegrityRunner()
+            except Exception:
+                pass
+            if thread_runner is None:
+                return
+        else:
+            thread_runner = IntegrityRunner()
+        
         result = thread_runner.run(
             run_id=run_id,
             trigger=trigger,
@@ -373,6 +362,20 @@ def _run_integrity_background(
             extra={"run_id": run_id, "error": str(exc)},
             exc_info=True,
         )
+        # Write error status to Firestore so UI can show the failure
+        if thread_runner is not None:
+            try:
+                error_metadata = {
+                    "status": "error",
+                    "ended_at": datetime.now(timezone.utc),
+                    "error_message": str(exc),
+                }
+                thread_runner._firestore_writer.write_run(run_id, {}, error_metadata)
+            except Exception as firestore_exc:
+                logger.warning(
+                    "Failed to write error status to Firestore",
+                    extra={"run_id": run_id, "error": str(firestore_exc)},
+                )
     finally:
         # Clean up running scan tracking
         with running_scans_lock:
@@ -380,11 +383,10 @@ def _run_integrity_background(
 
 
 @app.post("/integrity/run", dependencies=[Depends(verify_cloud_scheduler_auth)])
-def run_integrity(
+async def run_integrity(
     request: Request,
     trigger: str = "manual",
     entities: Optional[List[str]] = Query(default=None),
-    run_config: Optional[Dict[str, Any]] = Body(default=None)
 ):
     """Trigger the integrity runner (runs in background).
 
@@ -392,12 +394,21 @@ def run_integrity(
         request: FastAPI request object (injected)
         trigger: Trigger source ("nightly", "weekly", "schedule", or "manual")
         entities: Optional list of entity names to scan (deprecated, use run_config.entities)
-        run_config: Optional run configuration with entities and rules
 
     Returns:
         - 200: Success with run_id (scan runs in background)
         - 500: Complete system failure (unable to start run)
     """
+    # Read request body directly instead of using Body() parameter
+    # This ensures the body is received correctly from Firebase Functions
+    run_config: Optional[Dict[str, Any]] = None
+    try:
+        body_bytes = await request.body()
+        if body_bytes:
+            run_config = json.loads(body_bytes.decode('utf-8'))
+    except Exception:
+        pass
+    
     # Get request ID from middleware
     request_id = getattr(request.state, "request_id", "unknown")
     
@@ -407,19 +418,6 @@ def run_integrity(
         final_entities = run_config["entities"]
     elif entities:
         final_entities = entities
-
-    # DEBUG LOGGING: Show what was received from frontend
-    logger.info("=" * 80)
-    logger.info("API ENDPOINT: Received Scan Request")
-    logger.info("=" * 80)
-    logger.info(f"Trigger: {trigger}")
-    logger.info(f"Entities (query param): {entities}")
-    logger.info(f"Run config received: {run_config}")
-    if run_config:
-        logger.info(f"Run config entities: {run_config.get('entities')}")
-        logger.info(f"Run config rules: {run_config.get('rules')}")
-        logger.info(f"Run config checks: {run_config.get('checks')}")
-    logger.info("=" * 80)
 
     logger.info(
         "Integrity run requested",
@@ -637,20 +635,28 @@ def cancel_integrity_run(run_id: str, request: Request):
         )
 
 
-@app.delete("/integrity/run/{run_id}", dependencies=[Depends(verify_cloud_scheduler_auth)])
-def delete_integrity_run(run_id: str, request: Request):
+@app.delete("/integrity/run/{run_id}", dependencies=[Depends(verify_firebase_token)])
+def delete_integrity_run(
+    run_id: str,
+    request: Request,
+    delete_issues: bool = Query(False, description="Also delete all issues found in this run"),
+):
     """Delete an integrity run and all its associated logs.
     
     Args:
         run_id: Run identifier to delete
         request: FastAPI request object (injected)
+        delete_issues: If True, also delete all issues associated with this run (where issue.run_id == run_id)
     
     Returns:
-        - 200: Success (run deleted)
+        - 200: Success (run deleted, optionally with issues deleted)
         - 404: Run not found
     """
     request_id = getattr(request.state, "request_id", "unknown")
-    logger.info("Integrity run deletion requested", extra={"run_id": run_id, "request_id": request_id})
+    logger.info(
+        "Integrity run deletion requested",
+        extra={"run_id": run_id, "delete_issues": delete_issues, "request_id": request_id}
+    )
     
     try:
         from .clients.firestore import FirestoreClient
@@ -658,10 +664,49 @@ def delete_integrity_run(run_id: str, request: Request):
         
         config = load_runtime_config()
         firestore_client = FirestoreClient(config.firestore)
+        
+        deleted_issues_count = 0
+        
+        # Delete issues first if requested
+        if delete_issues:
+            try:
+                deleted_issues_count = firestore_client.delete_issues_for_run(run_id)
+                logger.info(
+                    "Deleted issues for run",
+                    extra={"run_id": run_id, "deleted_issues_count": deleted_issues_count, "request_id": request_id}
+                )
+            except Exception as exc:
+                logger.error(
+                    "Failed to delete issues for run",
+                    extra={"run_id": run_id, "error": str(exc), "request_id": request_id},
+                    exc_info=True,
+                )
+                # Continue to delete run even if issue deletion fails
+                # This ensures the run is still deleted if issue deletion has issues
+        
+        # Delete the run and its logs
         firestore_client.delete_run(run_id)
         
-        logger.info("Integrity run deleted", extra={"run_id": run_id, "request_id": request_id})
-        return {"status": "success", "message": "Run deleted successfully", "run_id": run_id}
+        logger.info(
+            "Integrity run deleted",
+            extra={
+                "run_id": run_id,
+                "deleted_issues_count": deleted_issues_count,
+                "request_id": request_id
+            }
+        )
+        
+        response = {
+            "status": "success",
+            "message": "Run deleted successfully",
+            "run_id": run_id,
+        }
+        
+        if delete_issues:
+            response["deleted_issues_count"] = deleted_issues_count
+            response["message"] = f"Run and {deleted_issues_count} associated issues deleted successfully"
+        
+        return response
     except Exception as exc:
         logger.error(
             "Failed to delete integrity run",
@@ -1075,14 +1120,17 @@ def airtable_records(table_id: str):
         import time
         from pyairtable import Api
         from requests.exceptions import HTTPError, RequestException
+        from backend.utils.secrets import get_secret
         
         # Use Personal Access Token (PAT) for Airtable authentication
-        pat = os.getenv("AIRTABLE_PAT")
+        # Try environment variable first, then Secret Manager for local development
+        pat = get_secret("AIRTABLE_PAT")
         
         if not pat:
             raise HTTPException(
                 status_code=500,
-                detail="AIRTABLE_PAT environment variable must be set"
+                detail="AIRTABLE_PAT not found in environment variables or Secret Manager. "
+                       "Set AIRTABLE_PAT environment variable or ensure it exists in Google Cloud Secret Manager."
             )
         
         token = pat
@@ -1649,16 +1697,25 @@ def get_airtable_records_by_ids(request: Request, body: RecordsByIdsRequest):
         table_id = None
         for table in schema_data.get("tables", []):
             table_name_lower = table.get("name", "").lower().strip()
+            # Normalize both entity and table name by replacing underscores/spaces
+            table_name_normalized = table_name_lower.replace(" ", "_")
+            entity_as_spaces = normalized_entity.replace("_", " ")
+
             if (table_name_lower == normalized_entity or
                 table_name_lower == entity_lower or
-                normalized_entity in table_name_lower):
+                table_name_lower == entity_as_spaces or
+                table_name_normalized == normalized_entity or
+                normalized_entity in table_name_lower or
+                entity_as_spaces in table_name_lower):
                 table_id = table.get("id")
                 break
 
         if not table_id:
             # Try environment variable fallback
-            env_key = f"AIRTABLE_{normalized_entity.upper()}_TABLE"
-            table_id = os.getenv(env_key)
+            # Try both AIRTABLE_ and AT_ prefixes for compatibility
+            env_key_airtable = f"AIRTABLE_{normalized_entity.upper()}_TABLE"
+            env_key_at = f"AT_{normalized_entity.upper()}_TABLE"
+            table_id = os.getenv(env_key_airtable) or os.getenv(env_key_at)
 
         if not table_id:
             logger.warning(
@@ -1668,12 +1725,15 @@ def get_airtable_records_by_ids(request: Request, body: RecordsByIdsRequest):
             return {"records": {}, "count": 0, "error": f"Table not found for entity: {entity}"}
 
         # Get Airtable API client using Personal Access Token (PAT)
-        pat = os.getenv("AIRTABLE_PAT")
+        # Try environment variable first, then Secret Manager for local development
+        from backend.utils.secrets import get_secret
+        pat = get_secret("AIRTABLE_PAT")
 
         if not pat:
             raise HTTPException(
                 status_code=500,
-                detail="AIRTABLE_PAT environment variable must be set"
+                detail="AIRTABLE_PAT not found in environment variables or Secret Manager. "
+                       "Set AIRTABLE_PAT environment variable or ensure it exists in Google Cloud Secret Manager."
             )
 
         token = pat
@@ -1761,6 +1821,7 @@ def get_all_rules(request: Request):
             "duplicates": {},
             "relationships": {},
             "required_fields": {},
+            "value_checks": {},
             "attendance_rules": {
                 "onboarding_grace_days": 7,
                 "limited_schedule_threshold": 3,
@@ -1775,7 +1836,7 @@ def get_rules_by_category(category: str, request: Request):
     try:
         request_id = getattr(request.state, "request_id", None)
         
-        valid_categories = ["duplicates", "relationships", "required_fields", "attendance_rules"]
+        valid_categories = ["duplicates", "relationships", "required_fields", "value_checks", "attendance_rules"]
         if category not in valid_categories:
             raise HTTPException(
                 status_code=400,
@@ -1871,7 +1932,7 @@ def create_rule(
     try:
         request_id = getattr(request.state, "request_id", None)
         
-        valid_categories = ["duplicates", "relationships", "required_fields", "attendance_rules"]
+        valid_categories = ["duplicates", "relationships", "required_fields", "value_checks", "attendance_rules"]
         if category not in valid_categories:
             raise HTTPException(
                 status_code=400,
@@ -1928,7 +1989,7 @@ def update_rule(
     try:
         request_id = getattr(request.state, "request_id", None)
         
-        valid_categories = ["duplicates", "relationships", "required_fields", "attendance_rules"]
+        valid_categories = ["duplicates", "relationships", "required_fields", "value_checks", "attendance_rules"]
         if category not in valid_categories:
             raise HTTPException(
                 status_code=400,
@@ -1977,7 +2038,7 @@ def delete_rule(
     try:
         request_id = getattr(request.state, "request_id", None)
         
-        valid_categories = ["duplicates", "relationships", "required_fields", "attendance_rules"]
+        valid_categories = ["duplicates", "relationships", "required_fields", "value_checks", "attendance_rules"]
         if category not in valid_categories:
             raise HTTPException(
                 status_code=400,
@@ -2015,3 +2076,317 @@ def delete_rule(
         )
 
 
+# ============================================================================
+# Slack Webhook Admin Endpoints
+# ============================================================================
+
+
+class SlackWebhookRequest(BaseModel):
+    """Request body for setting Slack webhook URL."""
+    webhook_url: str
+
+
+@app.get("/admin/slack-webhook", dependencies=[Depends(verify_firebase_token)])
+def get_slack_webhook_status_endpoint(request: Request, user: dict = Depends(verify_firebase_token)):
+    """Get the current status of Slack webhook configuration.
+    
+    Only shows whether webhook is configured and a masked URL - does not reveal the actual URL.
+    Requires admin access.
+    
+    Returns:
+        - configured: bool - Whether a webhook URL is set
+        - source: str - Where the webhook is configured ('environment' or 'secret_manager')
+        - masked_url: str - Partially masked URL for confirmation
+    """
+    request_id = getattr(request.state, "request_id", "unknown")
+    
+    # Check if user is admin
+    if not user.get("isAdmin", False):
+        logger.warning(
+            "Non-admin user attempted to access Slack webhook status",
+            extra={"user_id": user.get("uid"), "request_id": request_id},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required",
+        )
+    
+    try:
+        from .services.slack_notifier import get_slack_webhook_status
+        status_info = get_slack_webhook_status()
+        logger.info(
+            "Slack webhook status checked",
+            extra={"configured": status_info.get("configured"), "request_id": request_id},
+        )
+        return status_info
+    except Exception as exc:
+        logger.error(
+            "Failed to get Slack webhook status",
+            extra={"error": str(exc), "request_id": request_id},
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Failed to get Slack webhook status", "message": str(exc)},
+        )
+
+
+@app.post("/admin/slack-webhook", dependencies=[Depends(verify_firebase_token)])
+def set_slack_webhook_endpoint(
+    request: Request,
+    webhook_request: SlackWebhookRequest,
+    user: dict = Depends(verify_firebase_token),
+):
+    """Set the Slack webhook URL in Google Secret Manager.
+    
+    Requires admin access.
+    
+    Args:
+        webhook_request: Request body containing webhook_url
+        
+    Returns:
+        - success: bool
+        - message: str
+    """
+    request_id = getattr(request.state, "request_id", "unknown")
+    
+    # Check if user is admin
+    if not user.get("isAdmin", False):
+        logger.warning(
+            "Non-admin user attempted to set Slack webhook",
+            extra={"user_id": user.get("uid"), "request_id": request_id},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required",
+        )
+    
+    webhook_url = webhook_request.webhook_url
+    
+    # Validate webhook URL format
+    if not webhook_url.startswith("https://hooks.slack.com/"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid Slack webhook URL. Must start with 'https://hooks.slack.com/'",
+        )
+    
+    try:
+        from .services.slack_notifier import set_slack_webhook_secret
+        success = set_slack_webhook_secret(webhook_url)
+        
+        if success:
+            logger.info(
+                "Slack webhook URL updated",
+                extra={"user_id": user.get("uid"), "request_id": request_id},
+            )
+            return {"success": True, "message": "Slack webhook URL saved successfully"}
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to save Slack webhook URL to Secret Manager",
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(
+            "Failed to set Slack webhook",
+            extra={"error": str(exc), "request_id": request_id},
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Failed to set Slack webhook", "message": str(exc)},
+        )
+
+
+@app.post("/admin/slack-webhook/test", dependencies=[Depends(verify_firebase_token)])
+def test_slack_webhook_endpoint(
+    request: Request,
+    user: dict = Depends(verify_firebase_token),
+):
+    """Send a test notification to verify Slack webhook is working.
+    
+    Requires admin access.
+    
+    Returns:
+        - success: bool
+        - message: str
+    """
+    request_id = getattr(request.state, "request_id", "unknown")
+    
+    # Check if user is admin
+    if not user.get("isAdmin", False):
+        logger.warning(
+            "Non-admin user attempted to test Slack webhook",
+            extra={"user_id": user.get("uid"), "request_id": request_id},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required",
+        )
+    
+    try:
+        from .services.slack_notifier import get_slack_notifier
+        notifier = get_slack_notifier()
+        
+        # Create a test notification
+        success = notifier.send_notification(
+            run_id="test-notification",
+            status="warning",  # Use warning to ensure it actually sends
+            issue_counts={"test": 1},
+            trigger="test",
+            duration_ms=1000,
+            error_message=None,
+        )
+        
+        if success:
+            logger.info(
+                "Slack test notification sent",
+                extra={"user_id": user.get("uid"), "request_id": request_id},
+            )
+            return {"success": True, "message": "Test notification sent successfully"}
+        else:
+            return {
+                "success": False,
+                "message": "Webhook not configured or notification failed. Check server logs for details.",
+            }
+    except Exception as exc:
+        logger.error(
+            "Failed to send test notification",
+            extra={"error": str(exc), "request_id": request_id},
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Failed to send test notification", "message": str(exc)},
+        )
+
+
+# ===== School Year Management =====
+
+@app.get("/admin/school-years/current", dependencies=[Depends(verify_firebase_token)])
+async def get_current_school_years(
+    request: Request,
+    user: dict = Depends(verify_firebase_token)
+):
+    """Get currently active school years with caching info.
+
+    Returns the active school years (current + 3 future years) from external API.
+    Year transitions are handled externally in the toolkit API.
+    """
+    request_id = str(uuid.uuid4())
+    logger.info(
+        "Fetching current school years",
+        extra={"user_id": user.get("uid"), "request_id": request_id}
+    )
+
+    try:
+        from backend.services.school_year_service import SchoolYearService
+        from .clients.firestore import FirestoreClient
+        from .config.config_loader import load_runtime_config
+
+        # Create Firestore client
+        config = load_runtime_config()
+        firestore_client = FirestoreClient(config.firestore)
+
+        school_year_service = SchoolYearService(firestore_client)
+        active_years = school_year_service.get_active_school_years()
+
+        # Get cached data for display
+        doc = firestore_client.db.collection("system_config").document("active_school_years").get()
+        cache_data = doc.to_dict() if doc.exists else {}
+
+        return {
+            "active_years": active_years,
+            "current_year": cache_data.get("current_year"),
+            "future_years": cache_data.get("future_years", []),
+            "num_future_years": cache_data.get("num_future_years", 0),
+            "cached_at": cache_data.get("cached_at"),
+            "field_mappings": school_year_service._school_year_config.get("field_mappings", {})
+        }
+    except ValueError as e:
+        logger.error(
+            "Configuration error fetching school years",
+            extra={"error": str(e), "request_id": request_id},
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "Configuration error", "message": str(e)},
+        )
+    except Exception as exc:
+        logger.error(
+            "Failed to fetch school years",
+            extra={"error": str(exc), "request_id": request_id},
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Failed to fetch school years", "message": str(exc)},
+        )
+
+
+@app.post("/admin/school-years/refresh", dependencies=[Depends(verify_firebase_token)])
+async def refresh_school_years(
+    request: Request,
+    user: dict = Depends(verify_firebase_token)
+):
+    """Force refresh of active school years from external API.
+
+    Bypasses cache and fetches fresh data from the external school year API.
+    Updates the Firestore cache with the latest values.
+    """
+    request_id = str(uuid.uuid4())
+    logger.info(
+        "Refreshing school years from external API",
+        extra={"user_id": user.get("uid"), "request_id": request_id}
+    )
+
+    try:
+        from backend.services.school_year_service import SchoolYearService
+        from backend.clients.firestore import FirestoreClient
+        from backend.config.config_loader import load_runtime_config
+
+        # Create Firestore client
+        config = load_runtime_config()
+        firestore_client = FirestoreClient(config.firestore)
+
+        school_year_service = SchoolYearService(firestore_client)
+        result = school_year_service.refresh_cache()
+
+        logger.info(
+            "School years refreshed successfully",
+            extra={
+                "user_id": user.get("uid"),
+                "request_id": request_id,
+                "active_years": result["active_years"],
+                "current_year": result["current_year"],
+                "upcoming_year": result["upcoming_year"]
+            }
+        )
+
+        return {
+            "success": True,
+            "message": "School years refreshed successfully",
+            **result
+        }
+    except ValueError as e:
+        logger.error(
+            "Configuration error refreshing school years",
+            extra={"error": str(e), "request_id": request_id},
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "Configuration error", "message": str(e)},
+        )
+    except Exception as exc:
+        logger.error(
+            "Failed to refresh school years",
+            extra={"error": str(exc), "request_id": request_id},
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Failed to refresh school years", "message": str(exc)},
+        )
