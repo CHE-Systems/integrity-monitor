@@ -24,6 +24,21 @@ LIKELY_SEVERITY = "warning"
 POSSIBLE_SEVERITY = "info"
 
 
+def _serialize_for_firestore(obj: Any) -> Any:
+    """Recursively convert non-Firestore-safe types (date, datetime) to strings."""
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    if isinstance(obj, date):
+        return obj.isoformat()
+    if isinstance(obj, dict):
+        return {k: _serialize_for_firestore(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_serialize_for_firestore(item) for item in obj]
+    if isinstance(obj, set):
+        return [_serialize_for_firestore(item) for item in sorted(obj)]
+    return obj
+
+
 @dataclass
 class StudentRecord:
     record_id: str
@@ -89,14 +104,8 @@ def run(
     run_id: Optional[str] = None,
     firestore_writer = None
 ) -> List[IssuePayload]:
-    """Run duplicate detection checks.
-    
-    Args:
-        records: Dictionary mapping entity names to lists of raw records
-        schema_config: Optional SchemaConfig with duplicate rules. If None, uses hardcoded logic.
-        run_id: Optional run ID for logging to browser console
-        firestore_writer: Optional FirestoreWriter for logging to browser console
-    """
+    """Run duplicate detection checks."""
+    print(f"[DUP-CHECK] duplicates.run() called - records keys: {list(records.keys())}, student count: {len(records.get('students', []))}", flush=True)
     issues: List[IssuePayload] = []
     
     def console_log(level: str, message: str):
@@ -204,7 +213,7 @@ def run(
         console_log("warning", "No contractor duplicate rules found in schema config - dup_def is None or missing")
         logger.warning("No contractor duplicate rules found in schema config - dup_def is None or missing")
     
-    student_issues = _process_students(records.get("students", []), student_dup_def)
+    student_issues = _process_students(records.get("students", []), student_dup_def, run_id=run_id, firestore_writer=firestore_writer)
     issues.extend(student_issues)
     # Count issues by rule_id
     for issue in student_issues:
@@ -296,15 +305,25 @@ def _extract_field(fields: Dict[str, Any], *keys: str) -> Any:
 def _parse_dob(value: Any) -> Optional[date]:
     if not value:
         return None
-    if isinstance(value, date):
+    if isinstance(value, date) and not isinstance(value, datetime):
         return value
     if isinstance(value, datetime):
         return value.date()
-    for fmt in ("%Y-%m-%d", "%m/%d/%Y"):
+    str_value = str(value).strip()
+    if not str_value:
+        return None
+    # Try common date formats including ISO with time component
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S"):
         try:
-            return datetime.strptime(str(value), fmt).date()
+            return datetime.strptime(str_value, fmt).date()
         except ValueError:
             continue
+    # Try dateutil as last resort for unusual formats
+    try:
+        from dateutil import parser as dateutil_parser
+        return dateutil_parser.parse(str_value).date()
+    except Exception:
+        pass
     return None
 
 
@@ -381,31 +400,51 @@ def _normalize_students(records: Iterable[dict]) -> Dict[str, StudentRecord]:
         fields = record.get("fields", {})
         if not record_id:
             continue
-        first = _extract_field(fields, "legal_first_name", "first_name")
-        middle = _extract_field(fields, "legal_middle_name", "middle_name")
-        last = _extract_field(fields, "legal_last_name", "last_name", "last")
-        preferred = _extract_field(fields, "preferred_name", "nickname")
-        fallback_name = _extract_field(fields, "name", "full_name")
-        full_name = " ".join(filter(None, [first, middle, last])) or (preferred or fallback_name or "")
+        # Airtable field names + field IDs + short aliases
+        first = _extract_field(
+            fields,
+            "Student's Legal First Name (as stated on their birth certificate)",
+            "fldVGRpEqAyKv0o0g",
+            "legal_first_name", "first_name",
+        )
+        last = _extract_field(
+            fields,
+            "Student's Legal Last Name",
+            "fldYFqpLyiA5FXwpO",
+            "legal_last_name", "last_name", "last",
+        )
+        fallback_name = _extract_field(fields, "Student's Full Name", "fldFgTbOOat95IfWW", "name", "full_name")
+        full_name = " ".join(filter(None, [first, last])) or (fallback_name or "")
         normalized_name = normalize_name(full_name)
         last_name_norm = normalize_name(last or (full_name.split()[-1] if full_name else ""))
-        campus = str(_extract_field(fields, "primary_campus", "campus") or "").strip().lower()
-        grade = str(_extract_field(fields, "grade_level", "grade") or "").strip().lower()
-        parents = set(_ensure_list(_extract_field(fields, "parents", "parent_links", "linked_parents")))
-        truth_id = str(_extract_field(fields, "truth_id") or "").strip()
-        dob = _parse_dob(_extract_field(fields, "date_of_birth", "dob", "birth_date"))
-        email, email_local, email_domain = _normalize_email(_extract_field(fields, "primary_email", "email"))
-        phone = str(_extract_field(fields, "primary_phone", "phone") or "")
+        dob = _parse_dob(_extract_field(
+            fields,
+            "Student's Birthdate",
+            "fldya31Cb8IADmmkp",
+            "date_of_birth", "dob", "birth_date",
+        ))
+        email, email_local, email_domain = _normalize_email(_extract_field(
+            fields,
+            "First Parent Email",
+            "fldaEwA1EIyVO3iiZ",
+            "primary_email", "email",
+        ))
+        phone = str(_extract_field(
+            fields,
+            "Primary Contact Phone Number (Cell phone)",
+            "fldwQc1nQ7WyYeZLY",
+            "primary_phone", "phone",
+        ) or "")
         normalized[record_id] = StudentRecord(
             record_id=record_id,
             name=full_name.strip(),
             normalized_name=normalized_name,
             last_name_norm=last_name_norm,
             last_name_soundex=_soundex(last_name_norm),
-            campus=campus,
-            grade=grade,
-            parents=parents,
-            truth_id=truth_id,
+            campus="",
+            grade="",
+            parents=set(),
+            truth_id="",
             dob=dob,
             email=email,
             email_local=email_local,
@@ -477,17 +516,57 @@ def _normalize_contractors(records: Iterable[dict]) -> Dict[str, ContractorRecor
 # ---------------------------------------------------------------------------
 
 
-def _process_students(raw_records: List[dict], dup_def: Optional[DuplicateDefinition] = None) -> List[IssuePayload]:
+def _process_students(
+    raw_records: List[dict],
+    dup_def: Optional[DuplicateDefinition] = None,
+    run_id: Optional[str] = None,
+    firestore_writer=None,
+) -> List[IssuePayload]:
+    def console_log(level: str, message: str):
+        if level == "info":
+            logger.info(message)
+        elif level == "warning":
+            logger.warning(message)
+        if run_id and firestore_writer:
+            try:
+                firestore_writer.write_log(run_id, level, f"[DUPLICATES] {message}")
+            except Exception:
+                pass
+
     normalized = _normalize_students(raw_records)
+
+    # Diagnostic: print to stdout AND write to Firestore for maximum visibility
+    has_name = sum(1 for r in normalized.values() if r.normalized_name)
+    has_dob = sum(1 for r in normalized.values() if r.dob)
+    has_last = sum(1 for r in normalized.values() if r.last_name_norm)
+    sample_fields = list(raw_records[0].get("fields", {}).keys())[:15] if raw_records else []
+    # Sample a raw DOB value for debugging
+    sample_dob_raw = None
+    if raw_records:
+        for rec in raw_records[:5]:
+            v = rec.get("fields", {}).get("Student's Birthdate")
+            if v is not None:
+                sample_dob_raw = f"{v!r} (type={type(v).__name__})"
+                break
+    diag = f"STUDENT-DIAG: {len(normalized)} students, {has_name} with name, {has_last} with last_name, {has_dob} with DOB | sample_dob_raw: {sample_dob_raw} | fields: {sample_fields}"
+    print(diag, flush=True)
+    logger.warning(diag)
+    console_log("info", f"Student normalization: {len(normalized)} total, {has_name} with name, {has_last} with last name, {has_dob} with DOB")
+    console_log("info", f"Sample raw field names: {sample_fields}")
+
     # Check if dup_def has any rules (not just if it exists)
     has_rules = dup_def and ((dup_def.likely and len(dup_def.likely) > 0) or (dup_def.possible and len(dup_def.possible) > 0))
     if has_rules:
+        rule_count = len(dup_def.likely or []) + len(dup_def.possible or [])
+        console_log("info", f"Using rule-based classifier with {len(dup_def.likely or [])} likely, {len(dup_def.possible or [])} possible rules")
         classifier = lambda a, b: _classify_pair(a, b, "student", dup_def)
     else:
         if dup_def:
-            logger.warning("DuplicateDefinition exists for students but has no rules - falling back to hardcoded logic")
+            console_log("warning", "DuplicateDefinition exists for students but has no rules - falling back to hardcoded logic")
+        console_log("info", "Using hardcoded student classifier (name + DOB)")
         classifier = _classify_student_pair
-    pairs = _detect_pairs(normalized, classifier)
+    pairs = _detect_pairs(normalized, classifier, console_log)
+    console_log("info", f"Student duplicate detection found {len(pairs)} pairs from {len(normalized)} records")
     return _build_group_issues("student", normalized, pairs)
 
 
@@ -599,14 +678,12 @@ def _build_blocks(normalized: Dict[str, Any]) -> Dict[str, List[str]]:
 def _compute_blocks(record: Any) -> List[str]:
     keys = []
     if isinstance(record, StudentRecord):
+        # Block by last name soundex + DOB (primary blocking strategy)
         if record.last_name_soundex and record.dob:
             keys.append(f"s:{record.last_name_soundex}:{record.dob}")
-        if record.email_local and record.campus:
-            keys.append(f"s:{record.email_local}:{record.campus}")
-        if record.normalized_phone:
-            keys.append(f"s:phone:{record.normalized_phone}")
-        if record.truth_id:
-            keys.append(f"s:truth:{record.truth_id}")
+        # Block by last name soundex alone to catch DOB typos
+        if record.last_name_soundex:
+            keys.append(f"s:lastname:{record.last_name_soundex}")
     elif isinstance(record, ParentRecord):
         if record.normalized_email:
             keys.append(f"p:email:{record.normalized_email}")
@@ -735,95 +812,40 @@ def _classify_pair(
 
 
 def _classify_student_pair(a: StudentRecord, b: StudentRecord) -> Optional[PairMatch]:
+    """Fallback hardcoded classifier: name similarity + DOB match only."""
     evidence: Dict[str, Any] = {}
-    if a.truth_id and a.truth_id == b.truth_id:
-        evidence["truth_id"] = True
-        return PairMatch(
-            entity="student",
-            primary_id=a.record_id,
-            secondary_id=b.record_id,
-            rule_id="dup.student.truth_id",
-            match_type="likely",
-            severity=LIKELY_SEVERITY,
-            confidence=0.95,
-            evidence=evidence,
-        )
 
-    email_match = bool(a.email and a.email == b.email)
-    evidence["email_match"] = email_match
-    phone_match = bool(a.normalized_phone and a.normalized_phone == b.normalized_phone)
-    evidence["phone_match"] = phone_match
     name_similarity = jaro_winkler(a.normalized_name, b.normalized_name)
     evidence["name_similarity"] = round(name_similarity, 3)
-
     dob_match = bool(a.dob and b.dob and abs((a.dob - b.dob).days) <= 1)
     evidence["dob_match"] = dob_match
-    parent_overlap = jaccard_ratio(a.parents, b.parents)
-    evidence["parent_overlap"] = round(parent_overlap, 3)
-    campus_match = bool(a.campus and a.campus == b.campus)
-    evidence["campus_match"] = campus_match
 
-    email_local_match = bool(
-        a.email_local and a.email_local == b.email_local and a.email_domain != b.email_domain
-    )
-    evidence["email_local_alias"] = email_local_match
-
-    score = 0.0
-    if email_match:
-        score += 0.6
-    if phone_match:
-        score += 0.3
-    score += min(name_similarity, 1.0) * 0.2
-    if dob_match:
-        score += 0.1
-    if parent_overlap >= 0.5:
-        score += 0.1
-    if campus_match and parent_overlap >= 0.3:
-        score += 0.05
-    if email_local_match:
-        score += 0.1
-    score = min(score, 1.0)
-
-    if score >= LIKELY_THRESHOLD:
-        rule_id = (
-            "dup.student.email_dob"
-            if email_match and dob_match
-            else "dup.student.phone_name"
-            if phone_match
-            else "dup.student.parents_campus"
-        )
+    # Likely: high name similarity + matching DOB
+    if name_similarity >= 0.8 and dob_match:
         return PairMatch(
             entity="student",
             primary_id=a.record_id,
             secondary_id=b.record_id,
-            rule_id=rule_id,
+            rule_id="dup.student.name_dob",
             match_type="likely",
             severity=LIKELY_SEVERITY,
-            confidence=round(score, 3),
+            confidence=round(max(name_similarity, 0.9), 3),
             evidence=evidence,
         )
-    if score >= POSSIBLE_THRESHOLD:
+
+    # Possible: very high name similarity without DOB
+    if name_similarity >= 0.92:
         return PairMatch(
             entity="student",
             primary_id=a.record_id,
             secondary_id=b.record_id,
-            rule_id="dup.student.name_campus",
+            rule_id="dup.student.name_only",
             match_type="possible",
             severity=POSSIBLE_SEVERITY,
-            confidence=round(score, 3),
+            confidence=round(name_similarity * 0.7, 3),
             evidence=evidence,
         )
-    if parent_overlap >= 0.4 and campus_match and name_similarity >= 0.88:
-        return PairMatch(
-            entity="student",
-            primary_id=a.record_id,
-            secondary_id=b.record_id,
-            rule_id="dup.student.parent_overlap",
-            match_type="possible",
-            severity=POSSIBLE_SEVERITY,
-            confidence=0.62,
-            evidence=evidence,
-        )
+
     return None
 
 
@@ -993,13 +1015,13 @@ def _build_group_issues(
         related.remove(primary_id)
         group_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{entity}:{'|'.join(member_ids)}"))
         description = f"{entity.title()} duplicate group with {len(members)} records (primary {primary_id})."
-        metadata = {
+        metadata = _serialize_for_firestore({
             "group_id": group_id,
             "members": member_ids,
             "match_types": [m.match_type for m in group_matches],
             "confidences": [m.confidence for m in group_matches],
             "evidence_samples": group_matches[0].evidence if group_matches else {},
-        }
+        })
         issues.append(
             IssuePayload(
                 rule_id=top_match.rule_id,
@@ -1021,12 +1043,10 @@ def _select_primary(entity: str, members: Set[str], normalized: Dict[str, Any]) 
             return sum(
                 bool(value)
                 for value in [
-                    record.truth_id,
+                    record.name,
+                    record.dob,
                     record.email,
                     record.phone,
-                    record.parents,
-                    record.campus,
-                    record.grade,
                 ]
             )
         if isinstance(record, ParentRecord):

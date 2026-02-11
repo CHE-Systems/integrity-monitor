@@ -206,14 +206,11 @@ class FirestoreWriter:
             # Parse regular issue keys like "missing_field:info" or "missing_link"
             if ":" in key:
                 parts = key.split(":", 1)
-                issue_type, severity = parts
+                _, severity = parts
                 
-                # Aggregate by severity
+                # Aggregate by severity only to avoid double-counting by_type.
                 if severity in valid_severities:
                     by_severity[severity] += count
-                
-                # Aggregate by type
-                by_type[issue_type] = by_type.get(issue_type, 0) + count
             else:
                 # Keys without severity (like "missing_field" or "attendance")
                 # These are type-level aggregates

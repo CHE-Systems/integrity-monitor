@@ -3,17 +3,8 @@
 
 set -e
 
-PROJECT_ID=${GCP_PROJECT_ID:-$(gcloud config get-value project 2>/dev/null || echo "")}
-if [ -z "$PROJECT_ID" ]; then
-    if [ -f "../.firebaserc" ]; then
-        PROJECT_ID=$(grep -o '"default":\s*"[^"]*"' "../.firebaserc" | cut -d'"' -f4)
-    fi
-fi
-
-if [ -z "$PROJECT_ID" ]; then
-    echo "Error: PROJECT_ID not found"
-    exit 1
-fi
+# Hardcoded to prevent accidental checks against wrong project
+PROJECT_ID="data-integrity-monitor"
 
 REGION=${CLOUD_RUN_REGION:-us-central1}
 SERVICE_NAME="integrity-runner"
@@ -45,10 +36,11 @@ gcloud run services describe "${SERVICE_NAME}" \
 
 echo ""
 echo "Expected configuration:"
-echo "  Memory: 4Gi"
+echo "  Memory: 2Gi"
 echo "  CPU: 2"
-echo "  Concurrency: 80"
+echo "  Concurrency: 5"
 echo "  Timeout: 1800s (30m)"
+echo "  Min instances: 1"
 echo "  AIRTABLE_MIN_REQUEST_INTERVAL: 0.05"
 echo ""
 echo "If these don't match, run: cd deploy && ./redeploy-backend.sh"

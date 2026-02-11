@@ -497,19 +497,20 @@ EOF
         "--region" "$REGION"
         "--platform" "managed"
         "--allow-unauthenticated"
-        "--memory" "4Gi"
+        "--memory" "2Gi"
         "--cpu" "2"
+        "--no-cpu-throttling"
         "--timeout" "30m"
-        "--min-instances" "0"
+        "--min-instances" "1"
         "--max-instances" "10"
-        "--concurrency" "80"
+        "--concurrency" "5"
         "--env-vars-file" "$ENV_VARS_FILE"
         "--set-secrets" "AIRTABLE_PAT=AIRTABLE_PAT:latest"
         "--set-secrets" "API_AUTH_TOKEN=API_AUTH_TOKEN:latest"
         "--set-secrets" "OPENAI_API_KEY=OPENAI_API_KEY:latest"
         "--project" "$PROJECT_ID"
     )
-    
+
     # Add SLACK_WEBHOOK_URL only if it exists
     if [ "$SLACK_WEBHOOK_EXISTS" = true ]; then
         DEPLOY_CMD+=("--set-secrets" "SLACK_WEBHOOK_URL=SLACK_WEBHOOK_URL:latest")
@@ -536,19 +537,20 @@ EOF
             "--region" "$REGION"
             "--platform" "managed"
             "--allow-unauthenticated"
-            "--memory" "4Gi"
+            "--memory" "2Gi"
             "--cpu" "2"
+            "--no-cpu-throttling"
             "--timeout" "30m"
-            "--min-instances" "0"
+            "--min-instances" "1"
             "--max-instances" "10"
-            "--concurrency" "80"
+            "--concurrency" "5"
             "--env-vars-file" "$ENV_VARS_FILE"
             "--set-secrets" "AIRTABLE_PAT=AIRTABLE_PAT:latest"
             "--set-secrets" "API_AUTH_TOKEN=API_AUTH_TOKEN:latest"
             "--set-secrets" "OPENAI_API_KEY=OPENAI_API_KEY:latest"
             "--project" "$PROJECT_ID"
         )
-        
+
         # Add SLACK_WEBHOOK_URL only if it exists
         if [ "$SLACK_WEBHOOK_EXISTS" = true ]; then
             DEPLOY_CMD+=("--set-secrets" "SLACK_WEBHOOK_URL=SLACK_WEBHOOK_URL:latest")
@@ -615,7 +617,8 @@ if [ "$DEPLOY_FRONTEND" = true ]; then
         print_error "frontend/build-with-secrets.sh not found"
         exit 1
     fi
-    ./build-with-secrets.sh
+    # Pass the correct project ID and region to the build script
+    GCP_PROJECT_ID="$PROJECT_ID" CLOUD_RUN_REGION="$REGION" ./build-with-secrets.sh
     BUILD_EXIT=$?
     cd ..
     

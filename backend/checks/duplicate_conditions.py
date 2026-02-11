@@ -10,17 +10,24 @@ from ..utils.similarity import jaccard_ratio, jaro_winkler
 
 # Field mapping from config field names to normalized record attributes
 STUDENT_FIELD_MAP = {
-    "primary_email": "email",
-    "date_of_birth": "dob",
-    "primary_phone": "normalized_phone",
+    # Short aliases used in Firestore rule conditions
+    "legal_first_name": "normalized_name",
     "legal_last_name": "last_name_norm",
-    "legal_first_name": "normalized_name",  # For composite name fields
-    "legal_middle_name": None,  # Handled in composite
-    "campus": "campus",
-    "grade": "grade",
-    "parents": "parents",
-    "linked_students": "parents",  # Alias
-    "truth_id": "truth_id",
+    "date_of_birth": "dob",
+    "primary_email": "email",
+    "primary_phone": "normalized_phone",
+    # Full Airtable field names
+    "Student's Legal First Name (as stated on their birth certificate)": "normalized_name",
+    "Student's Legal Last Name": "last_name_norm",
+    "Student's Birthdate": "dob",
+    "First Parent Email": "email",
+    "Primary Contact Phone Number (Cell phone)": "normalized_phone",
+    # Airtable field IDs
+    "fldVGRpEqAyKv0o0g": "normalized_name",  # First Name
+    "fldYFqpLyiA5FXwpO": "last_name_norm",   # Last Name
+    "fldya31Cb8IADmmkp": "dob",               # Birthdate
+    "fldaEwA1EIyVO3iiZ": "email",             # First Parent Email
+    "fldwQc1nQ7WyYeZLY": "normalized_phone",  # Primary Contact Phone
 }
 
 PARENT_FIELD_MAP = {
@@ -93,8 +100,10 @@ def get_composite_field_value(record: Any, field_names: list[str], entity: str) 
     """
     # Special handling for student name fields - use normalized_name if both first and last are requested
     if entity == "student" and len(field_names) == 2:
-        if "legal_first_name" in field_names and "legal_last_name" in field_names:
-            # Use the full normalized name which contains both first and last
+        first_name_keys = {"legal_first_name", "fldVGRpEqAyKv0o0g",
+                           "Student's Legal First Name (as stated on their birth certificate)"}
+        last_name_keys = {"legal_last_name", "fldYFqpLyiA5FXwpO", "Student's Legal Last Name"}
+        if (set(field_names) & first_name_keys) and (set(field_names) & last_name_keys):
             return getattr(record, "normalized_name", "") or ""
     
     values = []
