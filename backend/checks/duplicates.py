@@ -462,12 +462,37 @@ def _normalize_parents(records: Iterable[dict]) -> Dict[str, ParentRecord]:
         fields = record.get("fields", {})
         if not record_id:
             continue
-        full_name = str(_extract_field(fields, "full_name", "name") or "").strip()
+        full_name = str(_extract_field(
+            fields,
+            "Full Name",              # Airtable field name
+            "fldaSvOZOctraCWuB",      # Airtable field ID
+            "full_name", "name",
+        ) or "").strip()
         normalized_name = normalize_name(full_name)
-        email, _, _ = _normalize_email(_extract_field(fields, "contact_email", "email", "primary_email"))
-        phone = str(_extract_field(fields, "contact_phone", "phone", "primary_phone") or "")
-        students = set(_ensure_list(_extract_field(fields, "students", "linked_students")))
-        address = str(_extract_field(fields, "mailing_zip", "zip_code", "postal_code") or "")
+        email, _, _ = _normalize_email(_extract_field(
+            fields,
+            "Email",                  # Airtable field name
+            "fld04xn6QzH3sBqGC",     # Airtable field ID
+            "contact_email", "email", "primary_email",
+        ))
+        phone = str(_extract_field(
+            fields,
+            "Phone - Parent/Guardian 1",  # Airtable field name
+            "fldG54G4X7JE0br0o",          # Airtable field ID
+            "contact_phone", "phone", "primary_phone",
+        ) or "")
+        students = set(_ensure_list(_extract_field(
+            fields,
+            "Student",                # Airtable field name (linked records)
+            "fldvkauZW6jkGpAUO",      # Airtable field ID
+            "students", "linked_students",
+        )))
+        address = str(_extract_field(
+            fields,
+            "Zip code - Parent/Guardian 1",  # Airtable field name
+            "fldsySXO32UtI5ooJ",             # Airtable field ID
+            "mailing_zip", "zip_code", "postal_code",
+        ) or "")
         normalized[record_id] = ParentRecord(
             record_id=record_id,
             name=full_name,
@@ -490,10 +515,25 @@ def _normalize_contractors(records: Iterable[dict]) -> Dict[str, ContractorRecor
         fields = record.get("fields", {})
         if not record_id:
             continue
-        legal_name = str(_extract_field(fields, "legal_name") or "").strip()
+        legal_name = str(_extract_field(
+            fields,
+            "Name",                   # Airtable field name (formula: Last, First)
+            "fldrrJCID03zcwOlc",      # Airtable field ID
+            "legal_name", "name",
+        ) or "").strip()
         normalized_name = normalize_name(legal_name)
-        email, _, _ = _normalize_email(_extract_field(fields, "email"))
-        phone = str(_extract_field(fields, "phone") or "")
+        email, _, _ = _normalize_email(_extract_field(
+            fields,
+            "Email",                  # Airtable field name
+            "flddCJDACjAsP1ltS",      # Airtable field ID
+            "email",
+        ))
+        phone = str(_extract_field(
+            fields,
+            "Cell phone",             # Airtable field name
+            "fldWBnA5Xf6eQATOi",     # Airtable field ID
+            "phone",
+        ) or "")
         # Removed: campuses and ein are no longer used for duplicate detection
         # Set to empty defaults to prevent downstream logic from using them
         normalized[record_id] = ContractorRecord(

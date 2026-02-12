@@ -31,6 +31,7 @@ STUDENT_FIELD_MAP = {
 }
 
 PARENT_FIELD_MAP = {
+    # Short aliases
     "contact_email": "email",
     "email": "email",
     "primary_email": "email",
@@ -44,20 +45,34 @@ PARENT_FIELD_MAP = {
     "mailing_zip": "address_zip",
     "zip_code": "address_zip",
     "postal_code": "address_zip",
+    # Full Airtable field names
+    "Full Name": "normalized_name",
+    "Email": "email",
+    "Phone - Parent/Guardian 1": "normalized_phone",
+    "Student": "students",
+    "Zip code - Parent/Guardian 1": "address_zip",
+    # Airtable field IDs
+    "fldaSvOZOctraCWuB": "normalized_name",    # Full Name
+    "fld04xn6QzH3sBqGC": "email",              # Email
+    "fldG54G4X7JE0br0o": "normalized_phone",   # Phone - Parent/Guardian 1
+    "fldvkauZW6jkGpAUO": "students",           # Student (linked records)
+    "fldsySXO32UtI5ooJ": "address_zip",        # Zip code - Parent/Guardian 1
 }
 
 CONTRACTOR_FIELD_MAP = {
+    # Short aliases
     "email": "email",
     "phone": "normalized_phone",
     "legal_name": "normalized_name",
     "name": "normalized_name",
-    # Removed: campuses, campus_assignments, ein, vendor_id - no longer used for duplicate detection
-    # Airtable field ID mappings for Contractors/Volunteers table
-    "flddCJDACjAsP1ltS": "email",  # Email
+    # Full Airtable field names
+    "Name": "normalized_name",
+    "Email": "email",
+    "Cell phone": "normalized_phone",
+    # Airtable field IDs
+    "fldrrJCID03zcwOlc": "normalized_name",   # Name (formula: Last, First)
+    "flddCJDACjAsP1ltS": "email",             # Email
     "fldWBnA5Xf6eQATOi": "normalized_phone",  # Cell phone
-    "fldvkUuMlXw8vBvNQ": "normalized_name",  # Contractor/Vol (role type)
-    "fldUXiLJmTxJ9aeRp": "normalized_name",  # Certification
-    "fldi9MWrddOg3PUZ7": "normalized_name",  # Approval
 }
 
 
