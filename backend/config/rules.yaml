@@ -29,6 +29,12 @@ airtable:
   classes:
     base_env: "AT_CLASSES_BASE"
     table_env: "AT_CLASSES_TABLE"
+  transfers:
+    base_env: "AT_TRANSFERS_BASE"
+    table_env: "AT_TRANSFERS_TABLE"
+  invoices:
+    base_env: "AT_INVOICES_BASE"
+    table_env: "AT_INVOICES_TABLE"
 
 firestore:
   runs_collection: "integrity_runs"
