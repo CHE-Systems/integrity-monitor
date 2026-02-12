@@ -17,6 +17,8 @@ ENTITY_KEYS = [
     "absent",
     "student_truth",
     "classes",
+    "transfers",
+    "invoices",
 ]
 
 

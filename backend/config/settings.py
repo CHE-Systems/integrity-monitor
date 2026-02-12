@@ -21,7 +21,7 @@ class AirtableConfig(RootModel[Dict[str, AirtableTableConfig]]):
 
 
 class AlertThresholds(BaseModel):
-    max_run_minutes: int = 15
+    max_run_minutes: int = 30
     duplicate_warning_count: int = 500
 
 

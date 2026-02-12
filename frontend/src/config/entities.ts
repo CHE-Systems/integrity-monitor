@@ -18,6 +18,8 @@ export const ACTIVE_ENTITIES = [
   "students",
   "student_truth",
   "classes",
+  "transfers",
+  "invoices",
 ] as const;
 
 /**
@@ -31,6 +33,8 @@ export const ENTITY_TABLE_MAPPING: Record<string, string> = {
   absent: "Absent",
   student_truth: "Student Truth",
   classes: "Classes",
+  transfers: "Transfers",
+  invoices: "Contractor/Vendor Invoices",
 };
 
 /**

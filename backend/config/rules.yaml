@@ -7,7 +7,7 @@ run_config:
   nightly_cron: "0 2 * * *"
   weekly_cron: "0 3 * * 0"
   alert_thresholds:
-    max_run_minutes: 15
+    max_run_minutes: 30
     duplicate_warning_count: 500
 
 airtable:
@@ -29,6 +29,12 @@ airtable:
   classes:
     base_env: "AT_CLASSES_BASE"
     table_env: "AT_CLASSES_TABLE"
+  transfers:
+    base_env: "AT_TRANSFERS_BASE"
+    table_env: "AT_TRANSFERS_TABLE"
+  invoices:
+    base_env: "AT_INVOICES_BASE"
+    table_env: "AT_INVOICES_TABLE"
 
 firestore:
   runs_collection: "integrity_runs"

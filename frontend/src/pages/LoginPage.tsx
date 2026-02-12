@@ -7,6 +7,7 @@ export function LoginPage() {
     signIn,
     signInWithGoogle,
     signInWithDevToken,
+    signOut,
     error: authError,
     loading,
     user,
@@ -29,6 +30,13 @@ export function LoginPage() {
   const handleEmailSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    
+    // Validate @che.school email
+    if (!email.endsWith("@che.school")) {
+      setError("This application is only available to users with @che.school email addresses.");
+      return;
+    }
+    
     try {
       await signIn(email, password);
       // Navigation will happen via useEffect when user state updates
@@ -41,6 +49,7 @@ export function LoginPage() {
     setError(null);
     try {
       await signInWithGoogle();
+      // Email validation will happen in AuthGuard after user state updates
       // Navigation will happen via useEffect when user state updates
     } catch (err) {
       setError(err instanceof Error ? err.message : "Google sign in failed");

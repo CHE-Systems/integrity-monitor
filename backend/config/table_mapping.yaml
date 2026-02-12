@@ -9,3 +9,5 @@ entity_table_mapping:
   absent: "Absent"
   student_truth: "Student Truth"
   classes: "Classes"
+  transfers: "Transfers"
+  invoices: "Contractor/Vendor Invoices"

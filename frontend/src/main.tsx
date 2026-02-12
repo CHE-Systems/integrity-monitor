@@ -27,7 +27,7 @@ createRoot(document.getElementById("root")!).render(
           <Route
             path="/"
             element={
-              <AuthGuard>
+              <AuthGuard requireAdmin={false}>
                 <App>
                   <LeadershipDashboardPage />
                 </App>
@@ -37,7 +37,7 @@ createRoot(document.getElementById("root")!).render(
           <Route
             path="/admin"
             element={
-              <AuthGuard>
+              <AuthGuard requireAdmin={true}>
                 <App>
                   <AdminDashboardPage />
                 </App>
@@ -47,7 +47,7 @@ createRoot(document.getElementById("root")!).render(
           <Route
             path="/runs"
             element={
-              <AuthGuard>
+              <AuthGuard requireAdmin={true}>
                 <App>
                   <RunsPage />
                 </App>
@@ -57,7 +57,7 @@ createRoot(document.getElementById("root")!).render(
           <Route
             path="/schema"
             element={
-              <AuthGuard>
+              <AuthGuard requireAdmin={true}>
                 <App>
                   <SchemaPage />
                 </App>
@@ -67,7 +67,7 @@ createRoot(document.getElementById("root")!).render(
           <Route
             path="/run/:runId"
             element={
-              <AuthGuard>
+              <AuthGuard requireAdmin={true}>
                 <App>
                   <RunStatusPage />
                 </App>
@@ -89,7 +89,7 @@ createRoot(document.getElementById("root")!).render(
           <Route
             path="/issues"
             element={
-              <AuthGuard>
+              <AuthGuard requireAdmin={true}>
                 <App>
                   <IssuesPage />
                 </App>
@@ -99,7 +99,7 @@ createRoot(document.getElementById("root")!).render(
           <Route
             path="/issue/:issueId"
             element={
-              <AuthGuard>
+              <AuthGuard requireAdmin={true}>
                 <App>
                   <IssueDetailPage />
                 </App>
@@ -109,7 +109,7 @@ createRoot(document.getElementById("root")!).render(
           <Route
             path="/scheduling"
             element={
-              <AuthGuard>
+              <AuthGuard requireAdmin={true}>
                 <App>
                   <SchedulingPage />
                 </App>
@@ -119,7 +119,7 @@ createRoot(document.getElementById("root")!).render(
           <Route
             path="/rules"
             element={
-              <AuthGuard>
+              <AuthGuard requireAdmin={true}>
                 <App>
                   <RulesPage />
                 </App>
@@ -129,7 +129,7 @@ createRoot(document.getElementById("root")!).render(
           <Route
             path="/rules/:category/:entity?/:ruleId"
             element={
-              <AuthGuard>
+              <AuthGuard requireAdmin={true}>
                 <App>
                   <RuleDetailPage />
                 </App>

@@ -51,7 +51,7 @@ def mock_runtime_config():
             "nightly_cron": "0 2 * * *",
             "weekly_cron": "0 3 * * 0",
             "alert_thresholds": {
-                "max_run_minutes": 15,
+                "max_run_minutes": 30,
                 "duplicate_warning_count": 500
             }
         },

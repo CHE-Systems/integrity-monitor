@@ -21,5 +21,6 @@
         "editorGroup.border": "#bf368d",
         "panel.border": "#bf368d"
     },
-    "peacock.color": "#972b70"
+    "peacock.color": "#972b70",
+    "snyk.advanced.autoSelectOrganization": true
 }
