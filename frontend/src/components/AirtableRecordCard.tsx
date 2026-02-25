@@ -10,23 +10,26 @@ interface AirtableRecordCardProps {
   entity: string;
   label?: string;
   isHighlighted?: boolean;
+  linkedRecordNames?: Record<string, string>;
 }
 
 /**
  * Card component displaying Airtable record data.
  * Shows key fields like name, email, phone, and creation date.
+ * Linked record fields (e.g. parent link) are resolved to display names.
  */
 export function AirtableRecordCard({
   record,
   entity,
   label,
   isHighlighted = false,
+  linkedRecordNames,
 }: AirtableRecordCardProps) {
   const { schema } = useAirtableSchema();
 
   const displayFields = useMemo(() => {
-    return extractDisplayFields(record.fields);
-  }, [record.fields]);
+    return extractDisplayFields(record.fields, linkedRecordNames);
+  }, [record.fields, linkedRecordNames]);
 
   const airtableLink = useMemo(() => {
     return getAirtableLinksWithFallback(entity, record.id, schema);
@@ -143,6 +146,7 @@ interface AirtableRecordCardsProps {
   entity: string;
   recordIds: string[];
   currentRecordId?: string;
+  linkedRecordNames?: Record<string, string>;
   loading?: boolean;
   error?: string | null;
 }
@@ -156,6 +160,7 @@ export function AirtableRecordCards({
   entity,
   recordIds,
   currentRecordId,
+  linkedRecordNames,
   loading = false,
   error = null,
 }: AirtableRecordCardsProps) {
@@ -258,6 +263,7 @@ export function AirtableRecordCards({
               entity={entity}
               label={label}
               isHighlighted={isCurrentRecord}
+              linkedRecordNames={linkedRecordNames}
             />
           );
         })}

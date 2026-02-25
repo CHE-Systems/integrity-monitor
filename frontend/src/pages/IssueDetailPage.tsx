@@ -151,9 +151,10 @@ export function IssueDetailPage() {
     return [issue.record_id];
   }, [issue]);
 
-  // Fetch Airtable record data
+  // Fetch Airtable record data (also resolves linked record names)
   const {
     records: airtableRecords,
+    linkedRecordNames,
     loading: recordsLoading,
     error: recordsError,
   } = useAirtableRecords(issue?.entity, recordIdsToFetch);
@@ -800,6 +801,7 @@ export function IssueDetailPage() {
           entity={issue.entity}
           recordIds={recordIdsToFetch}
           currentRecordId={issue.record_id}
+          linkedRecordNames={linkedRecordNames}
           loading={recordsLoading}
           error={recordsError}
         />
