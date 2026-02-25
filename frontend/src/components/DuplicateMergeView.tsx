@@ -136,7 +136,7 @@ export function DuplicateMergeView({
   const [showMatchingFields, setShowMatchingFields] = useState(false);
   const [confirmState, setConfirmState] = useState<"merge" | null>(null);
   const [mergeSuccess, setMergeSuccess] = useState(false);
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<number>>(new Set());
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<number>>(new Set([2]));
 
   const primaryRecord = records[primaryRecordId];
   const activeSecondaryId = secondaryRecordIds[activeSecondaryIdx];
