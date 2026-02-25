@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import time
@@ -152,6 +153,64 @@ def verify_bearer_token(authorization: Optional[str] = Header(None)) -> str:
         raise AuthenticationError("Invalid bearer token")
 
     return token
+
+
+def verify_api_key_or_bearer_token(authorization: Optional[str] = Header(None)) -> str:
+    """Verify bearer token: accepts static API_AUTH_TOKEN or per-user API keys.
+
+    Checks static API_AUTH_TOKEN first (fast path), then falls back to
+    looking up a per-user API key hash in Firestore.
+
+    Returns:
+        The validated token
+
+    Raises:
+        AuthenticationError: If token is missing or invalid
+    """
+    if not authorization:
+        raise AuthenticationError("Missing Authorization header")
+
+    if not authorization.startswith("Bearer "):
+        raise AuthenticationError("Invalid Authorization header format. Expected 'Bearer <token>'")
+
+    token = authorization[7:]
+    if not token:
+        raise AuthenticationError("Missing bearer token")
+
+    # Fast path: check static API_AUTH_TOKEN
+    expected_token = os.getenv("API_AUTH_TOKEN")
+    if expected_token and token == expected_token:
+        return token
+
+    # Slow path: check per-user API key in Firestore
+    try:
+        from google.cloud import firestore as firestore_lib
+
+        key_hash = hashlib.sha256(token.encode()).hexdigest()
+        db = firestore_lib.Client()
+        query = db.collection_group("api_keys").where("key_hash", "==", key_hash).limit(1)
+        docs = list(query.stream())
+
+        if docs:
+            # Update last_used_at (best-effort)
+            try:
+                docs[0].reference.update({"last_used_at": firestore_lib.SERVER_TIMESTAMP})
+            except Exception:
+                pass
+            return token
+    except Exception as exc:
+        logger.warning(f"API key lookup failed: {exc}")
+
+    # Final fallback: try Firebase ID token (for frontend access)
+    admin_auth = _get_firebase_admin()
+    if admin_auth:
+        try:
+            admin_auth.verify_id_token(token)
+            return token
+        except Exception:
+            pass
+
+    raise AuthenticationError("Invalid bearer token")
 
 
 def verify_cloud_scheduler_auth(

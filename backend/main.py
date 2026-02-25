@@ -20,7 +20,7 @@ backend_dir = Path(__file__).parent
 load_dotenv(backend_dir / ".env")
 
 from .config.schema_loader import load_schema_config
-from .middleware.auth import verify_bearer_token, verify_cloud_scheduler_auth, verify_firebase_token
+from .middleware.auth import verify_api_key_or_bearer_token, verify_bearer_token, verify_cloud_scheduler_auth, verify_firebase_token
 from .services.integrity_runner import IntegrityRunner
 
 from .services.airtable_schema_service import schema_service
@@ -29,6 +29,7 @@ from .services.table_id_discovery import discover_table_ids, validate_discovered
 from .services.config_updater import update_config
 from .services.rules_service import RulesService
 from .services.ai_rule_parser import AIRuleParser
+from .services.issue_chat_service import IssueChatService
 from .utils.errors import IntegrityRunError
 
 logger = logging.getLogger(__name__)
@@ -50,7 +51,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
     allow_credentials=use_credentials,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
 
@@ -314,7 +315,7 @@ def get_dev_token(email: str = "jedwards@che.school"):
         )
 
 
-@app.get("/schema", dependencies=[Depends(verify_bearer_token)])
+@app.get("/schema", dependencies=[Depends(verify_api_key_or_bearer_token)])
 def schema():
     """Expose the current schema configuration (requires authentication)."""
     if schema_config is None:
@@ -716,6 +717,109 @@ def delete_integrity_run(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error": "Failed to delete run", "message": str(exc), "run_id": run_id},
+        )
+
+
+@app.get("/integrity/run/{run_id}/record-ids", dependencies=[Depends(verify_api_key_or_bearer_token)])
+def get_run_record_ids(run_id: str, request: Request):
+    """Return Airtable record IDs from a specific run, grouped by entity with issue context.
+
+    Queries all issues for the given run_id and aggregates them by entity and record_id.
+    Each record includes all its associated issues with type, severity, and rule info.
+
+    Returns:
+        - 200: Record IDs grouped by entity with issue context
+        - 404: No issues found for run_id
+    """
+    request_id = getattr(request.state, "request_id", "unknown")
+    logger.info(
+        "Record IDs requested for run",
+        extra={"run_id": run_id, "request_id": request_id},
+    )
+
+    try:
+        from collections import defaultdict
+        from .clients.firestore import FirestoreClient
+        from .config.config_loader import load_runtime_config
+
+        config = load_runtime_config()
+        firestore_client = FirestoreClient(config.firestore)
+        client = firestore_client._get_client()
+        issues_ref = client.collection(config.firestore.issues_collection)
+
+        query = issues_ref.where("run_id", "==", run_id)
+
+        grouped = defaultdict(lambda: defaultdict(list))
+        issue_count = 0
+
+        for doc in query.stream():
+            data = doc.to_dict()
+            entity = data.get("entity", "unknown")
+            record_id = data.get("record_id")
+            if not record_id:
+                continue
+
+            issue_info = {
+                "issue_type": data.get("issue_type"),
+                "severity": data.get("severity"),
+                "rule_id": data.get("rule_id"),
+            }
+            if data.get("description"):
+                issue_info["description"] = data["description"]
+            if data.get("related_records"):
+                issue_info["related_records"] = data["related_records"]
+
+            grouped[entity][record_id].append(issue_info)
+            issue_count += 1
+
+        if issue_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error": "No issues found for run", "run_id": run_id},
+            )
+
+        entities_response = {}
+        total_records = 0
+
+        for entity, records in sorted(grouped.items()):
+            records_list = [
+                {"record_id": rid, "issues": issues}
+                for rid, issues in sorted(records.items())
+            ]
+            entities_response[entity] = {
+                "records": records_list,
+                "count": len(records_list),
+            }
+            total_records += len(records_list)
+
+        logger.info(
+            "Record IDs retrieved for run",
+            extra={
+                "run_id": run_id,
+                "total_records": total_records,
+                "total_issues": issue_count,
+                "entities": list(entities_response.keys()),
+                "request_id": request_id,
+            },
+        )
+
+        return {
+            "run_id": run_id,
+            "entities": entities_response,
+            "total_records": total_records,
+            "total_issues": issue_count,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(
+            "Failed to get record IDs for run",
+            extra={"run_id": run_id, "error": str(exc), "request_id": request_id},
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Failed to get record IDs", "message": str(exc), "run_id": run_id},
         )
 
 
@@ -1286,6 +1390,88 @@ def delete_integrity_issue(issue_id: str, request: Request):
         )
 
 
+class ResolveIssuesRequest(BaseModel):
+    record_ids: List[str]
+    entity: str
+    rule_ids: Optional[List[str]] = None
+
+
+@app.post("/integrity/issues/resolve", dependencies=[Depends(verify_firebase_token)])
+def resolve_issues_for_records(
+    body: ResolveIssuesRequest,
+    request: Request,
+    user: dict = Depends(verify_firebase_token),
+):
+    """Delete all issues associated with given record IDs and entity.
+
+    Used after remediation (edit, merge, delete) to mark issues as resolved.
+    Optionally filter by specific rule_ids.
+
+    Returns:
+        - 200: { resolved_count, errors }
+    """
+    request_id = getattr(request.state, "request_id", "unknown")
+    uid = user.get("uid", "unknown")
+    logger.info(
+        "Resolve issues requested",
+        extra={
+            "record_ids": body.record_ids,
+            "entity": body.entity,
+            "rule_ids": body.rule_ids,
+            "user_uid": uid,
+            "request_id": request_id,
+        },
+    )
+
+    try:
+        from .clients.firestore import FirestoreClient
+        from .config.config_loader import load_runtime_config
+
+        config = load_runtime_config()
+        firestore_client = FirestoreClient(config.firestore)
+        client = firestore_client._get_client()
+        issues_ref = client.collection(config.firestore.issues_collection)
+
+        resolved_count = 0
+        errors = []
+
+        for record_id in body.record_ids:
+            try:
+                query = issues_ref.where("record_id", "==", record_id).where(
+                    "entity", "==", body.entity
+                )
+                if body.rule_ids:
+                    query = query.where("rule_id", "in", body.rule_ids)
+
+                for doc in query.stream():
+                    doc.reference.delete()
+                    resolved_count += 1
+            except Exception as exc:
+                errors.append({"record_id": record_id, "error": str(exc)})
+
+        logger.info(
+            "Issues resolved",
+            extra={
+                "resolved_count": resolved_count,
+                "errors_count": len(errors),
+                "user_uid": uid,
+                "request_id": request_id,
+            },
+        )
+
+        return {"resolved_count": resolved_count, "errors": errors}
+    except Exception as exc:
+        logger.error(
+            "Failed to resolve issues",
+            extra={"error": str(exc), "request_id": request_id},
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Failed to resolve issues", "message": str(exc)},
+        )
+
+
 @app.get("/integrity/issues/bulk/count", dependencies=[Depends(verify_firebase_token)])
 def count_bulk_delete_issues(
     request: Request,
@@ -1633,6 +1819,223 @@ def integrity_kpi_sample():
         )
 
 
+def _resolve_entity_to_table(entity: str) -> tuple:
+    """Resolve entity name to (base_id, table_id).
+
+    Handles singular/plural normalization and searches the schema tables.
+    Falls back to environment variables if schema lookup fails.
+
+    Returns:
+        tuple of (base_id, table_id)
+
+    Raises:
+        HTTPException(400) if base ID not found in schema
+        HTTPException(404) if table not found for entity
+    """
+    schema_data = schema_service.load()
+    base_id = schema_data.get("baseId")
+    if not base_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Base ID not found in schema. Please regenerate the schema.",
+        )
+
+    entity_lower = entity.lower().strip()
+    entity_mapping = {
+        "student": "students",
+        "parent": "parents",
+        "contractor": "contractors",
+        "class": "classes",
+    }
+    normalized_entity = entity_mapping.get(entity_lower, entity_lower)
+
+    table_id = None
+    for table in schema_data.get("tables", []):
+        table_name_lower = table.get("name", "").lower().strip()
+        table_name_normalized = table_name_lower.replace(" ", "_")
+        entity_as_spaces = normalized_entity.replace("_", " ")
+        if (
+            table_name_lower == normalized_entity
+            or table_name_lower == entity_lower
+            or table_name_lower == entity_as_spaces
+            or table_name_normalized == normalized_entity
+            or normalized_entity in table_name_lower
+            or entity_as_spaces in table_name_lower
+        ):
+            table_id = table.get("id")
+            break
+
+    if not table_id:
+        env_key_airtable = f"AIRTABLE_{normalized_entity.upper()}_TABLE"
+        env_key_at = f"AT_{normalized_entity.upper()}_TABLE"
+        table_id = os.getenv(env_key_airtable) or os.getenv(env_key_at)
+
+    if not table_id:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Table not found for entity: {entity}",
+        )
+
+    return base_id, table_id
+
+
+def _get_airtable_table(base_id: str, table_id: str):
+    """Get a pyairtable Table object with PAT auth.
+
+    Returns:
+        pyairtable Table instance
+
+    Raises:
+        HTTPException(500) if AIRTABLE_PAT is not configured
+    """
+    from pyairtable import Api
+    from backend.utils.secrets import get_secret
+
+    pat = get_secret("AIRTABLE_PAT")
+    if not pat:
+        raise HTTPException(
+            status_code=500,
+            detail="AIRTABLE_PAT not found in environment variables or Secret Manager.",
+        )
+    api = Api(pat)
+    return api.table(base_id, table_id)
+
+
+# Airtable field types that are computed and cannot accept writes
+_COMPUTED_FIELD_TYPES = frozenset([
+    "formula",
+    "rollup",
+    "lookup",
+    "count",
+    "autoNumber",
+    "createdTime",
+    "lastModifiedTime",
+    "multipleLookupValues",
+    "externalSyncSource",
+    "aiText",
+    "button",
+    "createdBy",
+    "lastModifiedBy",
+])
+
+# Name patterns that indicate a computed field (fallback when schema type is unavailable)
+_COMPUTED_NAME_PATTERNS = [
+    "(from ",    # lookup fields: "Field (from Table)"
+]
+
+
+def _get_computed_fields(entity: str) -> set:
+    """Get the set of computed (read-only) field names for an entity.
+
+    Checks both the schema field type and name-based heuristics.
+    """
+    computed = set()
+    try:
+        schema_data = schema_service.load()
+    except Exception:
+        return computed
+
+    entity_lower = entity.lower().strip()
+    entity_mapping = {
+        "student": "students",
+        "parent": "parents",
+        "contractor": "contractors",
+        "class": "classes",
+    }
+    normalized = entity_mapping.get(entity_lower, entity_lower)
+
+    for table in schema_data.get("tables", []):
+        table_name_lower = table.get("name", "").lower().strip()
+        table_name_normalized = table_name_lower.replace(" ", "_")
+        entity_as_spaces = normalized.replace("_", " ")
+        if (
+            table_name_lower == normalized
+            or table_name_lower == entity_lower
+            or table_name_lower == entity_as_spaces
+            or table_name_normalized == normalized
+            or normalized in table_name_lower
+            or entity_as_spaces in table_name_lower
+        ):
+            for field in table.get("fields", []):
+                field_name = field.get("name", "")
+                field_type = field.get("type", "")
+                if field_type in _COMPUTED_FIELD_TYPES:
+                    computed.add(field_name)
+                elif any(pat in field_name.lower() for pat in _COMPUTED_NAME_PATTERNS):
+                    computed.add(field_name)
+            break
+
+    return computed
+
+
+def _strip_computed_fields(fields: Dict[str, Any], entity: str) -> Dict[str, Any]:
+    """Remove computed fields from a dict of fields before writing to Airtable."""
+    computed = _get_computed_fields(entity)
+    if not computed:
+        return fields
+    stripped = {k: v for k, v in fields.items() if k not in computed}
+    removed = set(fields.keys()) - set(stripped.keys())
+    if removed:
+        logger.info(
+            "Stripped computed fields before Airtable write",
+            extra={"entity": entity, "stripped_fields": sorted(removed)},
+        )
+    return stripped
+
+
+import re
+
+_AIRTABLE_FIELD_ERROR_PATTERNS = [
+    re.compile(r'Field "([^"]+)" cannot accept a value because the field is computed'),
+    re.compile(r'Field "([^"]+)" cannot accept the provided value'),
+]
+
+
+def _safe_update(table, record_id: str, fields: Dict[str, Any], entity: str, max_retries: int = 10) -> Dict:
+    """Update an Airtable record, automatically retrying if field errors occur.
+
+    Airtable returns 422 errors when you try to write to a computed field or
+    send an invalid value for a field. This function catches those errors,
+    strips the offending field, and retries — handling cases where the local
+    schema snapshot is stale or incomplete.
+    """
+    remaining = dict(fields)
+    stripped = []
+
+    for attempt in range(max_retries):
+        try:
+            return table.update(record_id, remaining, typecast=True)
+        except Exception as exc:
+            error_str = str(exc)
+            bad_field = None
+            for pattern in _AIRTABLE_FIELD_ERROR_PATTERNS:
+                match = pattern.search(error_str)
+                if match:
+                    bad_field = match.group(1)
+                    break
+            if bad_field and attempt < max_retries - 1:
+                stripped.append(bad_field)
+                remaining.pop(bad_field, None)
+                logger.warning(
+                    "Airtable rejected field, retrying without it",
+                    extra={
+                        "entity": entity,
+                        "record_id": record_id,
+                        "rejected_field": bad_field,
+                        "attempt": attempt + 1,
+                        "remaining_fields": len(remaining),
+                    },
+                )
+                if not remaining:
+                    raise
+                continue
+            # Not a recognized field error or out of retries — re-raise
+            raise
+
+    # Should never reach here, but just in case
+    return table.update(record_id, remaining, typecast=True)
+
+
 class RecordsByIdsRequest(BaseModel):
     """Request body for fetching records by IDs."""
     entity: str
@@ -1790,6 +2193,323 @@ def get_airtable_records_by_ids(request: Request, body: RecordsByIdsRequest):
         )
 
 
+@app.get("/airtable/records/{entity}/search")
+def search_airtable_records(
+    entity: str,
+    q: str = "",
+    request: Request = None,
+    user: dict = Depends(verify_firebase_token),
+):
+    """Search records in an Airtable table by primary field value.
+
+    Returns up to 20 matching records with their ID and primary field value.
+    If no query is provided, returns the first 20 records.
+    """
+    request_id = getattr(request.state, "request_id", "unknown") if request else "unknown"
+
+    try:
+        base_id, table_id = _resolve_entity_to_table(entity)
+        table = _get_airtable_table(base_id, table_id)
+
+        # Find the primary field name from schema
+        schema_data = schema_service.load()
+        primary_field_name = None
+        primary_field_id = None
+        for t in schema_data.get("tables", []):
+            if t.get("id") == table_id:
+                primary_field_id = t.get("primaryFieldId")
+                for f in t.get("fields", []):
+                    if f.get("id") == primary_field_id:
+                        primary_field_name = f.get("name")
+                        break
+                break
+
+        # Build formula to search by primary field
+        formula = None
+        if q and primary_field_name:
+            safe_q = q.replace("'", "\\'")
+            formula = f"FIND(LOWER('{safe_q}'), LOWER({{{primary_field_name}}}))"
+
+        fetched = list(table.all(formula=formula, max_records=20))
+
+        results = []
+        for record in fetched:
+            rid = record.get("id")
+            fields = record.get("fields", {})
+            display_name = fields.get(primary_field_name, rid) if primary_field_name else rid
+            results.append({
+                "id": rid,
+                "name": str(display_name),
+            })
+
+        logger.info(
+            "Searched Airtable records",
+            extra={
+                "entity": entity,
+                "query": q,
+                "results": len(results),
+                "request_id": request_id,
+            },
+        )
+
+        return {"records": results, "count": len(results)}
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(
+            "Failed to search Airtable records",
+            extra={"entity": entity, "query": q, "error": str(exc), "request_id": request_id},
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Failed to search records", "message": str(exc)},
+        )
+
+
+# Airtable Record Write Endpoints
+
+
+class UpdateRecordRequest(BaseModel):
+    """Request body for updating an Airtable record."""
+    fields: Dict[str, Any]
+
+
+class MergeRecordsRequest(BaseModel):
+    """Request body for merging duplicate Airtable records."""
+    primary_record_id: str
+    secondary_record_ids: List[str]
+    merged_fields: Dict[str, Any]
+
+
+@app.patch("/airtable/records/{entity}/{record_id}")
+def update_airtable_record(
+    entity: str,
+    record_id: str,
+    body: UpdateRecordRequest,
+    request: Request,
+    user: dict = Depends(verify_firebase_token),
+):
+    """Update specific fields on an Airtable record.
+
+    Returns the updated record data.
+    """
+    request_id = getattr(request.state, "request_id", "unknown")
+    uid = user.get("uid", "unknown")
+
+    logger.info(
+        "Airtable record update requested",
+        extra={
+            "entity": entity,
+            "record_id": record_id,
+            "fields": list(body.fields.keys()),
+            "user_uid": uid,
+            "request_id": request_id,
+        },
+    )
+
+    if not body.fields:
+        raise HTTPException(status_code=400, detail="No fields provided for update")
+
+    try:
+        base_id, table_id = _resolve_entity_to_table(entity)
+        table = _get_airtable_table(base_id, table_id)
+
+        safe_fields = _strip_computed_fields(body.fields, entity)
+        if not safe_fields:
+            raise HTTPException(
+                status_code=400,
+                detail="No writable fields remaining after removing computed fields",
+            )
+
+        updated = _safe_update(table, record_id, safe_fields, entity)
+
+        logger.info(
+            "Airtable record updated successfully",
+            extra={
+                "entity": entity,
+                "record_id": record_id,
+                "user_uid": uid,
+                "request_id": request_id,
+            },
+        )
+
+        return {
+            "record": {
+                "id": updated.get("id"),
+                "fields": updated.get("fields", {}),
+                "createdTime": updated.get("createdTime"),
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(
+            "Failed to update Airtable record",
+            extra={"entity": entity, "record_id": record_id, "error": str(exc)},
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update record: {str(exc)}",
+        )
+
+
+@app.delete("/airtable/records/{entity}/{record_id}")
+def delete_airtable_record(
+    entity: str,
+    record_id: str,
+    request: Request,
+    user: dict = Depends(verify_firebase_token),
+):
+    """Delete an Airtable record.
+
+    Returns deletion confirmation.
+    """
+    request_id = getattr(request.state, "request_id", "unknown")
+    uid = user.get("uid", "unknown")
+
+    logger.info(
+        "Airtable record delete requested",
+        extra={
+            "entity": entity,
+            "record_id": record_id,
+            "user_uid": uid,
+            "request_id": request_id,
+        },
+    )
+
+    try:
+        base_id, table_id = _resolve_entity_to_table(entity)
+        table = _get_airtable_table(base_id, table_id)
+
+        result = table.delete(record_id)
+
+        logger.info(
+            "Airtable record deleted successfully",
+            extra={
+                "entity": entity,
+                "record_id": record_id,
+                "deleted": result.get("deleted", False),
+                "user_uid": uid,
+                "request_id": request_id,
+            },
+        )
+
+        return {"id": record_id, "deleted": result.get("deleted", True)}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(
+            "Failed to delete Airtable record",
+            extra={"entity": entity, "record_id": record_id, "error": str(exc)},
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete record: {str(exc)}",
+        )
+
+
+@app.post("/airtable/records/{entity}/merge")
+def merge_airtable_records(
+    entity: str,
+    body: MergeRecordsRequest,
+    request: Request,
+    user: dict = Depends(verify_firebase_token),
+):
+    """Merge duplicate records: update primary with merged fields, delete secondaries.
+
+    This is a compound operation. If the update succeeds but a delete fails,
+    the response includes partial results with error details.
+    """
+    request_id = getattr(request.state, "request_id", "unknown")
+    uid = user.get("uid", "unknown")
+
+    logger.info(
+        "Airtable merge requested",
+        extra={
+            "entity": entity,
+            "primary": body.primary_record_id,
+            "secondaries": body.secondary_record_ids,
+            "merged_field_count": len(body.merged_fields),
+            "user_uid": uid,
+            "request_id": request_id,
+        },
+    )
+
+    if not body.secondary_record_ids:
+        raise HTTPException(status_code=400, detail="No secondary records to merge")
+    if body.primary_record_id in body.secondary_record_ids:
+        raise HTTPException(
+            status_code=400, detail="Primary record cannot also be a secondary"
+        )
+
+    try:
+        base_id, table_id = _resolve_entity_to_table(entity)
+        table = _get_airtable_table(base_id, table_id)
+
+        # Step 1: Update primary record with merged fields (strip computed fields)
+        safe_fields = _strip_computed_fields(body.merged_fields, entity)
+        updated = _safe_update(table, body.primary_record_id, safe_fields, entity)
+
+        # Step 2: Delete secondary records one by one
+        delete_results = []
+        delete_errors = []
+        for secondary_id in body.secondary_record_ids:
+            try:
+                table.delete(secondary_id)
+                delete_results.append({"id": secondary_id, "deleted": True})
+            except Exception as del_exc:
+                logger.error(
+                    "Failed to delete secondary record during merge",
+                    extra={
+                        "record_id": secondary_id,
+                        "error": str(del_exc),
+                        "request_id": request_id,
+                    },
+                )
+                delete_errors.append({"id": secondary_id, "error": str(del_exc)})
+
+        response = {
+            "primary_record": {
+                "id": updated.get("id"),
+                "fields": updated.get("fields", {}),
+                "createdTime": updated.get("createdTime"),
+            },
+            "deleted": delete_results,
+            "errors": delete_errors,
+            "success": len(delete_errors) == 0,
+        }
+
+        logger.info(
+            "Airtable merge completed",
+            extra={
+                "entity": entity,
+                "primary": body.primary_record_id,
+                "deleted_count": len(delete_results),
+                "error_count": len(delete_errors),
+                "user_uid": uid,
+                "request_id": request_id,
+            },
+        )
+
+        return response
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(
+            "Failed to merge Airtable records",
+            extra={"entity": entity, "error": str(exc)},
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to merge records: {str(exc)}",
+        )
+
+
 # Rules Management API Endpoints
 
 @app.get("/rules", dependencies=[Depends(verify_firebase_token)])
@@ -1915,6 +2635,53 @@ def parse_rule_with_ai(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error": "Failed to parse rule", "message": str(exc)},
         )
+
+class IssueChatRequest(BaseModel):
+    """Request body for AI chat about issues."""
+    messages: List[Dict[str, str]]
+    issue_context: str
+    record_ids_by_entity: Dict[str, List[str]] = {}
+
+
+@app.post("/chat/issues")
+def chat_about_issues(
+    body: IssueChatRequest,
+    request: Request,
+    user: dict = Depends(verify_firebase_token),
+):
+    """AI chat endpoint for asking questions about data integrity issues."""
+    try:
+        request_id = getattr(request.state, "request_id", None)
+
+        logger.info(
+            "Issue chat request received",
+            extra={
+                "message_count": len(body.messages),
+                "context_length": len(body.issue_context),
+                "entities_with_records": list(body.record_ids_by_entity.keys()),
+                "request_id": request_id,
+            },
+        )
+
+        service = IssueChatService()
+        response_text = service.chat(
+            body.messages, body.issue_context, body.record_ids_by_entity
+        )
+
+        return {"response": response_text}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(
+            "Issue chat failed",
+            extra={"error": str(exc), "request_id": getattr(request.state, "request_id", None)},
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Chat failed", "message": str(exc)},
+        )
+
 
 class CreateRuleRequest(BaseModel):
     """Request body for creating a rule."""
@@ -2389,4 +3156,161 @@ async def refresh_school_years(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error": "Failed to refresh school years", "message": str(exc)},
+        )
+
+
+# ── API Key Management ──────────────────────────────────────────────────────────
+
+class CreateApiKeyRequest(BaseModel):
+    """Request body for creating an API key."""
+    name: str
+
+
+@app.get("/api-keys", dependencies=[Depends(verify_firebase_token)])
+def list_api_keys(request: Request, user: dict = Depends(verify_firebase_token)):
+    """List the authenticated user's API keys."""
+    request_id = getattr(request.state, "request_id", "unknown")
+    uid = user.get("uid")
+
+    try:
+        from .clients.firestore import FirestoreClient
+        from .config.config_loader import load_runtime_config
+
+        config = load_runtime_config()
+        firestore_client = FirestoreClient(config.firestore)
+        client = firestore_client._get_client()
+
+        keys_ref = client.collection("users").document(uid).collection("api_keys")
+        keys = []
+        for doc in keys_ref.order_by("created_at", direction="DESCENDING").stream():
+            data = doc.to_dict()
+            keys.append({
+                "id": doc.id,
+                "name": data.get("name", ""),
+                "key_prefix": data.get("key_prefix", ""),
+                "created_at": data.get("created_at").isoformat() if data.get("created_at") else None,
+                "last_used_at": data.get("last_used_at").isoformat() if data.get("last_used_at") else None,
+            })
+
+        return {"keys": keys}
+    except Exception as exc:
+        logger.error(
+            "Failed to list API keys",
+            extra={"uid": uid, "error": str(exc), "request_id": request_id},
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Failed to list API keys", "message": str(exc)},
+        )
+
+
+@app.post("/api-keys", dependencies=[Depends(verify_firebase_token)])
+def create_api_key(body: CreateApiKeyRequest, request: Request, user: dict = Depends(verify_firebase_token)):
+    """Create a new API key for the authenticated user. Returns the full key exactly once."""
+    import hashlib
+    import secrets as secrets_mod
+
+    request_id = getattr(request.state, "request_id", "unknown")
+    uid = user.get("uid")
+    name = body.name.strip()
+
+    if not name:
+        raise HTTPException(status_code=400, detail="Name is required")
+    if len(name) > 100:
+        raise HTTPException(status_code=400, detail="Name must be 100 characters or fewer")
+
+    try:
+        from google.cloud import firestore as firestore_lib
+        from .clients.firestore import FirestoreClient
+        from .config.config_loader import load_runtime_config
+
+        config = load_runtime_config()
+        firestore_client = FirestoreClient(config.firestore)
+        client = firestore_client._get_client()
+
+        # Generate key
+        raw_key = "dim_" + secrets_mod.token_hex(32)
+        key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+        key_prefix = raw_key[:12] + "..."
+
+        keys_ref = client.collection("users").document(uid).collection("api_keys")
+        doc_ref = keys_ref.document()
+        doc_ref.set({
+            "name": name,
+            "key_hash": key_hash,
+            "key_prefix": key_prefix,
+            "created_at": firestore_lib.SERVER_TIMESTAMP,
+            "last_used_at": None,
+            "uid": uid,
+        })
+
+        logger.info(
+            "API key created",
+            extra={"uid": uid, "key_id": doc_ref.id, "request_id": request_id},
+        )
+
+        return {
+            "id": doc_ref.id,
+            "name": name,
+            "key": raw_key,
+            "key_prefix": key_prefix,
+            "created_at": None,  # SERVER_TIMESTAMP resolves server-side
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(
+            "Failed to create API key",
+            extra={"uid": uid, "error": str(exc), "request_id": request_id},
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Failed to create API key", "message": str(exc)},
+        )
+
+
+@app.delete("/api-keys/{key_id}", dependencies=[Depends(verify_firebase_token)])
+def delete_api_key(key_id: str, request: Request, user: dict = Depends(verify_firebase_token)):
+    """Delete an API key belonging to the authenticated user."""
+    request_id = getattr(request.state, "request_id", "unknown")
+    uid = user.get("uid")
+
+    try:
+        from .clients.firestore import FirestoreClient
+        from .config.config_loader import load_runtime_config
+
+        config = load_runtime_config()
+        firestore_client = FirestoreClient(config.firestore)
+        client = firestore_client._get_client()
+
+        doc_ref = client.collection("users").document(uid).collection("api_keys").document(key_id)
+        doc = doc_ref.get()
+
+        if not doc.exists:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error": "API key not found", "key_id": key_id},
+            )
+
+        doc_ref.delete()
+
+        logger.info(
+            "API key deleted",
+            extra={"uid": uid, "key_id": key_id, "request_id": request_id},
+        )
+
+        return {"status": "success", "message": "API key deleted", "key_id": key_id}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(
+            "Failed to delete API key",
+            extra={"uid": uid, "key_id": key_id, "error": str(exc), "request_id": request_id},
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Failed to delete API key", "message": str(exc)},
         )

@@ -17,6 +17,9 @@ import { IssuesPage } from "./pages/IssuesPage";
 import { SchedulingPage } from "./pages/SchedulingPage";
 import { RulesPage } from "./pages/RulesPage";
 import { RuleDetailPage } from "./pages/RuleDetailPage";
+import { HttpCatError } from "./components/HttpCatError";
+import { ApiKeysPage } from "./pages/ApiKeysPage";
+import { RemediatePage } from "./pages/RemediatePage";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
@@ -136,7 +139,27 @@ createRoot(document.getElementById("root")!).render(
               </AuthGuard>
             }
           />
-          <Route path="*" element={<Navigate to="/" replace />} />
+          <Route
+            path="/remediate"
+            element={
+              <AuthGuard requireAdmin={true}>
+                <App>
+                  <RemediatePage />
+                </App>
+              </AuthGuard>
+            }
+          />
+          <Route
+            path="/api-keys"
+            element={
+              <AuthGuard requireAdmin={true}>
+                <App>
+                  <ApiKeysPage />
+                </App>
+              </AuthGuard>
+            }
+          />
+          <Route path="*" element={<HttpCatError statusCode={404} title="Page Not Found" />} />
         </Routes>
       </BrowserRouter>
     </ErrorBoundary>

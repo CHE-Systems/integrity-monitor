@@ -54,6 +54,7 @@ class DuplicateCondition(BaseModel):
     tolerance_days: Optional[int] = None
     similarity: Optional[float] = None
     overlap_ratio: Optional[float] = None
+    value: Optional[str] = None
     description: Optional[str] = None
 
 

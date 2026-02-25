@@ -75,6 +75,32 @@ CONTRACTOR_FIELD_MAP = {
     "fldWBnA5Xf6eQATOi": "normalized_phone",  # Cell phone
 }
 
+STUDENT_TRUTH_FIELD_MAP = {
+    # Short aliases
+    "student_id": "student_id",
+    "student": "student_id",
+    "school_year": "school_year",
+    "campus": "campus",
+    "name": "normalized_name",
+    "dob": "dob",
+    "date_of_birth": "dob",
+    "enrollment_status": "enrollment_status",
+    # Full Airtable field names
+    "Student": "student_id",
+    "School Year": "school_year",
+    "Campus (from Truth)": "campus",
+    "Last, First, Middle Name": "normalized_name",
+    "Student's Birthdate (from Student)": "dob",
+    "Status of Enrollment": "enrollment_status",
+    # Airtable field IDs
+    "fld0dyhagyffdUXL6": "student_id",          # Student (linked record)
+    "fldpagtV48mBEGUT7": "school_year",         # School Year
+    "fld1m9RJiL8EqUFCd": "campus",              # Campus (from Truth)
+    "fld5elEqYC2y7ZgUV": "normalized_name",     # Last, First, Middle Name
+    "fldWvaET7Lu3g06tO": "dob",                  # Student's Birthdate (from Student)
+    "fld7vz1KYGYM3Q4qd": "enrollment_status",   # Status of Enrollment
+}
+
 
 def get_field_value(record: Any, field_name: str, entity: str) -> Any:
     """Get field value from normalized record using config field name.
@@ -91,6 +117,7 @@ def get_field_value(record: Any, field_name: str, entity: str) -> Any:
         "student": STUDENT_FIELD_MAP,
         "parent": PARENT_FIELD_MAP,
         "contractor": CONTRACTOR_FIELD_MAP,
+        "student_truth": STUDENT_TRUTH_FIELD_MAP,
     }.get(entity, {})
     
     mapped_field = field_map.get(field_name)
@@ -157,6 +184,8 @@ def evaluate_condition(
         return _evaluate_date_delta(condition, record_a, record_b, entity)
     elif condition_type == "set_overlap":
         return _evaluate_set_overlap(condition, record_a, record_b, entity)
+    elif condition_type == "value_equals":
+        return _evaluate_value_equals(condition, record_a, record_b, entity)
     else:
         return False, {"error": f"Unknown condition type: {condition_type}"}
 
@@ -314,5 +343,43 @@ def _evaluate_set_overlap(
             "overlap_ratio": round(overlap_ratio, 3),
             "threshold": condition.overlap_ratio,
             "match": matches,
+        }
+    }
+
+
+def _evaluate_value_equals(
+    condition: DuplicateCondition,
+    record_a: Any,
+    record_b: Any,
+    entity: str,
+) -> Tuple[bool, Dict[str, Any]]:
+    """Evaluate value_equals condition.
+
+    Both records must have the field equal to the specified value.
+    """
+    if condition.field is None:
+        return False, {"error": "value_equals condition requires 'field'"}
+
+    if condition.value is None:
+        return False, {"error": "value_equals condition requires 'value'"}
+
+    value_a = get_field_value(record_a, condition.field, entity)
+    value_b = get_field_value(record_b, condition.field, entity)
+
+    str_a = str(value_a).strip() if value_a else ""
+    str_b = str(value_b).strip() if value_b else ""
+
+    a_matches = str_a == condition.value
+    b_matches = str_b == condition.value
+    both_match = a_matches and b_matches
+
+    return both_match, {
+        condition.field: {
+            "a": str_a,
+            "b": str_b,
+            "expected": condition.value,
+            "a_matches": a_matches,
+            "b_matches": b_matches,
+            "match": both_match,
         }
     }

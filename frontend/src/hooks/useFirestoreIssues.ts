@@ -8,6 +8,7 @@ import {
   limit,
   startAfter,
   getDocs,
+  QueryConstraint,
 } from "firebase/firestore";
 import { db } from "../config/firebase";
 
@@ -382,4 +383,77 @@ export function useFirestoreIssues(filters: IssueFilters = {}, pageSize: number 
     goToLastPage,
     refresh,
   };
+}
+
+/**
+ * Standalone async function to fetch all issues matching filters in one shot.
+ * Not a hook — can be called imperatively (e.g., when the chat panel opens).
+ * Fetches up to `maxCount` issues (default 500) without pagination.
+ */
+export async function fetchAllIssues(
+  filters: IssueFilters = {},
+  maxCount: number = 500
+): Promise<Issue[]> {
+  const issuesRef = collection(db, "integrity_issues");
+  const constraints: QueryConstraint[] = [];
+
+  if (filters.type) {
+    constraints.push(where("issue_type", "==", filters.type));
+  }
+  if (filters.severity) {
+    constraints.push(where("severity", "==", filters.severity));
+  }
+  if (filters.entity) {
+    constraints.push(where("entity", "==", filters.entity));
+  }
+  if (filters.run_id) {
+    constraints.push(where("run_id", "==", filters.run_id));
+  }
+  if (filters.first_seen_in_run) {
+    constraints.push(where("first_seen_in_run", "==", filters.first_seen_in_run));
+  }
+  if (filters.status && filters.status !== "all") {
+    constraints.push(where("status", "==", filters.status));
+  } else if (filters.status === undefined && !filters.run_id) {
+    constraints.push(where("status", "==", "open"));
+  }
+
+  constraints.push(orderBy("created_at", "desc"));
+  constraints.push(limit(maxCount));
+
+  const q = query(issuesRef, ...constraints);
+  const snapshot = await getDocs(q);
+
+  let results: Issue[] = snapshot.docs.map((doc) => {
+    const data = doc.data();
+    return {
+      id: doc.id,
+      rule_id: data.rule_id || "",
+      entity: data.entity || "",
+      record_id: data.record_id || "",
+      severity: data.severity || "info",
+      issue_type: data.issue_type || "",
+      description: data.description,
+      metadata: data.metadata,
+      related_records: data.related_records,
+      created_at: data.created_at?.toDate?.() || new Date(),
+      updated_at: data.updated_at?.toDate?.() || new Date(),
+      status: data.status || "open",
+      run_id: data.run_id,
+      first_seen_in_run: data.first_seen_in_run,
+    };
+  });
+
+  // Apply search filter client-side
+  if (filters.search) {
+    const searchLower = filters.search.toLowerCase();
+    results = results.filter(
+      (issue) =>
+        issue.rule_id.toLowerCase().includes(searchLower) ||
+        issue.record_id.toLowerCase().includes(searchLower) ||
+        issue.description?.toLowerCase().includes(searchLower)
+    );
+  }
+
+  return results;
 }

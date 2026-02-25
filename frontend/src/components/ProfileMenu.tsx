@@ -1,8 +1,10 @@
 import { useState, useRef, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
 import { useAuth } from "../hooks/useAuth";
 
 export function ProfileMenu() {
   const { user, signOut } = useAuth();
+  const navigate = useNavigate();
   const [isOpen, setIsOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -36,22 +38,30 @@ export function ProfileMenu() {
       {/* Profile Button */}
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className="flex h-9 w-9 items-center justify-center rounded-full bg-[var(--brand)] text-white hover:bg-[var(--brand)]/90 transition-colors"
+        className="flex h-9 w-9 items-center justify-center rounded-full bg-[var(--brand)] text-white hover:bg-[var(--brand)]/90 transition-colors overflow-hidden"
         aria-label="Profile menu"
       >
-        {/* Person Head Icon (SVG) */}
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          viewBox="0 0 24 24"
-          fill="currentColor"
-          className="w-5 h-5"
-        >
-          <path
-            fillRule="evenodd"
-            d="M7.5 6a4.5 4.5 0 119 0 4.5 4.5 0 01-9 0zM3.751 20.105a8.25 8.25 0 0116.498 0 .75.75 0 01-.437.695A18.683 18.683 0 0112 22.5c-2.786 0-5.433-.608-7.812-1.7a.75.75 0 01-.437-.695z"
-            clipRule="evenodd"
+        {user?.photoURL ? (
+          <img
+            src={user.photoURL}
+            alt="Profile"
+            referrerPolicy="no-referrer"
+            className="h-9 w-9 rounded-full object-cover"
           />
-        </svg>
+        ) : (
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            viewBox="0 0 24 24"
+            fill="currentColor"
+            className="w-5 h-5"
+          >
+            <path
+              fillRule="evenodd"
+              d="M7.5 6a4.5 4.5 0 119 0 4.5 4.5 0 01-9 0zM3.751 20.105a8.25 8.25 0 0116.498 0 .75.75 0 01-.437.695A18.683 18.683 0 0112 22.5c-2.786 0-5.433-.608-7.812-1.7a.75.75 0 01-.437-.695z"
+              clipRule="evenodd"
+            />
+          </svg>
+        )}
       </button>
 
       {/* Dropdown Menu */}
@@ -65,6 +75,19 @@ export function ProfileMenu() {
             <p className="text-sm text-[var(--text-muted)] truncate">
               {user?.email || "No email"}
             </p>
+          </div>
+
+          {/* Menu Items */}
+          <div className="p-2 border-b border-[var(--border)]">
+            <button
+              onClick={() => {
+                navigate("/api-keys");
+                setIsOpen(false);
+              }}
+              className="w-full rounded-xl px-4 py-2 text-left text-sm font-medium text-[var(--text-main)] hover:bg-gray-100 transition-colors"
+            >
+              API Keys
+            </button>
           </div>
 
           {/* Sign Out Button */}

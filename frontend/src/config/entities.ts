@@ -50,3 +50,42 @@ export const TABLE_ENTITY_MAPPING: Record<string, string> = Object.fromEntries(
  */
 export type ActiveEntity = typeof ACTIVE_ENTITIES[number];
 
+/**
+ * Normalize entity name to canonical plural form.
+ * Handles singular/plural variations from the record-ids API
+ * (e.g., "student" for duplicates, "students" for required fields).
+ */
+export function normalizeEntityName(entity: string): string {
+  const lower = entity.toLowerCase().trim();
+  const mapping: Record<string, string> = {
+    student: "students",
+    parent: "parents",
+    contractor: "contractors",
+    class: "classes",
+    invoice: "invoices",
+    transfer: "transfers",
+  };
+  return mapping[lower] || lower;
+}
+
+/**
+ * Get a display-friendly name for an entity.
+ */
+export function getEntityDisplayName(entity: string): string {
+  const normalized = normalizeEntityName(entity);
+  const displayNames: Record<string, string> = {
+    students: "Students",
+    parents: "Parents",
+    contractors: "Contractors",
+    absent: "Attendance",
+    student_truth: "Student Truth",
+    classes: "Classes",
+    transfers: "Transfers",
+    invoices: "Invoices",
+  };
+  return (
+    displayNames[normalized] ||
+    entity.charAt(0).toUpperCase() + entity.slice(1)
+  );
+}
+

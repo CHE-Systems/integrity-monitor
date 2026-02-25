@@ -33,19 +33,24 @@ export class ErrorBoundary extends Component<Props, State> {
 
       return (
         <div className="flex min-h-screen items-center justify-center bg-[var(--bg-warm-light)]">
-          <div className="w-full max-w-md rounded-3xl border border-[var(--border)] bg-white p-8 shadow-lg">
+          <div className="w-full max-w-md rounded-3xl border border-[var(--border)] bg-white p-8 shadow-lg text-center">
+            <img
+              src="https://http.cat/500.jpg"
+              alt="HTTP 500"
+              className="w-full rounded-2xl mb-6"
+            />
             <h1
-              className="mb-4 text-2xl font-semibold text-[var(--text-main)]"
+              className="mb-2 text-2xl font-semibold text-[var(--text-main)]"
               style={{ fontFamily: "Outfit" }}
             >
               Something went wrong
             </h1>
-            <p className="mb-4 text-[var(--text-muted)]">
+            <p className="mb-6 text-[var(--text-muted)]">
               {this.state.error?.message || "An unexpected error occurred"}
             </p>
             <button
               onClick={() => window.location.reload()}
-              className="rounded-full bg-[var(--brand)] px-4 py-2 font-medium text-white"
+              className="rounded-full bg-[var(--brand)] px-6 py-2 font-medium text-white"
             >
               Reload Page
             </button>

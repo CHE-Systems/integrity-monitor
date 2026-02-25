@@ -42,6 +42,10 @@ export function RunStatusPage() {
     }>
   >([]);
   const [loadingRules, setLoadingRules] = useState(false);
+  const [showApiSnippet, setShowApiSnippet] = useState(false);
+  const [snippetTab, setSnippetTab] = useState<"curl" | "python" | "js">("curl");
+  const [snippetCopied, setSnippetCopied] = useState(false);
+  const [isRerunning, setIsRerunning] = useState(false);
 
   // Calculate isRunning safely - will be false if runStatus is not available yet
   const statusLower = runStatus?.status?.toLowerCase() || "";
@@ -347,6 +351,108 @@ export function RunStatusPage() {
     }
   }, [runId, runStatus?.run_config]);
 
+  const handleRerun = async () => {
+    if (isRerunning || !runStatus) return;
+    setIsRerunning(true);
+    try {
+      const token = await getToken();
+      if (!token) {
+        alert("Authentication required. Please sign in again.");
+        setIsRerunning(false);
+        return;
+      }
+
+      const params = new URLSearchParams({ trigger: "manual" });
+      const runConfig: any = {};
+
+      // Reconstruct config from the original run
+      if (runStatus.run_config) {
+        if (runStatus.run_config.entities) {
+          runConfig.entities = runStatus.run_config.entities;
+          runStatus.run_config.entities.forEach((entity: string) => {
+            params.append("entities", entity);
+          });
+        } else if (runStatus.entity_counts) {
+          // Fallback: infer entities from entity_counts
+          const entities = Object.keys(runStatus.entity_counts);
+          runConfig.entities = entities;
+          entities.forEach((entity) => params.append("entities", entity));
+        }
+        if (runStatus.run_config.rules) {
+          runConfig.rules = runStatus.run_config.rules;
+        }
+        if (runStatus.run_config.checks) {
+          runConfig.checks = runStatus.run_config.checks;
+        }
+      } else if (runStatus.entity_counts) {
+        const entities = Object.keys(runStatus.entity_counts);
+        runConfig.entities = entities;
+        entities.forEach((entity) => params.append("entities", entity));
+      }
+
+      const requestBody = Object.keys(runConfig).length > 0 ? runConfig : undefined;
+
+      const response = await fetch(
+        `${API_BASE}/integrity/run?${params.toString()}`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+          body: requestBody ? JSON.stringify(requestBody) : undefined,
+        }
+      );
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(errorText || `Request failed with status ${response.status}`);
+      }
+
+      const result = await response.json();
+      const newRunId = result.run_id;
+
+      if (newRunId) {
+        // Wait for Firestore document to appear
+        const checkInterval = 500;
+        const maxWait = 30000;
+        const startTime = Date.now();
+
+        await new Promise<void>((resolve) => {
+          const check = async () => {
+            try {
+              const runRef = doc(db, "integrity_runs", newRunId);
+              const snapshot = await getDoc(runRef);
+              if (snapshot.exists() || Date.now() - startTime >= maxWait) {
+                resolve();
+                return;
+              }
+              setTimeout(check, checkInterval);
+            } catch {
+              resolve();
+            }
+          };
+          check();
+        });
+
+        navigate(`/run/${newRunId}`);
+      } else {
+        alert("Scan started but no run ID was returned");
+      }
+    } catch (error) {
+      console.error("Failed to re-run scan:", error);
+      let errorMessage = "Failed to start scan. Please try again.";
+      if (error instanceof TypeError && error.message.includes("fetch")) {
+        errorMessage = "Backend server is not available.";
+      } else if (error instanceof Error) {
+        errorMessage = error.message;
+      }
+      alert(errorMessage);
+    } finally {
+      setIsRerunning(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center min-h-[400px]">
@@ -555,6 +661,15 @@ export function RunStatusPage() {
               className="rounded-lg border border-red-500 px-4 py-2 text-red-600 hover:bg-red-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isCancelling ? "Cancelling..." : "Cancel Scan"}
+            </button>
+          )}
+          {!isRunning && (
+            <button
+              onClick={handleRerun}
+              disabled={isRerunning}
+              className="rounded-lg border border-[var(--brand)] px-4 py-2 text-[var(--brand)] hover:bg-[var(--brand)]/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isRerunning ? "Starting..." : "Re-run Scan"}
             </button>
           )}
           {!isRunning && (
@@ -1164,6 +1279,141 @@ export function RunStatusPage() {
             </div>
           </div>
         )}
+
+      {/* API Access Snippet */}
+      {runId && !isRunning && (
+        <div className="rounded-2xl border border-[var(--border)] bg-white overflow-hidden">
+          <button
+            onClick={() => setShowApiSnippet(!showApiSnippet)}
+            className="w-full flex items-center justify-between p-5 hover:bg-gray-50/50 transition-colors"
+          >
+            <div className="flex items-center gap-3">
+              <svg className="w-5 h-5 text-[var(--text-muted)]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
+              </svg>
+              <span className="text-sm font-semibold text-[var(--text-main)]" style={{ fontFamily: "Outfit" }}>
+                API Access
+              </span>
+              <span className="text-xs text-[var(--text-muted)]">
+                Fetch record IDs from this run programmatically
+              </span>
+            </div>
+            <svg
+              className={`w-4 h-4 text-[var(--text-muted)] transition-transform ${showApiSnippet ? "rotate-180" : ""}`}
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+          {showApiSnippet && (
+            <div className="px-5 pb-5 border-t border-[var(--border)]">
+              <p className="text-xs text-[var(--text-muted)] mt-4 mb-3">
+                Use an API key from your{" "}
+                <a
+                  href="/api-keys"
+                  onClick={(e) => { e.preventDefault(); navigate("/api-keys"); }}
+                  className="text-[var(--cta-blue)] hover:underline"
+                >
+                  API Keys page
+                </a>
+                {" "}or the static API_AUTH_TOKEN.
+              </p>
+              {/* Language tabs */}
+              <div className="flex gap-1 mb-3">
+                {(["curl", "python", "js"] as const).map((tab) => (
+                  <button
+                    key={tab}
+                    onClick={() => setSnippetTab(tab)}
+                    className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
+                      snippetTab === tab
+                        ? "bg-[var(--brand)] text-white"
+                        : "bg-gray-100 text-[var(--text-muted)] hover:bg-gray-200"
+                    }`}
+                  >
+                    {tab === "curl" ? "cURL" : tab === "python" ? "Python" : "JavaScript"}
+                  </button>
+                ))}
+              </div>
+              {/* Code block */}
+              <div className="relative">
+                <button
+                  onClick={async () => {
+                    const code = document.getElementById("api-snippet-code")?.textContent || "";
+                    await navigator.clipboard.writeText(code);
+                    setSnippetCopied(true);
+                    setTimeout(() => setSnippetCopied(false), 2000);
+                  }}
+                  className="absolute top-2 right-2 rounded-md bg-white/80 px-2 py-1 text-xs font-medium text-[var(--text-muted)] hover:bg-white hover:text-[var(--text-main)] border border-[var(--border)] transition-colors z-10"
+                >
+                  {snippetCopied ? "Copied" : "Copy"}
+                </button>
+                <pre
+                  id="api-snippet-code"
+                  className="bg-[var(--bg-dark)] rounded-lg border border-[var(--border)] p-4 pr-20 font-mono text-xs text-[var(--text-main)] overflow-x-auto whitespace-pre"
+                >
+                  {snippetTab === "curl" && `curl -X GET \\
+  "${API_BASE}/integrity/run/${runId}/record-ids" \\
+  -H "Authorization: Bearer YOUR_API_KEY"`}
+                  {snippetTab === "python" && `import requests
+
+response = requests.get(
+    "${API_BASE}/integrity/run/${runId}/record-ids",
+    headers={"Authorization": "Bearer YOUR_API_KEY"}
+)
+data = response.json()
+
+# Response shape:
+# {
+#   "run_id": "${runId}",
+#   "entities": {
+#     "students": {
+#       "count": 5,
+#       "records": [
+#         {
+#           "record_id": "recABC123",
+#           "issues": [
+#             {
+#               "issue_type": "duplicate",
+#               "severity": "warning",
+#               "rule_id": "dup.student.name_dob",
+#               "description": "..."
+#             }
+#           ]
+#         }
+#       ]
+#     }
+#   },
+#   "total_records": 12,
+#   "total_issues": 18
+# }
+
+for entity, info in data["entities"].items():
+    print(f"{entity}: {info['count']} records")
+    for record in info["records"]:
+        print(f"  {record['record_id']}: {len(record['issues'])} issues")`}
+                  {snippetTab === "js" && `const response = await fetch(
+  "${API_BASE}/integrity/run/${runId}/record-ids",
+  {
+    headers: { "Authorization": "Bearer YOUR_API_KEY" }
+  }
+);
+const data = await response.json();
+
+// data.entities.<entity>.records[] has record_id + issues
+for (const [entity, info] of Object.entries(data.entities)) {
+  console.log(\`\${entity}: \${info.count} records\`);
+  for (const record of info.records) {
+    console.log(\`  \${record.record_id}: \${record.issues.length} issues\`);
+  }
+}`}
+                </pre>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Real-time Logs */}
       <div className="rounded-2xl border border-[var(--border)] bg-white p-6">
