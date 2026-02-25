@@ -187,34 +187,78 @@ async function resolveLinkedRecordNames(
   const entityTable = findTableForEntity(entity, schema);
   if (!entityTable) return {};
 
-  // Find multipleRecordLinks fields and their target tables
-  const linkFields = entityTable.fields.filter(
-    (f) => f.type === "multipleRecordLinks"
-  );
-  if (linkFields.length === 0) return {};
-
   // Collect all linked record IDs grouped by target table ID
   const linkedIdsByTable: Record<string, Set<string>> = {};
 
+  // Helper to collect rec IDs into linkedIdsByTable
+  const collectIds = (targetTableId: string, value: unknown) => {
+    if (!Array.isArray(value)) return;
+    if (!linkedIdsByTable[targetTableId]) {
+      linkedIdsByTable[targetTableId] = new Set();
+    }
+    for (const id of value) {
+      if (typeof id === "string" && id.startsWith("rec")) {
+        linkedIdsByTable[targetTableId].add(id);
+      }
+    }
+  };
+
+  // 1. Direct multipleRecordLinks fields
+  const linkFields = entityTable.fields.filter(
+    (f) => f.type === "multipleRecordLinks"
+  );
   for (const record of Object.values(records)) {
     for (const linkField of linkFields) {
-      const value = record.fields[linkField.name];
-      if (!Array.isArray(value)) continue;
-
       const opts = linkField.options as
         | { linkedTableId?: string }
         | undefined;
-      const targetTableId = opts?.linkedTableId;
-      if (!targetTableId) continue;
+      if (opts?.linkedTableId) {
+        collectIds(opts.linkedTableId, record.fields[linkField.name]);
+      }
+    }
+  }
 
-      if (!linkedIdsByTable[targetTableId]) {
-        linkedIdsByTable[targetTableId] = new Set();
-      }
-      for (const id of value) {
-        if (typeof id === "string" && id.startsWith("rec")) {
-          linkedIdsByTable[targetTableId].add(id);
-        }
-      }
+  // 2. multipleLookupValues fields whose result type is multipleRecordLinks
+  //    (e.g. School Year on Students is a lookup that returns linked record IDs)
+  const lookupLinkFields = entityTable.fields.filter(
+    (f) =>
+      f.type === "multipleLookupValues" &&
+      (f.options as any)?.result?.type === "multipleRecordLinks"
+  );
+  for (const lookupField of lookupLinkFields) {
+    const opts = lookupField.options as any;
+    const recordLinkFieldId = opts?.recordLinkFieldId;
+    const fieldIdInLinkedTable = opts?.fieldIdInLinkedTable;
+    if (!recordLinkFieldId || !fieldIdInLinkedTable) continue;
+
+    // Find the link field this lookup goes through
+    const throughLinkField = entityTable.fields.find(
+      (f) => f.id === recordLinkFieldId
+    );
+    if (!throughLinkField || throughLinkField.type !== "multipleRecordLinks")
+      continue;
+
+    const intermediateTableId = (throughLinkField.options as any)?.linkedTableId;
+    if (!intermediateTableId) continue;
+
+    // Find the looked-up field in the intermediate table
+    const intermediateTable = schema.tables.find(
+      (t) => t.id === intermediateTableId
+    );
+    if (!intermediateTable) continue;
+
+    const lookedUpField = intermediateTable.fields.find(
+      (f) => f.id === fieldIdInLinkedTable
+    );
+    if (!lookedUpField || lookedUpField.type !== "multipleRecordLinks")
+      continue;
+
+    // The target table is where the looked-up link field points
+    const targetTableId = (lookedUpField.options as any)?.linkedTableId;
+    if (!targetTableId) continue;
+
+    for (const record of Object.values(records)) {
+      collectIds(targetTableId, record.fields[lookupField.name]);
     }
   }
 
