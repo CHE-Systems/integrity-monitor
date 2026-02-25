@@ -98,7 +98,7 @@ export function IssueList({
     prevPage,
     goToPage,
     goToLastPage,
-  } = useFirestoreIssues({ ...filters, search }, itemsPerPage);
+  } = useFirestoreIssues(filters, itemsPerPage);
 
   // Calculate total pages based on filtered count
   // When viewing run-specific issues, we can't use global counts - pagination is based on query results
@@ -134,6 +134,19 @@ export function IssueList({
     [issues]
   );
   const recordDisplayNames = useRecordDisplayNames(issueEntries);
+
+  // Client-side search: filter by rule_id, record_id, description, AND display name
+  const filteredIssues = useMemo(() => {
+    if (!search) return issues;
+    const searchLower = search.toLowerCase();
+    return issues.filter(
+      (issue) =>
+        issue.rule_id.toLowerCase().includes(searchLower) ||
+        issue.record_id.toLowerCase().includes(searchLower) ||
+        issue.description?.toLowerCase().includes(searchLower) ||
+        recordDisplayNames[issue.record_id]?.toLowerCase().includes(searchLower)
+    );
+  }, [issues, search, recordDisplayNames]);
 
   const {
     markResolved,
@@ -263,7 +276,7 @@ export function IssueList({
       <div className="flex flex-wrap gap-2">
         <input
           type="text"
-          placeholder="Search by rule ID or record ID..."
+          placeholder="Search by name, rule ID, or record ID..."
           value={search}
           onChange={(e) => handleSearch(e.target.value)}
           className="flex-1 min-w-[200px] rounded-lg border border-[var(--border)] px-3 py-2 text-sm text-[var(--text-main)]"
@@ -313,7 +326,7 @@ export function IssueList({
         </select>
         <button
           onClick={handleOpenChat}
-          disabled={issues.length === 0}
+          disabled={filteredIssues.length === 0}
           className="flex items-center gap-1.5 rounded-lg border border-[var(--brand)] bg-[var(--brand)]/5 px-3 py-2 text-sm text-[var(--brand)] hover:bg-[var(--brand)]/15 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
           title="Ask AI about these issues"
         >
@@ -327,7 +340,7 @@ export function IssueList({
       </div>
 
       {/* Pagination */}
-      {!loading && !error && issues.length > 0 && (
+      {!loading && !error && filteredIssues.length > 0 && (
         <>
           {useDefaultPagination && totalItems !== undefined ? (
             <Pagination
@@ -344,7 +357,7 @@ export function IssueList({
           ) : (
             <div className="flex items-center justify-between text-sm py-2">
               <div className="text-[var(--text-muted)]">
-                {issues.length} issues shown
+                {filteredIssues.length} issues shown
                 {!isRunSpecificView && ` · ${filteredCount} total`}
                 {isRunSpecificView && hasMore && " · more available"}
               </div>
@@ -479,13 +492,13 @@ export function IssueList({
         </div>
       )}
 
-      {!loading && !error && issues.length === 0 && (
+      {!loading && !error && filteredIssues.length === 0 && (
         <div className="text-center py-8 text-[var(--text-muted)]">
           No issues found
         </div>
       )}
 
-      {!loading && !error && issues.length > 0 && (
+      {!loading && !error && filteredIssues.length > 0 && (
         <>
           <div className="overflow-x-auto rounded-3xl border border-[var(--border)] bg-white">
             <table className="w-full text-left text-sm min-w-[800px]">
@@ -500,7 +513,7 @@ export function IssueList({
                 </tr>
               </thead>
               <tbody>
-                {issues.map((issue) => {
+                {filteredIssues.map((issue) => {
                   const airtableLinks = getAirtableLinksWithFallback(
                     issue.entity,
                     issue.record_id,

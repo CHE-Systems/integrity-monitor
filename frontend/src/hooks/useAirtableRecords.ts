@@ -187,34 +187,91 @@ async function resolveLinkedRecordNames(
   const entityTable = findTableForEntity(entity, schema);
   if (!entityTable) return {};
 
-  // Find multipleRecordLinks fields and their target tables
-  const linkFields = entityTable.fields.filter(
-    (f) => f.type === "multipleRecordLinks"
-  );
-  if (linkFields.length === 0) return {};
-
   // Collect all linked record IDs grouped by target table ID
   const linkedIdsByTable: Record<string, Set<string>> = {};
 
+  // Helper to collect rec IDs into linkedIdsByTable
+  const collectIds = (targetTableId: string, value: unknown) => {
+    if (!Array.isArray(value)) return;
+    if (!linkedIdsByTable[targetTableId]) {
+      linkedIdsByTable[targetTableId] = new Set();
+    }
+    for (const id of value) {
+      if (typeof id === "string" && id.startsWith("rec")) {
+        linkedIdsByTable[targetTableId].add(id);
+      }
+    }
+  };
+
+  // 1. Direct multipleRecordLinks fields
+  const linkFields = entityTable.fields.filter(
+    (f) => f.type === "multipleRecordLinks"
+  );
   for (const record of Object.values(records)) {
     for (const linkField of linkFields) {
-      const value = record.fields[linkField.name];
-      if (!Array.isArray(value)) continue;
-
       const opts = linkField.options as
         | { linkedTableId?: string }
         | undefined;
-      const targetTableId = opts?.linkedTableId;
-      if (!targetTableId) continue;
+      if (opts?.linkedTableId) {
+        collectIds(opts.linkedTableId, record.fields[linkField.name]);
+      }
+    }
+  }
 
-      if (!linkedIdsByTable[targetTableId]) {
-        linkedIdsByTable[targetTableId] = new Set();
-      }
-      for (const id of value) {
-        if (typeof id === "string" && id.startsWith("rec")) {
-          linkedIdsByTable[targetTableId].add(id);
-        }
-      }
+  // 2. multipleLookupValues fields whose result type is multipleRecordLinks
+  //    (e.g. School Year on Students is a lookup that returns linked record IDs)
+  const lookupLinkFields = entityTable.fields.filter(
+    (f) =>
+      f.type === "multipleLookupValues" &&
+      (f.options as any)?.result?.type === "multipleRecordLinks"
+  );
+  for (const lookupField of lookupLinkFields) {
+    const opts = lookupField.options as any;
+    const recordLinkFieldId = opts?.recordLinkFieldId;
+    const fieldIdInLinkedTable = opts?.fieldIdInLinkedTable;
+    if (!recordLinkFieldId || !fieldIdInLinkedTable) continue;
+
+    // Find the link field this lookup goes through
+    const throughLinkField = entityTable.fields.find(
+      (f) => f.id === recordLinkFieldId
+    );
+    if (!throughLinkField || throughLinkField.type !== "multipleRecordLinks")
+      continue;
+
+    const intermediateTableId = (throughLinkField.options as any)?.linkedTableId;
+    if (!intermediateTableId) continue;
+
+    // Find the looked-up field in the intermediate table
+    const intermediateTable = schema.tables.find(
+      (t) => t.id === intermediateTableId
+    );
+    if (!intermediateTable) continue;
+
+    const lookedUpField = intermediateTable.fields.find(
+      (f) => f.id === fieldIdInLinkedTable
+    );
+    if (!lookedUpField) continue;
+
+    let targetTableId: string | undefined;
+
+    if (lookedUpField.type === "multipleRecordLinks") {
+      // Direct link field — target table is straightforward
+      targetTableId = (lookedUpField.options as any)?.linkedTableId;
+    } else if (lookedUpField.type === "multipleLookupValues") {
+      // Nested lookup chain — trace through intermediate lookups
+      // to find the final multipleRecordLinks target table
+      targetTableId =
+        traceNestedLookupToTargetTable(
+          lookedUpField,
+          intermediateTable,
+          schema
+        ) ?? undefined;
+    }
+
+    if (!targetTableId) continue;
+
+    for (const record of Object.values(records)) {
+      collectIds(targetTableId, record.fields[lookupField.name]);
     }
   }
 
@@ -276,6 +333,61 @@ async function resolveLinkedRecordNames(
 
   await Promise.all(fetchPromises);
   return names;
+}
+
+/**
+ * Recursively trace a nested lookup chain to find the final target table ID.
+ * Handles cases like: Students "School Year" (lookup) → Student Truth →
+ * "School Year (from Truth)" (also a lookup!) → Truth → "School Year" (link) → School Year table.
+ * maxDepth prevents infinite loops in case of circular references.
+ */
+function traceNestedLookupToTargetTable(
+  lookupField: { type: string; options?: unknown },
+  currentTable: AirtableTable,
+  schema: AirtableSchema,
+  maxDepth = 5
+): string | null {
+  if (maxDepth <= 0) return null;
+
+  const opts = lookupField.options as any;
+  const recordLinkFieldId = opts?.recordLinkFieldId;
+  const fieldIdInLinkedTable = opts?.fieldIdInLinkedTable;
+  if (!recordLinkFieldId || !fieldIdInLinkedTable) return null;
+
+  // Find the link field this lookup goes through
+  const throughLinkField = currentTable.fields.find(
+    (f) => f.id === recordLinkFieldId
+  );
+  if (!throughLinkField || throughLinkField.type !== "multipleRecordLinks")
+    return null;
+
+  const nextTableId = (throughLinkField.options as any)?.linkedTableId;
+  if (!nextTableId) return null;
+
+  const nextTable = schema.tables.find((t) => t.id === nextTableId);
+  if (!nextTable) return null;
+
+  const nextField = nextTable.fields.find(
+    (f) => f.id === fieldIdInLinkedTable
+  );
+  if (!nextField) return null;
+
+  // If we've reached a direct link field, return its target table
+  if (nextField.type === "multipleRecordLinks") {
+    return (nextField.options as any)?.linkedTableId ?? null;
+  }
+
+  // If it's another lookup, keep tracing recursively
+  if (nextField.type === "multipleLookupValues") {
+    return traceNestedLookupToTargetTable(
+      nextField,
+      nextTable,
+      schema,
+      maxDepth - 1
+    );
+  }
+
+  return null;
 }
 
 /**
@@ -461,6 +573,11 @@ export function extractDisplayFields(
       label: "Grade",
       excludePatterns: [/\(from/i],
     },
+    // School Year (important for student identification — prioritized above less critical fields)
+    {
+      patterns: [/school\s*year/i],
+      label: "School Year",
+    },
     // Gender
     {
       patterns: [/gender/i, /^sex$/i],
@@ -502,11 +619,6 @@ export function extractDisplayFields(
     {
       patterns: [/^state$/i],
       label: "State",
-    },
-    // School Year
-    {
-      patterns: [/school\s*year/i],
-      label: "School Year",
     },
     // Class/Subject
     {
