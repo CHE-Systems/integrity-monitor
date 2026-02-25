@@ -37,6 +37,7 @@ export function IssueDetailPage() {
   const { schema } = useAirtableSchema();
   const [resolvingId, setResolvingId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [metadataCollapsed, setMetadataCollapsed] = useState(true);
   const [confirmModal, setConfirmModal] = useState<{
     isOpen: boolean;
     action: "resolve" | "delete" | null;
@@ -445,6 +446,35 @@ export function IssueDetailPage() {
                 />
               </a>
             </div>
+
+            {Object.keys(metadata).length > 0 && (
+              <div>
+                <button
+                  onClick={() => setMetadataCollapsed(!metadataCollapsed)}
+                  className="flex items-center gap-1.5 text-sm font-medium text-[var(--text-muted)] mb-2 hover:text-[var(--text-main)] transition-colors"
+                >
+                  Additional Metadata
+                  <svg
+                    className={`w-3.5 h-3.5 transition-transform ${
+                      metadataCollapsed ? "" : "rotate-180"
+                    }`}
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                    strokeWidth={2}
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                  </svg>
+                </button>
+                {!metadataCollapsed && (
+                  <div className="rounded-lg border border-[var(--border)] bg-[var(--bg-mid)]/50 p-3">
+                    <pre className="text-xs text-[var(--text-main)] overflow-auto">
+                      {JSON.stringify(metadata, null, 2)}
+                    </pre>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           <div className="space-y-4">
@@ -490,7 +520,7 @@ export function IssueDetailPage() {
             </h3>
             <div className="space-y-2">
               {allDuplicateRecords.map((recordId: string, idx: number) => {
-                const isCurrentRecord = recordId === issue.record_id;
+                const isRecordA = idx === 0;
                 const recordLinks = getAirtableLinksWithFallback(
                   issue.entity,
                   recordId,
@@ -499,22 +529,18 @@ export function IssueDetailPage() {
                 return (
                   <div
                     key={recordId}
-                    className={`rounded-lg border p-3 flex items-center justify-between ${
-                      isCurrentRecord
-                        ? "border-2 border-[var(--brand)] bg-[var(--brand)]/5"
-                        : "border border-[var(--border)] bg-[var(--bg-mid)]/50"
-                    }`}
+                    className="rounded-lg border border-[var(--border)] bg-white p-3 flex items-center justify-between"
                   >
                     <div className="flex items-center gap-3">
-                      {isCurrentRecord ? (
-                        <span className="text-sm font-medium text-[var(--brand)]">
-                          Current Record
-                        </span>
-                      ) : (
-                        <span className="text-sm text-[var(--text-muted)]">
-                          Duplicate #{idx}
-                        </span>
-                      )}
+                      <span
+                        className={`text-xs font-medium px-2 py-0.5 rounded-full ${
+                          isRecordA
+                            ? "bg-[var(--brand)]/10 text-[var(--brand)]"
+                            : "bg-orange-50 text-orange-600"
+                        }`}
+                      >
+                        {isRecordA ? "Record A" : "Record B"}
+                      </span>
                       <a
                         href={recordLinks?.primary || `https://airtable.com`}
                         target="_blank"
@@ -780,18 +806,6 @@ export function IssueDetailPage() {
           </div>
         )}
 
-        {Object.keys(metadata).length > 0 && (
-          <div>
-            <h3 className="text-sm font-medium text-[var(--text-muted)] mb-3">
-              Additional Metadata
-            </h3>
-            <div className="rounded-lg border border-[var(--border)] bg-[var(--bg-mid)]/50 p-4">
-              <pre className="text-xs text-[var(--text-main)] overflow-auto">
-                {JSON.stringify(metadata, null, 2)}
-              </pre>
-            </div>
-          </div>
-        )}
       </div>
 
       {/* Airtable Record Data Cards */}

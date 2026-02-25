@@ -3,13 +3,13 @@ import type { AirtableRecord } from "../hooks/useAirtableRecords";
 import { extractDisplayFields } from "../hooks/useAirtableRecords";
 import { getAirtableLinksWithFallback } from "../utils/airtable";
 import { useAirtableSchema } from "../contexts/AirtableSchemaContext";
-import openInNewTabIcon from "../assets/open_in_new_tab.svg";
+import airtableLogo from "../assets/Airtable-Mark-Color.svg";
 
 interface AirtableRecordCardProps {
   record: AirtableRecord;
   entity: string;
   label?: string;
-  isHighlighted?: boolean;
+  labelColor?: "green" | "orange" | "neutral";
   linkedRecordNames?: Record<string, string>;
 }
 
@@ -22,7 +22,7 @@ export function AirtableRecordCard({
   record,
   entity,
   label,
-  isHighlighted = false,
+  labelColor = "neutral",
   linkedRecordNames,
 }: AirtableRecordCardProps) {
   const { schema } = useAirtableSchema();
@@ -56,24 +56,21 @@ export function AirtableRecordCard({
     return null;
   }, [record.createdTime]);
 
+  const labelColorClasses =
+    labelColor === "green"
+      ? "bg-[var(--brand)]/10 text-[var(--brand)]"
+      : labelColor === "orange"
+      ? "bg-orange-50 text-orange-600"
+      : "bg-[var(--bg-mid)] text-[var(--text-muted)]";
+
   return (
-    <div
-      className={`rounded-xl border p-4 ${
-        isHighlighted
-          ? "border-2 border-[var(--brand)] bg-[var(--brand)]/5"
-          : "border-[var(--border)] bg-white"
-      }`}
-    >
+    <div className="rounded-xl border border-[var(--border)] bg-white p-4">
       {/* Header */}
       <div className="flex items-center justify-between mb-3 pb-2 border-b border-[var(--border)]">
         <div className="flex items-center gap-2">
           {label && (
             <span
-              className={`text-xs font-medium px-2 py-0.5 rounded-full ${
-                isHighlighted
-                  ? "bg-[var(--brand)]/10 text-[var(--brand)]"
-                  : "bg-[var(--bg-mid)] text-[var(--text-muted)]"
-              }`}
+              className={`text-xs font-medium px-2 py-0.5 rounded-full ${labelColorClasses}`}
             >
               {label}
             </span>
@@ -86,18 +83,10 @@ export function AirtableRecordCard({
           href={airtableLink.primary}
           target="_blank"
           rel="noopener noreferrer"
-          className="text-xs text-[var(--cta-blue)] hover:underline inline-flex items-center gap-1"
+          className="shrink-0 inline-flex items-center gap-2 px-3.5 py-2 rounded-lg bg-[#2D7FF9]/10 border border-[#2D7FF9]/25 text-xs font-semibold text-[#2D7FF9] hover:bg-[#2D7FF9]/20 transition-colors"
         >
-          View in Airtable
-          <img
-            src={openInNewTabIcon}
-            alt="Open in new tab"
-            className="w-3 h-3"
-            style={{
-              filter:
-                "brightness(0) saturate(100%) invert(27%) sepia(96%) saturate(2598%) hue-rotate(210deg) brightness(97%) contrast(95%)",
-            }}
-          />
+          <img src={airtableLogo} alt="Airtable" className="w-4 h-4" />
+          Open in Airtable
         </a>
       </div>
 
@@ -218,6 +207,21 @@ export function AirtableRecordCards({
     );
   }
 
+  // Determine labels for duplicate records: "Record A" (green) / "Record B" (orange)
+  // For non-duplicate issues, no labels
+  const getRecordLabel = (
+    recordId: string,
+    idx: number
+  ): { label?: string; labelColor: "green" | "orange" | "neutral" } => {
+    if (!isDuplicate) return { labelColor: "neutral" };
+
+    // First record is "Record A" (green), second is "Record B" (orange)
+    if (idx === 0 || recordId === currentRecordId) {
+      return { label: "Record A", labelColor: "green" };
+    }
+    return { label: "Record B", labelColor: "orange" };
+  };
+
   return (
     <div className="rounded-xl border border-[var(--border)] bg-white p-6">
       <h3
@@ -249,12 +253,7 @@ export function AirtableRecordCards({
             );
           }
 
-          const isCurrentRecord = recordId === currentRecordId;
-          const label = isDuplicate
-            ? isCurrentRecord
-              ? "Current Record"
-              : `Duplicate #${idx + 1}`
-            : undefined;
+          const { label, labelColor } = getRecordLabel(recordId, idx);
 
           return (
             <AirtableRecordCard
@@ -262,7 +261,7 @@ export function AirtableRecordCards({
               record={record}
               entity={entity}
               label={label}
-              isHighlighted={isCurrentRecord}
+              labelColor={labelColor}
               linkedRecordNames={linkedRecordNames}
             />
           );

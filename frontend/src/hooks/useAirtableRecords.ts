@@ -250,11 +250,24 @@ async function resolveLinkedRecordNames(
     const lookedUpField = intermediateTable.fields.find(
       (f) => f.id === fieldIdInLinkedTable
     );
-    if (!lookedUpField || lookedUpField.type !== "multipleRecordLinks")
-      continue;
+    if (!lookedUpField) continue;
 
-    // The target table is where the looked-up link field points
-    const targetTableId = (lookedUpField.options as any)?.linkedTableId;
+    let targetTableId: string | undefined;
+
+    if (lookedUpField.type === "multipleRecordLinks") {
+      // Direct link field — target table is straightforward
+      targetTableId = (lookedUpField.options as any)?.linkedTableId;
+    } else if (lookedUpField.type === "multipleLookupValues") {
+      // Nested lookup chain — trace through intermediate lookups
+      // to find the final multipleRecordLinks target table
+      targetTableId =
+        traceNestedLookupToTargetTable(
+          lookedUpField,
+          intermediateTable,
+          schema
+        ) ?? undefined;
+    }
+
     if (!targetTableId) continue;
 
     for (const record of Object.values(records)) {
@@ -320,6 +333,61 @@ async function resolveLinkedRecordNames(
 
   await Promise.all(fetchPromises);
   return names;
+}
+
+/**
+ * Recursively trace a nested lookup chain to find the final target table ID.
+ * Handles cases like: Students "School Year" (lookup) → Student Truth →
+ * "School Year (from Truth)" (also a lookup!) → Truth → "School Year" (link) → School Year table.
+ * maxDepth prevents infinite loops in case of circular references.
+ */
+function traceNestedLookupToTargetTable(
+  lookupField: { type: string; options?: unknown },
+  currentTable: AirtableTable,
+  schema: AirtableSchema,
+  maxDepth = 5
+): string | null {
+  if (maxDepth <= 0) return null;
+
+  const opts = lookupField.options as any;
+  const recordLinkFieldId = opts?.recordLinkFieldId;
+  const fieldIdInLinkedTable = opts?.fieldIdInLinkedTable;
+  if (!recordLinkFieldId || !fieldIdInLinkedTable) return null;
+
+  // Find the link field this lookup goes through
+  const throughLinkField = currentTable.fields.find(
+    (f) => f.id === recordLinkFieldId
+  );
+  if (!throughLinkField || throughLinkField.type !== "multipleRecordLinks")
+    return null;
+
+  const nextTableId = (throughLinkField.options as any)?.linkedTableId;
+  if (!nextTableId) return null;
+
+  const nextTable = schema.tables.find((t) => t.id === nextTableId);
+  if (!nextTable) return null;
+
+  const nextField = nextTable.fields.find(
+    (f) => f.id === fieldIdInLinkedTable
+  );
+  if (!nextField) return null;
+
+  // If we've reached a direct link field, return its target table
+  if (nextField.type === "multipleRecordLinks") {
+    return (nextField.options as any)?.linkedTableId ?? null;
+  }
+
+  // If it's another lookup, keep tracing recursively
+  if (nextField.type === "multipleLookupValues") {
+    return traceNestedLookupToTargetTable(
+      nextField,
+      nextTable,
+      schema,
+      maxDepth - 1
+    );
+  }
+
+  return null;
 }
 
 /**
@@ -505,6 +573,11 @@ export function extractDisplayFields(
       label: "Grade",
       excludePatterns: [/\(from/i],
     },
+    // School Year (important for student identification — prioritized above less critical fields)
+    {
+      patterns: [/school\s*year/i],
+      label: "School Year",
+    },
     // Gender
     {
       patterns: [/gender/i, /^sex$/i],
@@ -546,11 +619,6 @@ export function extractDisplayFields(
     {
       patterns: [/^state$/i],
       label: "State",
-    },
-    // School Year
-    {
-      patterns: [/school\s*year/i],
-      label: "School Year",
     },
     // Class/Subject
     {
