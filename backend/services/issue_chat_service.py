@@ -69,9 +69,14 @@ FETCH_RECORDS_TOOL = {
             "Fetch field-level data (like campus, school year, grade, status, etc.) "
             "for records in a specific entity. Use this when the user asks about "
             "record attributes that are not available in the issue summary. "
-            "Returns distributions of field values across all matching records. "
-            "IMPORTANT: Call get_entity_fields first if you are unsure which field "
-            "names to look for in the results."
+            "Returns TWO things: (1) 'records' — an array of individual record "
+            "objects with their actual field values (use this for building tables), "
+            "and (2) 'field_distributions' — aggregate value counts for pattern "
+            "analysis. IMPORTANT: When building a table of records, ALWAYS use the "
+            "'records' array so each row has the correct values for that specific "
+            "record. NEVER reuse or fabricate values across rows. "
+            "Call get_entity_fields first if you are unsure which field names to "
+            "look for in the results."
         ),
         "parameters": {
             "type": "object",
@@ -106,12 +111,14 @@ You have access to two tools:
 
 1. **get_entity_fields** — Returns the Airtable field names and types for a table. Call this FIRST when the user asks about record attributes (school year, campus, grade, enrollment, etc.) so you know exactly which field names to look for. This prevents misinterpreting the data.
 
-2. **fetch_record_details** — Fetches actual record data and returns field value distributions. Use this when the user asks about record-level attributes not in the issue summary.
+2. **fetch_record_details** — Fetches actual record data and returns TWO things:
+   - **records**: An array of individual record objects with their actual per-record field values. ALWAYS use this when building tables so each row has correct data.
+   - **field_distributions**: Aggregate value counts useful for pattern analysis and breakdowns.
 
 IMPORTANT WORKFLOW: When the user asks about specific record attributes:
 1. First call get_entity_fields to learn the exact field names
 2. Then call fetch_record_details to get the data
-3. Use the field names from step 1 to correctly interpret the distributions from step 2
+3. Use the field names from step 1 to correctly interpret the data from step 2
 
 Do NOT call tools for questions that can be answered from the issue summary alone.
 
@@ -122,6 +129,12 @@ FORMATTING RULES:
 - Use bold for emphasis in headings and key takeaways.
 - Use bullet lists only for short qualitative notes or recommendations, not for data breakdowns.
 - Keep tables compact — use short column headers.
+
+CRITICAL TABLE ACCURACY RULE:
+- When building a table of individual records, you MUST use the 'records' array from fetch_record_details.
+- Each row in your table MUST correspond to one specific record from the array.
+- NEVER reuse, duplicate, or fabricate field values across rows. Each cell must come from that specific record's data.
+- If a field is missing for a record, use "—" or leave it blank. Do NOT copy a value from another record.
 
 ISSUE DATA SUMMARY:
 {issue_context}"""
@@ -423,11 +436,13 @@ class IssueChatService:
             )
 
             distributions = self._build_field_distributions(all_records)
+            record_rows = self._build_record_rows(all_records)
 
             return json.dumps({
                 "entity": entity,
                 "total_records_fetched": len(all_records),
                 "total_records_available": len(record_ids),
+                "records": record_rows,
                 "field_distributions": distributions,
             })
 
@@ -452,6 +467,37 @@ class IssueChatService:
         normalized = entity_mapping.get(entity_lower, entity_lower)
         env_key = f"AIRTABLE_{normalized.upper()}_TABLE"
         return os.getenv(env_key) or os.getenv(f"AT_{normalized.upper()}_TABLE")
+
+    # ------------------------------------------------------------------
+    # Per-record row builder (for accurate table generation)
+    # ------------------------------------------------------------------
+
+    def _build_record_rows(
+        self, records: List[Dict[str, Any]], max_records: int = 100
+    ) -> List[Dict[str, str]]:
+        """Build per-record data so GPT can generate accurate tables.
+
+        Returns a list of dicts, each mapping field_name -> display_value
+        for one record. This ensures GPT has the actual per-record values
+        rather than only aggregate distributions.
+        """
+        rows = []
+        for record in records[:max_records]:
+            fields = record.get("fields", {})
+            row: Dict[str, str] = {}
+
+            for field_name, value in fields.items():
+                if self._should_skip_field(field_name):
+                    continue
+
+                display = self._normalize_field_value(value)
+                if display is not None:
+                    row[field_name] = display
+
+            if row:
+                rows.append(row)
+
+        return rows
 
     # ------------------------------------------------------------------
     # Field distribution helpers
