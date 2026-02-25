@@ -17,13 +17,22 @@ interface DuplicateMergeViewProps {
 
 type FieldSelection = Record<string, "primary" | "secondary" | "both">;
 
-function formatValue(value: unknown): string {
+function formatValue(value: unknown, linkedRecordNames?: Record<string, string>): string {
   if (value === null || value === undefined || value === "") return "(empty)";
   if (typeof value === "boolean") return value ? "Yes" : "No";
   if (typeof value === "number") return String(value);
   if (Array.isArray(value)) {
     if (value.length === 0) return "(empty)";
     if (typeof value[0] === "string" && value[0].startsWith("rec")) {
+      if (linkedRecordNames) {
+        const resolved = value
+          .map((id) => (typeof id === "string" ? linkedRecordNames[id] : undefined))
+          .filter(Boolean) as string[];
+        if (resolved.length > 0) {
+          if (resolved.length <= 3) return resolved.join(", ");
+          return `${resolved.slice(0, 2).join(", ")} + ${resolved.length - 2} more`;
+        }
+      }
       return `${value.length} linked record${value.length > 1 ? "s" : ""}`;
     }
     return value.slice(0, 5).join(", ") + (value.length > 5 ? "..." : "");
@@ -108,6 +117,7 @@ export function DuplicateMergeView({
   );
   const {
     records,
+    linkedRecordNames,
     loading: recordsLoading,
     error: recordsError,
     refetch,
@@ -684,7 +694,7 @@ export function DuplicateMergeView({
                                   f.pEmpty ? "italic text-gray-400" : "text-[var(--text-main)]"
                                 } ${!f.isComputed && isPrimarySelected ? "font-medium" : ""}`}
                               >
-                                {formatValue(f.pVal)}
+                                {formatValue(f.pVal, linkedRecordNames)}
                               </span>
                               {!f.isComputed && (
                                 <button
@@ -715,7 +725,7 @@ export function DuplicateMergeView({
                                     f.sEmpty ? "italic text-gray-400" : "text-[var(--text-main)]"
                                   } ${!f.isComputed && isSecondarySelected ? "font-medium" : ""}`}
                                 >
-                                  {formatValue(f.sVal)}
+                                  {formatValue(f.sVal, linkedRecordNames)}
                                 </span>
                                 {!f.isComputed && (
                                   <button
@@ -789,7 +799,7 @@ export function DuplicateMergeView({
                         {f.key}
                       </td>
                       <td colSpan={2} className="px-4 py-2 text-xs text-[var(--text-muted)]">
-                        {formatValue(f.pVal)}
+                        {formatValue(f.pVal, linkedRecordNames)}
                       </td>
                     </tr>
                   ))}
@@ -843,7 +853,7 @@ export function DuplicateMergeView({
                           : "text-[var(--text-main)]"
                     }`}
                   >
-                    {formatValue(val)}
+                    {formatValue(val, linkedRecordNames)}
                     {isCombined ? " (combined)" : changed ? " (changed)" : ""}
                   </span>
                 </div>
