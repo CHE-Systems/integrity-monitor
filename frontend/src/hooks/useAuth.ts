@@ -1,7 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import type { User } from "firebase/auth";
 import {
-  signInWithEmailAndPassword,
   signOut as firebaseSignOut,
   onAuthStateChanged,
   GoogleAuthProvider,
@@ -90,20 +89,6 @@ export function useAuth() {
     return () => unsubscribe();
   }, []);
 
-  const signIn = async (email: string, password: string) => {
-    try {
-      setState((prev) => ({ ...prev, loading: true, error: null }));
-      await signInWithEmailAndPassword(auth, email, password);
-    } catch (error) {
-      setState((prev) => ({
-        ...prev,
-        loading: false,
-        error: error instanceof Error ? error.message : "Sign in failed",
-      }));
-      throw error;
-    }
-  };
-
   const signInWithGoogle = async () => {
     try {
       setState((prev) => ({ ...prev, loading: true, error: null }));
@@ -152,7 +137,6 @@ export function useAuth() {
 
   return {
     ...state,
-    signIn,
     signInWithGoogle,
     signInWithDevToken,
     signOut,

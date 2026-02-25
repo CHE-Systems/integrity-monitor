@@ -1,23 +1,19 @@
 import { useState, useEffect } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { useAuth } from "../hooks/useAuth";
+import { API_BASE } from "../config/api";
 
 export function LoginPage() {
   const {
-    signIn,
     signInWithGoogle,
     signInWithDevToken,
-    signOut,
     error: authError,
     loading,
     user,
   } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [isAutoAttempt, setIsAutoAttempt] = useState(false);
 
   // Redirect if already authenticated
   useEffect(() => {
@@ -26,24 +22,6 @@ export function LoginPage() {
       navigate(from, { replace: true });
     }
   }, [user, navigate, location]);
-
-  const handleEmailSignIn = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError(null);
-    
-    // Validate @che.school email
-    if (!email.endsWith("@che.school")) {
-      setError("This application is only available to users with @che.school email addresses.");
-      return;
-    }
-    
-    try {
-      await signIn(email, password);
-      // Navigation will happen via useEffect when user state updates
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Sign in failed");
-    }
-  };
 
   const handleGoogleSignIn = async () => {
     setError(null);
@@ -57,11 +35,6 @@ export function LoginPage() {
   };
 
   const handleDevSignIn = async (isManual = false) => {
-    if (!isManual) {
-      setIsAutoAttempt(true);
-    } else {
-      setIsAutoAttempt(false);
-    }
     setError(null);
     try {
       const response = await fetch(
@@ -117,62 +90,11 @@ export function LoginPage() {
           Please sign in to access the Integrity Monitor dashboard.
         </p>
         <div className="space-y-4">
-          <form onSubmit={handleEmailSignIn} className="space-y-4">
-            <div>
-              <label
-                htmlFor="email"
-                className="block text-sm font-medium text-[var(--text-main)] mb-1"
-              >
-                Email
-              </label>
-              <input
-                id="email"
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                required
-                className="w-full rounded-lg border border-[var(--border)] px-3 py-2 text-[var(--text-main)]"
-                placeholder="your@email.com"
-              />
+          {(error || authError) && (
+            <div className="rounded-lg bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">
+              {error || authError}
             </div>
-            <div>
-              <label
-                htmlFor="password"
-                className="block text-sm font-medium text-[var(--text-main)] mb-1"
-              >
-                Password
-              </label>
-              <input
-                id="password"
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-                className="w-full rounded-lg border border-[var(--border)] px-3 py-2 text-[var(--text-main)]"
-                placeholder="••••••••"
-              />
-            </div>
-            {(error || authError) && (
-              <div className="rounded-lg bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">
-                {error || authError}
-              </div>
-            )}
-            <button
-              type="submit"
-              disabled={isLoading}
-              className="w-full rounded-full bg-[var(--brand)] px-4 py-2 font-medium text-white disabled:opacity-50"
-            >
-              {isLoading ? "Signing in..." : "Sign In"}
-            </button>
-          </form>
-          <div className="relative">
-            <div className="absolute inset-0 flex items-center">
-              <div className="w-full border-t border-[var(--border)]"></div>
-            </div>
-            <div className="relative flex justify-center text-xs uppercase">
-              <span className="bg-white px-2 text-[var(--text-muted)]">Or</span>
-            </div>
-          </div>
+          )}
           <button
             onClick={handleGoogleSignIn}
             disabled={isLoading}

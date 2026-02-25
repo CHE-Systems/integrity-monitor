@@ -87,6 +87,18 @@ class ContractorRecord:
 
 
 @dataclass
+class StudentTruthRecord:
+    record_id: str
+    student_id: str
+    school_year: str
+    campus: str
+    name: str
+    normalized_name: str
+    dob: Optional[date]
+    enrollment_status: str
+
+
+@dataclass
 class PairMatch:
     entity: str
     primary_id: str
@@ -275,7 +287,31 @@ def run(
             "rule_issues": {rid: all_rule_issues.get(rid, 0) for rid in contractor_rule_ids} if contractor_rule_ids else {},
         }
     )
-    
+
+    student_truth_dup_def = dup_config.get("student_truth")
+    student_truth_rule_ids = []
+    if student_truth_dup_def:
+        student_truth_rule_ids.extend([r.rule_id for r in (student_truth_dup_def.likely or [])])
+        student_truth_rule_ids.extend([r.rule_id for r in (student_truth_dup_def.possible or [])])
+        all_rule_issues.update({rule_id: 0 for rule_id in student_truth_rule_ids})
+
+    student_truth_records = records.get("student_truth", [])
+    console_log("info", f"Processing student_truth - records: {len(student_truth_records)}, dup_def_is_none: {student_truth_dup_def is None}")
+    student_truth_issues = _process_student_truths(student_truth_records, student_truth_dup_def, run_id=run_id, firestore_writer=firestore_writer)
+    issues.extend(student_truth_issues)
+    for issue in student_truth_issues:
+        if issue.rule_id in all_rule_issues:
+            all_rule_issues[issue.rule_id] += 1
+    logger.info(
+        "Duplicates check: student_truth completed",
+        extra={
+            "category": "duplicates",
+            "entity": "student_truth",
+            "issues_found": len(student_truth_issues),
+            "rule_issues": {rid: all_rule_issues.get(rid, 0) for rid in student_truth_rule_ids} if student_truth_rule_ids else {},
+        }
+    )
+
     logger.info(
         "Duplicates check: completed",
         extra={
@@ -283,7 +319,7 @@ def run(
             "total_issues": len(issues),
         }
     )
-    
+
     return issues
 
 
@@ -551,6 +587,80 @@ def _normalize_contractors(records: Iterable[dict]) -> Dict[str, ContractorRecor
     return normalized
 
 
+def _normalize_student_truths(records: Iterable[dict]) -> Dict[str, StudentTruthRecord]:
+    normalized: Dict[str, StudentTruthRecord] = {}
+    for record in records:
+        record_id = record.get("id")
+        fields = record.get("fields", {})
+        if not record_id:
+            continue
+        # "Student" - multipleRecordLinks (array of linked student record IDs)
+        student_raw = _extract_field(
+            fields,
+            "Student",
+            "fld0dyhagyffdUXL6",
+            "student",
+        )
+        if isinstance(student_raw, list):
+            student_id = str(student_raw[0]).strip() if student_raw else ""
+        else:
+            student_id = str(student_raw or "").strip()
+        # "Last, First, Middle Name" - formula field (plain text)
+        full_name = str(_extract_field(
+            fields,
+            "Last, First, Middle Name",
+            "fld5elEqYC2y7ZgUV",
+            "name",
+        ) or "").strip()
+        normalized_name = normalize_name(full_name)
+        # "School Year" - formula field (plain text)
+        school_year = str(_extract_field(
+            fields,
+            "School Year",
+            "fldpagtV48mBEGUT7",
+            "school_year",
+        ) or "").strip()
+        # "Campus (from Truth)" - multipleLookupValues (returns array)
+        campus_raw = _extract_field(
+            fields,
+            "Campus (from Truth)",
+            "fld1m9RJiL8EqUFCd",
+            "campus",
+        )
+        if isinstance(campus_raw, list):
+            campus = str(campus_raw[0]).strip() if campus_raw else ""
+        else:
+            campus = str(campus_raw or "").strip()
+        # "Student's Birthdate (from Student)" - multipleLookupValues (returns array of dates)
+        dob_raw = _extract_field(
+            fields,
+            "Student's Birthdate (from Student)",
+            "fldWvaET7Lu3g06tO",
+            "dob", "date_of_birth",
+        )
+        if isinstance(dob_raw, list):
+            dob = _parse_dob(dob_raw[0] if dob_raw else None)
+        else:
+            dob = _parse_dob(dob_raw)
+        enrollment_status = str(_extract_field(
+            fields,
+            "Status of Enrollment",
+            "fld7vz1KYGYM3Q4qd",
+            "enrollment_status",
+        ) or "").strip()
+        normalized[record_id] = StudentTruthRecord(
+            record_id=record_id,
+            student_id=student_id,
+            school_year=school_year,
+            campus=campus,
+            name=full_name,
+            normalized_name=normalized_name,
+            dob=dob,
+            enrollment_status=enrollment_status,
+        )
+    return normalized
+
+
 # ---------------------------------------------------------------------------
 # Duplicate detection per entity
 # ---------------------------------------------------------------------------
@@ -655,6 +765,48 @@ def _process_contractors(
     return _build_group_issues("contractor", normalized, pairs)
 
 
+def _process_student_truths(
+    raw_records: List[dict],
+    dup_def: Optional[DuplicateDefinition] = None,
+    run_id: Optional[str] = None,
+    firestore_writer=None,
+) -> List[IssuePayload]:
+    def console_log(level: str, message: str):
+        if level == "info":
+            logger.info(message)
+        elif level == "warning":
+            logger.warning(message)
+        elif level == "error":
+            logger.error(message)
+        if run_id and firestore_writer:
+            try:
+                firestore_writer.write_log(run_id, level, f"[DUPLICATES] {message}")
+            except Exception:
+                pass
+
+    normalized = _normalize_student_truths(raw_records)
+
+    has_student_id = sum(1 for r in normalized.values() if r.student_id)
+    has_name = sum(1 for r in normalized.values() if r.normalized_name)
+    has_year = sum(1 for r in normalized.values() if r.school_year)
+    has_campus = sum(1 for r in normalized.values() if r.campus)
+    has_dob = sum(1 for r in normalized.values() if r.dob)
+    has_enrollment = sum(1 for r in normalized.values() if r.enrollment_status)
+    unsure_count = sum(1 for r in normalized.values() if r.enrollment_status == "Unsure")
+    console_log("info", f"Student Truth normalization: {len(normalized)} total, {has_student_id} with student_id, {has_name} with name, {has_year} with school_year, {has_campus} with campus, {has_dob} with DOB, {has_enrollment} with enrollment_status ({unsure_count} Unsure)")
+
+    has_rules = dup_def and ((dup_def.likely and len(dup_def.likely) > 0) or (dup_def.possible and len(dup_def.possible) > 0))
+    if has_rules:
+        console_log("info", f"Using rule-based classifier with {len(dup_def.likely or [])} likely, {len(dup_def.possible or [])} possible rules")
+        classifier = lambda a, b: _classify_pair(a, b, "student_truth", dup_def)
+    else:
+        console_log("warning", "No duplicate rules found for student_truth - skipping")
+        return []
+    pairs = _detect_pairs(normalized, classifier, console_log)
+    console_log("info", f"Student Truth duplicate detection found {len(pairs)} pairs from {len(normalized)} records")
+    return _build_group_issues("student_truth", normalized, pairs)
+
+
 def _detect_pairs(
     normalized: Dict[str, Any],
     classifier: Callable[[Any, Any], Optional[PairMatch]],
@@ -737,6 +889,10 @@ def _compute_blocks(record: Any) -> List[str]:
             keys.append(f"c:email:{record.normalized_email}")
         if record.normalized_phone:
             keys.append(f"c:phone:{record.normalized_phone}")
+    elif isinstance(record, StudentTruthRecord):
+        # Block by normalized_name + DOB — catch duplicates across different student records
+        if record.normalized_name and record.dob:
+            keys.append(f"st:{record.normalized_name}:{record.dob}")
     return keys
 
 
@@ -806,7 +962,7 @@ def _evaluate_rule(
         secondary_id=record_b.record_id,
         rule_id=rule.rule_id,
         match_type=match_type,
-        severity=rule.severity or (LIKELY_SEVERITY if match_type == "likely" else POSSIBLE_SEVERITY),
+        severity=rule.severity if rule.severity in ("critical", "warning", "info") else (LIKELY_SEVERITY if match_type == "likely" else POSSIBLE_SEVERITY),
         confidence=round(confidence, 3),
         evidence=all_evidence,
     )
@@ -1094,6 +1250,8 @@ def _select_primary(entity: str, members: Set[str], normalized: Dict[str, Any]) 
         if isinstance(record, ContractorRecord):
             # Removed: ein and campuses - no longer used for duplicate detection
             return sum(bool(value) for value in [record.email, record.phone])
+        if isinstance(record, StudentTruthRecord):
+            return sum(bool(value) for value in [record.student_id, record.name, record.school_year, record.campus, record.dob, record.enrollment_status])
         return 0
 
     return max(members, key=lambda record_id: (completeness(normalized[record_id]), record_id))

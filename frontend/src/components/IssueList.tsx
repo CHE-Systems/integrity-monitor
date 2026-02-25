@@ -1,16 +1,18 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import type { IssueFilters } from "../hooks/useFirestoreIssues";
-import { useFirestoreIssues } from "../hooks/useFirestoreIssues";
+import type { IssueFilters, Issue } from "../hooks/useFirestoreIssues";
+import { useFirestoreIssues, fetchAllIssues } from "../hooks/useFirestoreIssues";
 import { useIssueCounts } from "../hooks/useIssueCounts";
 import { useIssueActions } from "../hooks/useIssueActions";
 import { useAuth } from "../hooks/useAuth";
 import { getAirtableLinksWithFallback } from "../utils/airtable";
 import { useAirtableSchema } from "../contexts/AirtableSchemaContext";
+import { useRecordDisplayNames } from "../hooks/useRecordDisplayNames";
 import { formatRuleId } from "../utils/ruleFormatter";
 import { ACTIVE_ENTITIES, ENTITY_TABLE_MAPPING } from "../config/entities";
 import ConfirmModal from "./ConfirmModal";
 import { Pagination } from "./Pagination";
+import { IssueChatPanel } from "./IssueChatPanel";
 import openInNewTabIcon from "../assets/open_in_new_tab.svg";
 import arrowLeftIcon from "../assets/keyboard_arrow_left.svg";
 import arrowRightIcon from "../assets/keyboard_arrow_right.svg";
@@ -41,6 +43,9 @@ export function IssueList({
   );
   const [search, setSearch] = useState("");
   const [pageInput, setPageInput] = useState("");
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatIssues, setChatIssues] = useState<Issue[]>([]);
+  const [chatLoading, setChatLoading] = useState(false);
 
   // Track if we're filtering by run_id (from RunStatusPage)
   const isRunSpecificView = Boolean(initialFilters?.run_id);
@@ -123,6 +128,13 @@ export function IssueList({
     ? Math.min(startIndex + itemsPerPage, totalItems)
     : 0;
 
+  // Stable reference for record display name lookups
+  const issueEntries = useMemo(
+    () => issues.map((i) => ({ record_id: i.record_id, entity: i.entity })),
+    [issues]
+  );
+  const recordDisplayNames = useRecordDisplayNames(issueEntries);
+
   const {
     markResolved,
     deleteIssue,
@@ -182,6 +194,22 @@ export function IssueList({
   const handleSearch = (value: string) => {
     setSearch(value);
   };
+
+  const handleOpenChat = useCallback(async () => {
+    setChatOpen(true);
+    setChatLoading(true);
+    try {
+      // Fetch all issues matching current filters (up to 500) for complete context
+      const allIssues = await fetchAllIssues({ ...filters, search });
+      setChatIssues(allIssues);
+    } catch (err) {
+      console.error("[IssueList] Failed to fetch issues for chat:", err);
+      // Fall back to currently loaded page of issues
+      setChatIssues(issues);
+    } finally {
+      setChatLoading(false);
+    }
+  }, [filters, search, issues]);
 
   const getSeverityColor = (severity: string) => {
     switch (severity) {
@@ -283,6 +311,19 @@ export function IssueList({
             </option>
           ))}
         </select>
+        <button
+          onClick={handleOpenChat}
+          disabled={issues.length === 0}
+          className="flex items-center gap-1.5 rounded-lg border border-[var(--brand)] bg-[var(--brand)]/5 px-3 py-2 text-sm text-[var(--brand)] hover:bg-[var(--brand)]/15 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          title="Ask AI about these issues"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 2L2 7l10 5 10-5-10-5z" />
+            <path d="M2 17l10 5 10-5" />
+            <path d="M2 12l10 5 10-5" />
+          </svg>
+          Ask AI
+        </button>
       </div>
 
       {/* Pagination */}
@@ -489,35 +530,42 @@ export function IssueList({
                           {issue.severity}
                         </span>
                       </td>
-                      <td className="px-4 py-3 font-mono text-xs">
-                        {airtableLinks?.primary ? (
-                          <a
-                            href={airtableLinks.primary}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            onClick={(e) => e.stopPropagation()}
-                            className="text-[var(--cta-blue)] hover:underline cursor-pointer inline-flex items-center gap-1"
-                            title={`Open ${issue.record_id} in Airtable (${issue.entity})`}
-                          >
-                            {issue.record_id}
-                            <img
-                              src={openInNewTabIcon}
-                              alt="Open in new tab"
-                              className="w-3 h-3 inline-block"
-                              style={{
-                                filter:
-                                  "brightness(0) saturate(100%) invert(27%) sepia(96%) saturate(2598%) hue-rotate(210deg) brightness(97%) contrast(95%)",
-                              }}
-                            />
-                          </a>
-                        ) : (
-                          <span
-                            className="text-[var(--text-muted)]"
-                            title={`Entity: ${issue.entity} - No Airtable mapping configured`}
-                          >
-                        {issue.record_id}
-                          </span>
+                      <td className="px-4 py-3">
+                        {recordDisplayNames[issue.record_id] && (
+                          <div className="text-sm font-medium text-[var(--text-main)] mb-0.5 truncate max-w-[200px]">
+                            {recordDisplayNames[issue.record_id]}
+                          </div>
                         )}
+                        <div className="font-mono text-xs">
+                          {airtableLinks?.primary ? (
+                            <a
+                              href={airtableLinks.primary}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              onClick={(e) => e.stopPropagation()}
+                              className="text-[var(--cta-blue)] hover:underline cursor-pointer inline-flex items-center gap-1"
+                              title={`Open ${issue.record_id} in Airtable (${issue.entity})`}
+                            >
+                              {issue.record_id}
+                              <img
+                                src={openInNewTabIcon}
+                                alt="Open in new tab"
+                                className="w-3 h-3 inline-block"
+                                style={{
+                                  filter:
+                                    "brightness(0) saturate(100%) invert(27%) sepia(96%) saturate(2598%) hue-rotate(210deg) brightness(97%) contrast(95%)",
+                                }}
+                              />
+                            </a>
+                          ) : (
+                            <span
+                              className="text-[var(--text-muted)]"
+                              title={`Entity: ${issue.entity} - No Airtable mapping configured`}
+                            >
+                              {issue.record_id}
+                            </span>
+                          )}
+                        </div>
                       </td>
                       <td className="px-4 py-3 text-right text-xs text-[var(--text-muted)]">
                         {formatAge(issue.created_at)}
@@ -588,6 +636,12 @@ export function IssueList({
         onCancel={() =>
           setConfirmModal({ isOpen: false, issueId: null, action: null })
         }
+      />
+
+      <IssueChatPanel
+        isOpen={chatOpen}
+        onClose={() => setChatOpen(false)}
+        issues={chatLoading ? [] : chatIssues}
       />
     </div>
   );

@@ -901,7 +901,7 @@ class IntegrityRunner:
                     
                     self._firestore_writer.write_log(run_id, "info", "Calculating issue summary...")
                     summary = scorer.summarize(merged)
-                    self._firestore_writer.write_log(run_id, "info", f"Prepared {len(merged)} total issues for writing")
+                    self._firestore_writer.write_log(run_id, "info", f"Prepared {len(merged)} total issues for writing | summary={summary}")
             except Exception as exc:
                 logger.error("Check execution failed catastrophically", extra={"run_id": run_id}, exc_info=True)
                 failed_checks.append("all")

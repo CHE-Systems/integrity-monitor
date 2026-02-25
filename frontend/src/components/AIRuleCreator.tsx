@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useRules } from "../hooks/useRules";
 import { ACTIVE_ENTITIES, ENTITY_TABLE_MAPPING } from "../config/entities";
+import { ConditionBuilder, cleanConditionsForSave, type Condition } from "./ConditionBuilder";
 
 interface AIRuleCreatorProps {
   isOpen: boolean;
@@ -36,6 +37,12 @@ export function AIRuleCreator({
   const [editableRuleData, setEditableRuleData] = useState<string>("");
   const [editableEntity, setEditableEntity] = useState<string>("");
   const [jsonError, setJsonError] = useState<string | null>(null);
+  // Duplicate-specific editable fields
+  const [editableConditions, setEditableConditions] = useState<Condition[]>([]);
+  const [editableRuleId, setEditableRuleId] = useState("");
+  const [editableDescription, setEditableDescription] = useState("");
+  const [editableSeverity, setEditableSeverity] = useState("warning");
+  const [showRawJson, setShowRawJson] = useState(false);
 
   if (!isOpen) return null;
 
@@ -63,6 +70,14 @@ export function AIRuleCreator({
       setEditableRuleData(JSON.stringify(result.rule_data || {}, null, 2));
       setEditableEntity(!autoDetectEntity && entityHint ? entityHint : result.entity || "");
       setJsonError(null);
+      // Initialize duplicate-specific fields
+      if (result.category === "duplicates" && result.rule_data) {
+        setEditableConditions(result.rule_data.conditions || []);
+        setEditableRuleId(result.rule_data.rule_id || "");
+        setEditableDescription(result.rule_data.description || "");
+        setEditableSeverity(result.rule_data.severity || "likely");
+      }
+      setShowRawJson(false);
     } catch (err) {
       setParseError(
         err instanceof Error ? err.message : "Failed to parse rule"
@@ -72,16 +87,6 @@ export function AIRuleCreator({
 
   const handleUseRule = () => {
     if (!parsedRule) return;
-
-    // Validate JSON
-    let parsedRuleData;
-    try {
-      parsedRuleData = JSON.parse(editableRuleData);
-      setJsonError(null);
-    } catch (err) {
-      setJsonError("Invalid JSON format. Please fix the syntax errors.");
-      return;
-    }
 
     // Validate category
     if (!editableCategory.trim()) {
@@ -95,12 +100,49 @@ export function AIRuleCreator({
       return;
     }
 
-    // Use edited values
-    onRuleParsed({
-      category: editableCategory.trim(),
-      entity: editableEntity.trim(),
-      rule_data: parsedRuleData,
-    });
+    if (editableCategory === "duplicates") {
+      // Build rule_data from structured fields
+      const ruleData = {
+        rule_id: editableRuleId.trim(),
+        description: editableDescription.trim(),
+        severity: editableSeverity,
+        entity: editableEntity.trim(),
+        enabled: true,
+        conditions: cleanConditionsForSave(editableConditions),
+      };
+
+      if (!ruleData.rule_id) {
+        setJsonError("Rule ID is required");
+        return;
+      }
+      if (editableConditions.length === 0) {
+        setJsonError("At least one condition is required");
+        return;
+      }
+
+      onRuleParsed({
+        category: editableCategory.trim(),
+        entity: editableEntity.trim(),
+        rule_data: ruleData,
+      });
+    } else {
+      // Non-duplicate: parse from JSON textarea
+      let parsedRuleData;
+      try {
+        parsedRuleData = JSON.parse(editableRuleData);
+        setJsonError(null);
+      } catch (err) {
+        setJsonError("Invalid JSON format. Please fix the syntax errors.");
+        return;
+      }
+
+      onRuleParsed({
+        category: editableCategory.trim(),
+        entity: editableEntity.trim(),
+        rule_data: parsedRuleData,
+      });
+    }
+
     handleClose();
   };
 
@@ -115,6 +157,11 @@ export function AIRuleCreator({
     setEditableRuleData("");
     setEditableEntity("");
     setJsonError(null);
+    setEditableConditions([]);
+    setEditableRuleId("");
+    setEditableDescription("");
+    setEditableSeverity("warning");
+    setShowRawJson(false);
     onClose();
   };
 
@@ -238,7 +285,22 @@ export function AIRuleCreator({
                   </label>
                   <select
                     value={editableCategory}
-                    onChange={(e) => setEditableCategory(e.target.value)}
+                    onChange={(e) => {
+                      const newCat = e.target.value;
+                      setEditableCategory(newCat);
+                      // Initialize duplicate fields from JSON when switching to duplicates
+                      if (newCat === "duplicates" && editableConditions.length === 0) {
+                        try {
+                          const data = JSON.parse(editableRuleData);
+                          if (data.conditions) setEditableConditions(data.conditions);
+                          if (data.rule_id) setEditableRuleId(data.rule_id);
+                          if (data.description) setEditableDescription(data.description);
+                          if (data.severity) setEditableSeverity(data.severity);
+                        } catch {
+                          // JSON might not be valid, that's fine
+                        }
+                      }
+                    }}
                     className="w-full p-2 border border-[var(--border)] rounded-lg focus:outline-none focus:ring-2 focus:ring-[var(--cta-blue)]"
                   >
                     <option value="">Select category...</option>
@@ -268,7 +330,7 @@ export function AIRuleCreator({
                 </div>
 
                  {/* Field Lookup Status Indicator - For required fields */}
-                 {parsedRule?.rule_data?.field_lookup_status && parsedRule.category === "required_fields" && (
+                 {parsedRule?.rule_data?.field_lookup_status && editableCategory === "required_fields" && (
                    <div className={`p-3 rounded-lg border ${
                      parsedRule.rule_data.field_lookup_status === "found" || parsedRule.rule_data.field_lookup_status === "found_partial"
                        ? "bg-green-50 border-green-200"
@@ -284,7 +346,7 @@ export function AIRuleCreator({
                        )}
                        <div className="flex-1">
                          <div className="text-sm font-medium text-[var(--text-main)] mb-1">
-                           Field Lookup: {parsedRule.rule_data.field_lookup_status === "found" ? "Found" : 
+                           Field Lookup: {parsedRule.rule_data.field_lookup_status === "found" ? "Found" :
                                          parsedRule.rule_data.field_lookup_status === "found_partial" ? "Found (Partial Match)" :
                                          parsedRule.rule_data.field_lookup_status === "field_not_found" ? "Field Not Found" :
                                          parsedRule.rule_data.field_lookup_status === "table_not_found" ? "Table Not Found" :
@@ -306,93 +368,121 @@ export function AIRuleCreator({
                    </div>
                  )}
 
-                 {/* Field Lookup Status Indicator - For duplicate rules (conditions) */}
-                 {parsedRule?.rule_data?.conditions && parsedRule.category === "duplicates" && (
-                   <div className="space-y-2">
-                     {parsedRule.rule_data.conditions.map((condition: any, idx: number) => {
-                       const lookupStatus = condition.field_lookup_status;
-                       if (!lookupStatus) return null;
-                       
-                       return (
-                         <div key={idx} className={`p-3 rounded-lg border ${
-                           lookupStatus === "found" || lookupStatus === "found_partial"
-                             ? "bg-green-50 border-green-200"
-                             : lookupStatus === "field_not_found" || lookupStatus === "table_not_found"
-                             ? "bg-yellow-50 border-yellow-200"
-                             : "bg-red-50 border-red-200"
-                         }`}>
-                           <div className="flex items-start gap-2">
-                             {lookupStatus === "found" || lookupStatus === "found_partial" ? (
-                               <span className="text-green-600">✓</span>
-                             ) : (
-                               <span className="text-yellow-600">⚠</span>
-                             )}
-                             <div className="flex-1">
-                               <div className="text-sm font-medium text-[var(--text-main)] mb-1">
-                                 Condition {idx + 1} ({condition.type}): {lookupStatus === "found" ? "Found" : 
-                                         lookupStatus === "found_partial" ? "Found (Partial Match)" :
-                                         lookupStatus === "field_not_found" ? "Field Not Found" :
-                                         lookupStatus === "table_not_found" ? "Table Not Found" :
-                                         lookupStatus === "schema_not_found" ? "Schema Not Found" :
-                                         "Error"}
-                               </div>
-                               {condition.field_lookup_message && (
-                                 <div className="text-xs text-[var(--text-muted)]">
-                                   {condition.field_lookup_message}
-                                 </div>
-                               )}
-                               {condition.field_id && (
-                                 <div className="text-xs font-mono text-[var(--text-muted)] mt-1">
-                                   Field ID: {condition.field_id}
-                                 </div>
-                               )}
-                               {condition.field_ids && condition.field_ids.length > 0 && (
-                                 <div className="text-xs font-mono text-[var(--text-muted)] mt-1">
-                                   Field IDs: {condition.field_ids.join(", ")}
-                                 </div>
-                               )}
-                             </div>
-                           </div>
-                         </div>
-                       );
-                     })}
+                 {/* Visual Condition Builder for duplicate rules */}
+                 {editableCategory === "duplicates" && (
+                   <>
+                     <div>
+                       <label className="block text-sm font-medium text-[var(--text-main)] mb-1">
+                         Rule ID *
+                       </label>
+                       <input
+                         type="text"
+                         value={editableRuleId}
+                         onChange={(e) => setEditableRuleId(e.target.value)}
+                         placeholder="e.g., dup.students.name_email"
+                         className="w-full p-2 border border-[var(--border)] rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[var(--cta-blue)]"
+                       />
+                     </div>
+                     <div>
+                       <label className="block text-sm font-medium text-[var(--text-main)] mb-1">
+                         Description
+                       </label>
+                       <input
+                         type="text"
+                         value={editableDescription}
+                         onChange={(e) => setEditableDescription(e.target.value)}
+                         placeholder="Describe what this duplicate rule detects"
+                         className="w-full p-2 border border-[var(--border)] rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[var(--cta-blue)]"
+                       />
+                     </div>
+                     <div>
+                       <label className="block text-sm font-medium text-[var(--text-main)] mb-1">
+                         Severity
+                       </label>
+                       <select
+                         value={editableSeverity}
+                         onChange={(e) => setEditableSeverity(e.target.value)}
+                         className="w-full p-2 border border-[var(--border)] rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[var(--cta-blue)]"
+                       >
+                         <option value="warning">Warning</option>
+                         <option value="info">Info</option>
+                         <option value="critical">Critical</option>
+                       </select>
+                     </div>
+                     <ConditionBuilder
+                       conditions={editableConditions}
+                       onChange={setEditableConditions}
+                       entity={editableEntity}
+                     />
+                     <div>
+                       <button
+                         type="button"
+                         onClick={() => setShowRawJson(!showRawJson)}
+                         className="text-xs text-[var(--text-muted)] hover:text-[var(--text-main)] flex items-center gap-1"
+                       >
+                         <span>{showRawJson ? "▼" : "▶"}</span>
+                         Raw JSON (debug)
+                       </button>
+                       {showRawJson && (
+                         <pre className="mt-2 p-3 bg-gray-50 border border-[var(--border)] rounded-lg text-xs font-mono overflow-x-auto max-h-48 overflow-y-auto">
+                           {JSON.stringify(
+                             {
+                               rule_id: editableRuleId,
+                               description: editableDescription,
+                               severity: editableSeverity,
+                               entity: editableEntity,
+                               enabled: true,
+                               conditions: cleanConditionsForSave(editableConditions),
+                             },
+                             null,
+                             2
+                           )}
+                         </pre>
+                       )}
+                     </div>
+                   </>
+                 )}
+
+                 {/* JSON textarea for non-duplicate rules */}
+                 {editableCategory !== "duplicates" && (
+                   <div>
+                     <label className="block text-sm font-medium text-[var(--text-main)] mb-2">
+                       Rule Data (JSON) *
+                     </label>
+                     <textarea
+                       value={editableRuleData}
+                       onChange={(e) => {
+                         setEditableRuleData(e.target.value);
+                         try {
+                           JSON.parse(e.target.value);
+                           setJsonError(null);
+                         } catch {
+                           // Don't show error while typing, only on submit
+                         }
+                       }}
+                       className={`w-full p-3 border rounded-lg font-mono text-sm focus:outline-none focus:ring-2 focus:ring-[var(--cta-blue)] ${
+                         jsonError ? "border-red-500" : "border-[var(--border)]"
+                       }`}
+                       rows={12}
+                       placeholder='{"field": "email", "message": "Email is required", "severity": "warning"}'
+                     />
+                     {jsonError && (
+                       <p className="text-red-500 text-xs mt-1">{jsonError}</p>
+                     )}
+                     <p className="text-xs text-[var(--text-muted)] mt-1">
+                       Edit the JSON data as needed. Invalid JSON will prevent submission.
+                     </p>
                    </div>
                  )}
 
-                 <div>
-                   <label className="block text-sm font-medium text-[var(--text-main)] mb-2">
-                     Rule Data (JSON) *
-                   </label>
-                   <textarea
-                     value={editableRuleData}
-                     onChange={(e) => {
-                       setEditableRuleData(e.target.value);
-                       // Validate JSON on change
-                       try {
-                         JSON.parse(e.target.value);
-                         setJsonError(null);
-                       } catch {
-                         // Don't show error while typing, only on submit
-                       }
-                     }}
-                     className={`w-full p-3 border rounded-lg font-mono text-sm focus:outline-none focus:ring-2 focus:ring-[var(--cta-blue)] ${
-                       jsonError ? "border-red-500" : "border-[var(--border)]"
-                     }`}
-                     rows={12}
-                     placeholder='{"field": "email", "message": "Email is required", "severity": "warning"}'
-                   />
-                   {jsonError && (
-                     <p className="text-red-500 text-xs mt-1">{jsonError}</p>
-                   )}
-                   <p className="text-xs text-[var(--text-muted)] mt-1">
-                     Edit the JSON data as needed. Invalid JSON will prevent submission.
-                   </p>
-                 </div>
+                 {jsonError && editableCategory === "duplicates" && (
+                   <p className="text-red-500 text-xs">{jsonError}</p>
+                 )}
               </div>
               <button
                 onClick={handleUseRule}
                 className="mt-3 w-full py-2 px-4 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                disabled={!editableCategory || !editableEntity || !editableRuleData.trim()}
+                disabled={!editableCategory || !editableEntity || (editableCategory === "duplicates" ? (!editableRuleId.trim() || editableConditions.length === 0) : !editableRuleData.trim())}
               >
                 Submit Rule
               </button>

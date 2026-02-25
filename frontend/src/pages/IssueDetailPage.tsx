@@ -77,6 +77,7 @@ export function IssueDetailPage() {
           created_at: data.created_at?.toDate?.() || new Date(),
           updated_at: data.updated_at?.toDate?.() || new Date(),
           status: data.status || "open",
+          run_id: data.run_id,
         };
 
         setIssue(issueData);
@@ -326,28 +327,51 @@ export function IssueDetailPage() {
         >
           ← Back
         </button>
-        {isAdmin && (
-          <div className="flex gap-2">
+        <div className="flex gap-2">
+          {issue.run_id && (
             <button
-              onClick={() =>
-                setConfirmModal({ isOpen: true, action: "resolve" })
-              }
-              disabled={actionLoading && resolvingId === issue.id}
-              className="px-4 py-2 text-sm font-medium text-[var(--text-main)] bg-[var(--bg-mid)] hover:bg-[var(--bg-mid)]/80 rounded-lg disabled:opacity-50"
+              onClick={() => {
+                const params = new URLSearchParams({
+                  run_id: issue.run_id!,
+                  entity: issue.entity,
+                  record_id: issue.record_id,
+                });
+                if (issue.issue_type === "duplicate" && issue.related_records?.length) {
+                  params.set("view", "merge");
+                  issue.related_records.forEach((rid) => params.append("related_record", rid));
+                } else {
+                  params.set("view", "edit");
+                }
+                navigate(`/remediate?${params.toString()}`);
+              }}
+              className="px-4 py-2 text-sm font-medium text-[var(--brand)] border border-[var(--brand)] hover:bg-[var(--brand)]/10 rounded-lg transition-colors"
             >
-              {actionLoading && resolvingId === issue.id ? "..." : "Resolve"}
+              Remediate
             </button>
-            <button
-              onClick={() =>
-                setConfirmModal({ isOpen: true, action: "delete" })
-              }
-              disabled={deletingId === issue.id}
-              className="px-4 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg disabled:opacity-50"
-            >
-              {deletingId === issue.id ? "..." : "Delete"}
-            </button>
-          </div>
-        )}
+          )}
+          {isAdmin && (
+            <>
+              <button
+                onClick={() =>
+                  setConfirmModal({ isOpen: true, action: "resolve" })
+                }
+                disabled={actionLoading && resolvingId === issue.id}
+                className="px-4 py-2 text-sm font-medium text-[var(--text-main)] bg-[var(--bg-mid)] hover:bg-[var(--bg-mid)]/80 rounded-lg disabled:opacity-50"
+              >
+                {actionLoading && resolvingId === issue.id ? "..." : "Resolve"}
+              </button>
+              <button
+                onClick={() =>
+                  setConfirmModal({ isOpen: true, action: "delete" })
+                }
+                disabled={deletingId === issue.id}
+                className="px-4 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg disabled:opacity-50"
+              >
+                {deletingId === issue.id ? "..." : "Delete"}
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
       <div className="rounded-3xl border border-[var(--border)] bg-white p-6 space-y-6">

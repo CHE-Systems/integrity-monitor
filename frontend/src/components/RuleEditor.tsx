@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import { useAuth } from "../hooks/useAuth";
 import { API_BASE } from "../config/api";
 import { ACTIVE_ENTITIES, ENTITY_TABLE_MAPPING } from "../config/entities";
+import { ConditionBuilder, cleanConditionsForSave, type Condition } from "./ConditionBuilder";
 
 interface RuleEditorProps {
   isOpen: boolean;
@@ -175,17 +176,19 @@ export function RuleEditor({
         newErrors.description = "Description is required";
       if (!ruleData.rule_id && mode === "create")
         newErrors.rule_id = "Rule ID is required";
-      // Validate JSON format
-      if (conditionsJson.trim() === "") {
-        newErrors.conditions = "Conditions JSON is required";
+      const conditions = ruleData.conditions as Condition[] | undefined;
+      if (!conditions || conditions.length === 0) {
+        newErrors.conditions = "At least one condition is required";
       } else {
-        try {
-          const parsed = JSON.parse(conditionsJson);
-          if (!Array.isArray(parsed) || parsed.length === 0) {
-            newErrors.conditions = "At least one condition is required";
+        for (const cond of conditions) {
+          if (!cond.type) {
+            newErrors.conditions = "Each condition must have a match type";
+            break;
           }
-        } catch {
-          newErrors.conditionsJson = "Invalid JSON format";
+          if (!cond.field && (!cond.fields || cond.fields.length === 0)) {
+            newErrors.conditions = "Each condition must have at least one field";
+            break;
+          }
         }
       }
     } else if (selectedCategory === "relationships") {
@@ -228,15 +231,9 @@ export function RuleEditor({
       }
     }
 
-    // Form mode - ensure JSON fields are parsed before saving
-    if (selectedCategory === "duplicates" && conditionsJson.trim() !== "") {
-      try {
-        const parsed = JSON.parse(conditionsJson);
-        updateField("conditions", parsed);
-      } catch {
-        // Validation should have caught this, but just in case
-        return;
-      }
+    // Form mode - clean conditions before saving
+    if (selectedCategory === "duplicates" && ruleData.conditions) {
+      ruleData.conditions = cleanConditionsForSave(ruleData.conditions as Condition[]);
     }
     if (
       selectedCategory === "attendance_rules" &&
@@ -314,59 +311,26 @@ export function RuleEditor({
           Severity
         </label>
         <select
-          value={ruleData.severity || "likely"}
+          value={ruleData.severity || "warning"}
           onChange={(e) => updateField("severity", e.target.value)}
           className="w-full p-2 border border-[var(--border)] rounded-lg"
         >
-          <option value="likely">Likely (High Confidence)</option>
-          <option value="possible">Possible (Low Confidence)</option>
+          <option value="warning">Warning</option>
+          <option value="info">Info</option>
+          <option value="critical">Critical</option>
         </select>
       </div>
-      <div>
-        <label className="block text-sm font-medium text-[var(--text-main)] mb-2">
-          Conditions (JSON) *
-        </label>
-        <textarea
-          value={conditionsJson}
-          onChange={(e) => {
-            const value = e.target.value;
-            setConditionsJson(value);
-            // Try to parse and update ruleData if valid JSON
-            if (value.trim() === "") {
-              updateField("conditions", []);
-            } else {
-              try {
-                const parsed = JSON.parse(value);
-                updateField("conditions", parsed);
-                // Clear JSON error if it exists
-                if (errors.conditionsJson) {
-                  setErrors((prev) => {
-                    const newErrors = { ...prev };
-                    delete newErrors.conditionsJson;
-                    return newErrors;
-                  });
-                }
-              } catch {
-                // Invalid JSON - allow user to continue editing
-                // Don't update ruleData, but don't show error while typing
-              }
-            }
-          }}
-          placeholder='[{"field": "email", "match_type": "exact"}, ...]'
-          className={`w-full p-2 border rounded-lg font-mono text-sm ${
-            errors.conditions || errors.conditionsJson
-              ? "border-red-500"
-              : "border-[var(--border)]"
-          }`}
-          rows={6}
-        />
-        {errors.conditions && (
-          <p className="text-red-500 text-xs mt-1">{errors.conditions}</p>
-        )}
-        {errors.conditionsJson && (
-          <p className="text-red-500 text-xs mt-1">{errors.conditionsJson}</p>
-        )}
-      </div>
+      <ConditionBuilder
+        conditions={(ruleData.conditions as Condition[]) || []}
+        onChange={(conditions) => {
+          updateField("conditions", conditions);
+          setConditionsJson(JSON.stringify(conditions, null, 2));
+        }}
+        entity={selectedEntity}
+      />
+      {errors.conditions && (
+        <p className="text-red-500 text-xs mt-1">{errors.conditions}</p>
+      )}
     </>
   );
 

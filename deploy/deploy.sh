@@ -501,7 +501,7 @@ EOF
         "--cpu" "2"
         "--no-cpu-throttling"
         "--timeout" "30m"
-        "--min-instances" "1"
+        "--min-instances" "0"
         "--max-instances" "10"
         "--concurrency" "5"
         "--env-vars-file" "$ENV_VARS_FILE"
