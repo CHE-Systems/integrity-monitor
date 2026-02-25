@@ -286,23 +286,52 @@ function extractPrimaryDisplayName(
   fields: AirtableRecordFields,
   table: AirtableTable
 ): string | null {
-  // Try common name / identifier fields first
+  // Helper: coerce any non-empty value to a display string
+  const toDisplayString = (value: unknown): string | null => {
+    if (value === null || value === undefined || value === "") return null;
+    if (typeof value === "string") return value.trim() || null;
+    if (typeof value === "number" || typeof value === "boolean") return String(value);
+    if (Array.isArray(value) && value.length > 0) {
+      // For arrays of primitives (e.g. tags), join them
+      const strs = value.filter((v) => typeof v === "string" && !v.startsWith("rec"));
+      if (strs.length > 0) return strs.join(", ");
+      // Fallback: first non-rec value
+      return value[0] != null ? String(value[0]) : null;
+    }
+    return null;
+  };
+
+  // 1. Try the schema primary field first (most reliable)
+  if (table.primaryFieldId) {
+    const primaryField = table.fields.find(
+      (f) => f.id === table.primaryFieldId
+    );
+    if (primaryField) {
+      const display = toDisplayString(fields[primaryField.name]);
+      if (display) return display;
+    }
+  }
+
+  // 2. Try common name / identifier field patterns
   const namePatterns = [
     /^entry\s*id$/i,
     /^full\s*name$/i,
     /^name$/i,
     /^title$/i,
+    /^school\s*year$/i,
+    /^year$/i,
   ];
 
   for (const pattern of namePatterns) {
     for (const [key, value] of Object.entries(fields)) {
-      if (pattern.test(key) && typeof value === "string" && value.trim()) {
-        return value.trim();
+      if (pattern.test(key)) {
+        const display = toDisplayString(value);
+        if (display) return display;
       }
     }
   }
 
-  // Try combining first + last name
+  // 3. Try combining first + last name
   let firstName = "";
   let lastName = "";
   for (const [key, value] of Object.entries(fields)) {
@@ -315,19 +344,6 @@ function extractPrimaryDisplayName(
   }
   if (firstName || lastName) {
     return `${firstName} ${lastName}`.trim();
-  }
-
-  // Last resort: use the primary field ID from the table schema
-  if (table.primaryFieldId) {
-    const primaryField = table.fields.find(
-      (f) => f.id === table.primaryFieldId
-    );
-    if (primaryField) {
-      const value = fields[primaryField.name];
-      if (typeof value === "string" && value.trim()) {
-        return value.trim();
-      }
-    }
   }
 
   return null;
