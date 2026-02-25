@@ -140,17 +140,6 @@ export function useFirestoreIssues(filters: IssueFilters = {}, pageSize: number 
           };
         });
 
-        // Apply search filter client-side (Firestore doesn't support text search)
-        if (filters.search) {
-          const searchLower = filters.search.toLowerCase();
-          transformed = transformed.filter(
-            (issue) =>
-              issue.rule_id.toLowerCase().includes(searchLower) ||
-              issue.record_id.toLowerCase().includes(searchLower) ||
-              issue.description?.toLowerCase().includes(searchLower)
-          );
-        }
-
         // Check for more results
         const hasMoreResults = snapshot.docs.length > pageSize;
         setHasMore(hasMoreResults);
@@ -192,7 +181,7 @@ export function useFirestoreIssues(filters: IssueFilters = {}, pageSize: number 
         setLoading(false);
       }
     },
-    [buildQuery, filters.search, pageSize]
+    [buildQuery, pageSize]
   );
 
   // Reset pagination when filters change
@@ -201,7 +190,7 @@ export function useFirestoreIssues(filters: IssueFilters = {}, pageSize: number 
     setCurrentPage(1);
     setHasPrev(false);
     fetchPage(null);
-  }, [filters.type, filters.severity, filters.entity, filters.status, filters.search, filters.run_id, filters.first_seen_in_run, fetchPage]);
+  }, [filters.type, filters.severity, filters.entity, filters.status, filters.run_id, filters.first_seen_in_run, fetchPage]);
 
   const nextPage = useCallback(() => {
     if (!hasMore || !lastDocRef.current) return;
