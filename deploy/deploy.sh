@@ -427,10 +427,12 @@ if [ "$DEPLOY_BACKEND" = true ]; then
     # Note: gcloud requires YAML or JSON format, not plain KEY=VALUE
     # Changed default to '*' to match redeploy-backend.sh and ensure maximum compatibility
     ALLOWED_ORIGINS_VALUE="${ALLOWED_ORIGINS:-*}"
+    FRONTEND_URL_VALUE="${FRONTEND_URL:-https://data-integrity-monitor.web.app}"
     ENV_VARS_FILE=$(mktemp)
     cat > "$ENV_VARS_FILE" <<EOF
 ALLOWED_ORIGINS: "${ALLOWED_ORIGINS_VALUE}"
 AIRTABLE_MIN_REQUEST_INTERVAL: "0.05"
+FRONTEND_URL: "${FRONTEND_URL_VALUE}"
 EOF
 
     # ------------------------------------------------------------------

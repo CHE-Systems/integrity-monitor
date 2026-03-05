@@ -88,6 +88,15 @@ export function ProfileMenu() {
             >
               API Keys
             </button>
+            <button
+              onClick={() => {
+                navigate("/schema");
+                setIsOpen(false);
+              }}
+              className="w-full rounded-xl px-4 py-2 text-left text-sm font-medium text-[var(--text-main)] hover:bg-gray-100 transition-colors"
+            >
+              Schema
+            </button>
           </div>
 
           {/* Sign Out Button */}

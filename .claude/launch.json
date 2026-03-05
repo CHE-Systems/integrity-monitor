@@ -1,0 +1,20 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "frontend",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "port": 5173,
+      "cwd": "frontend",
+      "autoPort": true
+    },
+    {
+      "name": "backend",
+      "runtimeExecutable": "uvicorn",
+      "runtimeArgs": ["backend.main:app", "--host", "0.0.0.0", "--port", "8080", "--reload"],
+      "port": 8080,
+      "autoPort": true
+    }
+  ]
+}

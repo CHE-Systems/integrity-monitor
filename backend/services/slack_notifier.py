@@ -268,20 +268,26 @@ class SlackNotifier:
             "attendance": "Attendance",
         }
 
+        # Keys that are derived metadata (e.g. group counts), not raw issues — exclude from totals
+        derived_keys = {"duplicate_groups_formed"}
+
         # Track which base keys we've seen with severity-specific versions
         base_keys_with_severity = set()
-        
+
         # First pass: Identify all base keys that have severity-specific versions
         for key, count in issue_counts.items():
             if count > 0 and ":" in key:
                 issue_type, _ = key.split(":", 1)
                 base_key = issue_type.lower()
                 base_keys_with_severity.add(base_key)
-        
+
         # Second pass: Count issues, prioritizing severity-specific keys over base keys
         # Also calculate total issues from this scan (avoiding double counting)
         for key, count in issue_counts.items():
             if count > 0:
+                if key.lower() in derived_keys:
+                    # Skip derived metadata keys — they don't represent raw issues
+                    continue
                 if ":" in key:
                     # Severity-specific key like "duplicate:critical"
                     issue_type, severity = key.split(":", 1)
@@ -290,7 +296,7 @@ class SlackNotifier:
                         critical_count += count
                     elif severity in ("warning", "medium", "low"):
                         warning_count += count
-                    
+
                     # Track by type (only count severity-specific keys to avoid double counting)
                     base_key = issue_type.lower()
                     display_name = display_names.get(base_key, base_key.replace("_", " ").title())
@@ -311,45 +317,41 @@ class SlackNotifier:
         if run_config:
             entities = run_config.get("entities", [])
             if entities:
-                scope_lines.append(f"• Table: {entities[0]}")
-            
+                # Display names for entities
+                entity_display = {
+                    "students": "Students",
+                    "parents": "Parents",
+                    "contractors": "Contractors",
+                    "absent": "Absent",
+                    "student_truth": "Student Truth",
+                    "classes": "Classes",
+                }
+                names = [entity_display.get(e, e.replace("_", " ").title()) for e in entities]
+                scope_lines.append(f"• Tables: {', '.join(names)}")
+
             rules = run_config.get("rules", {})
-            rule_set_name = None
-            rule_name = None
-            
-            if rules.get("required_fields"):
-                rule_set_name = "Required Fields"
-                for entity, rule_ids in rules["required_fields"].items():
-                    if rule_ids:
-                        # Get first rule ID
-                        rule_id = rule_ids[0]
-                        if rule_id.startswith("required."):
-                            parts = rule_id.split(".")
-                            if len(parts) >= 3:
-                                rule_name = f"required_field_rule.{parts[1]}.{parts[2]}"
-                        else:
-                            rule_name = f"required_field_rule.{entity}.{rule_id}"
-                        break
-            elif rules.get("duplicates"):
-                rule_set_name = "Duplicates"
-                for entity, rule_ids in rules["duplicates"].items():
-                    if rule_ids:
-                        rule_name = rule_ids[0]
-                        break
-            elif rules.get("relationships"):
-                rule_set_name = "Relationships"
-                for entity, rule_ids in rules["relationships"].items():
-                    if rule_ids:
-                        rule_name = rule_ids[0]
-                        break
-            elif rules.get("attendance_rules"):
-                rule_set_name = "Attendance Rules"
-                rule_name = "attendance.general"
-            
-            if rule_set_name:
-                scope_lines.append(f"• Rule set: {rule_set_name}")
-            if rule_name:
-                scope_lines.append(f"• Rule: {rule_name}")
+            active_rule_sets = []
+
+            # Collect all active rule sets (not elif — check each one)
+            rule_set_display = {
+                "required_fields": "Required Fields",
+                "duplicates": "Duplicates",
+                "relationships": "Relationships",
+                "value_checks": "Value Checks",
+            }
+            for rule_key, display_name in rule_set_display.items():
+                rule_data = rules.get(rule_key)
+                if rule_data and isinstance(rule_data, dict):
+                    # Count total rules across all entities
+                    total = sum(len(ids) for ids in rule_data.values() if isinstance(ids, list))
+                    if total > 0:
+                        active_rule_sets.append(f"{display_name} ({total})")
+
+            if rules.get("attendance_rules"):
+                active_rule_sets.append("Attendance")
+
+            if active_rule_sets:
+                scope_lines.append(f"• Rule sets: {', '.join(active_rule_sets)}")
 
         # Build results section
         results_lines = []
@@ -383,14 +385,21 @@ class SlackNotifier:
         results_lines.append(f"• Run status: {status_emoji} {status_display}")
 
         # Build message text
-        text_parts = [run_info_line]
+        text_parts = []
+        # Add schedule name at the top if available
+        schedule_name = run_config.get("schedule_name") if run_config else None
+        if schedule_name:
+            text_parts.append(f"*Schedule: {schedule_name}*")
+        text_parts.append(run_info_line)
+        if run_url:
+            text_parts.append(f"<{run_url}|View Run Details>")
         text_parts.append("")
-        
+
         if scope_lines:
             text_parts.append("Scope")
             text_parts.extend(scope_lines)
             text_parts.append("")
-        
+
         if results_lines:
             text_parts.append("Results")
             text_parts.extend(results_lines)
@@ -398,30 +407,12 @@ class SlackNotifier:
         if error_message:
             text_parts.append(f"\n*Error:* {error_message}")
 
-        # Add literal link at bottom as fallback
-        if run_url:
-            text_parts.append("")
-            text_parts.append(f"View run: {run_url}")
-
-        # Construct message
         attachment = {
             "color": color,
             "text": "\n".join(text_parts),
+            "fallback": f"{header_text} - {run_url}" if run_url else header_text,
             "ts": int(time.time()),
         }
-
-        if run_url:
-            attachment["actions"] = [
-                {
-                    "type": "button",
-                    "text": "View Details",
-                    "url": run_url,
-                    "style": "primary",
-                }
-            ]
-            attachment["fallback"] = f"{header_text} - {run_url}"
-        else:
-            attachment["fallback"] = header_text
 
         return {
             "text": header_text,

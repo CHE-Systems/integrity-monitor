@@ -333,6 +333,11 @@ exports.runScheduledScans = onSchedule(
             requestBody.notify_slack = true;
           }
 
+          // Pass schedule name for Slack notifications
+          if (schedule.name) {
+            requestBody.schedule_name = schedule.name;
+          }
+
           const url = `${INTEGRITY_RUNNER_URL}/integrity/run?${params.toString()}`;
           logger.info(`Triggering run for schedule ${scheduleId}`, {
             url,

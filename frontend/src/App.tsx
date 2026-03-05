@@ -451,18 +451,6 @@ export default function App({ children }: AppProps) {
                       >
                         Remediate
                       </NavLink>
-                      <NavLink
-                        to="/schema"
-                        className={({ isActive }) =>
-                          `rounded-full px-4 py-1.5 font-medium transition-colors ${
-                            isActive
-                              ? "bg-[var(--brand)] text-white"
-                              : "text-[var(--text-muted)] hover:text-[var(--text-main)]"
-                          }`
-                        }
-                      >
-                        Schema
-                      </NavLink>
                     </>
                   )}
                 </div>
