@@ -4,7 +4,12 @@ import { useFieldSearch, type FieldOption } from "../hooks/useFieldSearch";
 // ----- Types -----
 
 export interface Condition {
-  type: "exact_match" | "similarity" | "date_delta" | "set_overlap";
+  type:
+    | "exact_match"
+    | "similarity"
+    | "date_delta"
+    | "set_overlap"
+    | "value_equals";
   field?: string;
   field_id?: string;
   fields?: string[];
@@ -12,6 +17,8 @@ export interface Condition {
   similarity?: number;
   tolerance_days?: number;
   overlap_ratio?: number;
+  /** Required when type is value_equals — both records must equal this. */
+  value?: string;
   description?: string;
   // AI metadata (display only)
   field_lookup_status?: string;
@@ -31,11 +38,104 @@ const CONDITION_TYPES = [
   { value: "similarity", label: "Similarity" },
   { value: "date_delta", label: "Date Delta" },
   { value: "set_overlap", label: "Set Overlap" },
+  { value: "value_equals", label: "Value Equals" },
 ];
+
+const KNOWN_CONDITION_TYPES = CONDITION_TYPES.map((t) => t.value);
+
+function fieldsArrayHasContent(fields: unknown): boolean {
+  if (!Array.isArray(fields)) return false;
+  return fields.some((f) => String(f ?? "").trim());
+}
+
+function coerceStringArray(val: unknown): string[] | undefined {
+  if (val === undefined || val === null) return undefined;
+  if (Array.isArray(val)) {
+    return val.map((x) => (x === undefined || x === null ? "" : String(x)));
+  }
+  if (typeof val === "string" && val.trim()) {
+    return [val.trim()];
+  }
+  return undefined;
+}
+
+/**
+ * Ensure `field` / `fields` are populated when only Airtable IDs exist.
+ * The scanner uses `field` / `fields`; IDs alone are not read.
+ *
+ * Similarity: backend allows a single `field` OR `fields[]`; the form only
+ * edits `fields[]`, so we promote `field` / `field_id` into arrays.
+ */
+export function normalizeConditionsForForm(
+  conditions: Condition[]
+): Condition[] {
+  return conditions.map((c) => {
+    const copy = { ...c };
+    const t = copy.type;
+
+    if (
+      t === "exact_match" ||
+      t === "date_delta" ||
+      t === "set_overlap" ||
+      t === "value_equals"
+    ) {
+      if (!String(copy.field || "").trim() && copy.field_id) {
+        copy.field = copy.field_id;
+      }
+    }
+
+    if (t === "similarity") {
+      const coercedFields = coerceStringArray(copy.fields);
+      if (coercedFields) {
+        copy.fields = coercedFields;
+      }
+
+      if (!String(copy.field || "").trim() && copy.field_id) {
+        copy.field = copy.field_id;
+      }
+
+      const ids = [...(copy.field_ids || [])];
+      if (ids.length > 0) {
+        const fields = [...(copy.fields || [])];
+        while (fields.length < ids.length) {
+          fields.push("");
+        }
+        ids.forEach((id, i) => {
+          if (id && !String(fields[i] || "").trim()) {
+            fields[i] = id;
+          }
+        });
+        copy.fields = fields;
+      }
+
+      const hasListContent = fieldsArrayHasContent(copy.fields);
+      const single = String(copy.field || "").trim();
+
+      if (!hasListContent && single) {
+        copy.fields = [single];
+        const fid = String(copy.field_id || "").trim();
+        copy.field_ids = fid ? [fid] : [""];
+        delete copy.field;
+        delete copy.field_id;
+      }
+
+      if (Array.isArray(copy.fields) && copy.fields.length > 0) {
+        const fids = [...(copy.field_ids || [])];
+        while (fids.length < copy.fields.length) {
+          fids.push("");
+        }
+        copy.field_ids = fids.slice(0, copy.fields.length);
+      }
+    }
+
+    return copy;
+  });
+}
 
 /** Strip AI metadata fields before saving to Firestore. */
 export function cleanConditionsForSave(conditions: Condition[]): Condition[] {
-  return conditions.map((c) => {
+  const normalized = normalizeConditionsForForm(conditions);
+  return normalized.map((c) => {
     const {
       field_lookup_status,
       field_lookup_message,
@@ -111,7 +211,9 @@ function FieldAutocomplete({
         <div className="flex items-center gap-1 mt-1">
           <span className="text-yellow-600 text-xs">&#9888;</span>
           <span className="text-xs text-[var(--text-muted)]">
-            No field ID — select from dropdown to resolve
+            No Airtable field ID yet — type at least 2 characters to search the
+            table schema, then pick a row to attach the stable{" "}
+            <span className="font-mono">fld…</span> ID
           </span>
         </div>
       )}
@@ -166,28 +268,41 @@ function ConditionRow({
   };
 
   const handleTypeChange = (newType: string) => {
-    // Reset type-specific fields when changing type
+    const prev = condition;
+    const singleField = prev.field || prev.fields?.[0];
+    const singleFieldId = prev.field_id || prev.field_ids?.[0];
     const base: Condition = {
       type: newType as Condition["type"],
-      field: condition.field,
-      field_id: condition.field_id,
+      description: prev.description,
     };
+
     if (newType === "similarity") {
-      base.similarity = condition.similarity ?? 0.8;
-      // Convert single field to fields array if needed
-      if (condition.field && !condition.fields) {
-        base.fields = [condition.field];
-        base.field_ids = condition.field_id ? [condition.field_id] : [];
-        delete base.field;
-        delete base.field_id;
-      } else if (condition.fields) {
-        base.fields = condition.fields;
-        base.field_ids = condition.field_ids;
+      base.similarity = prev.similarity ?? 0.8;
+      if (prev.fields?.length) {
+        base.fields = [...prev.fields];
+        base.field_ids = [...(prev.field_ids || [])];
+      } else if (singleField) {
+        base.fields = [singleField];
+        base.field_ids = singleFieldId ? [singleFieldId] : [""];
+      } else {
+        base.fields = [""];
+        base.field_ids = [""];
       }
     } else if (newType === "date_delta") {
-      base.tolerance_days = condition.tolerance_days ?? 1;
+      base.field = singleField;
+      base.field_id = singleFieldId;
+      base.tolerance_days = prev.tolerance_days ?? 1;
     } else if (newType === "set_overlap") {
-      base.overlap_ratio = condition.overlap_ratio ?? 0.5;
+      base.field = singleField;
+      base.field_id = singleFieldId;
+      base.overlap_ratio = prev.overlap_ratio ?? 0.5;
+    } else if (newType === "value_equals") {
+      base.field = singleField;
+      base.field_id = singleFieldId;
+      base.value = prev.value ?? "";
+    } else {
+      base.field = singleField;
+      base.field_id = singleFieldId;
     }
     onUpdate(index, base);
   };
@@ -230,6 +345,11 @@ function ConditionRow({
     onUpdate(index, { ...condition, fields: newFields, field_ids: newFieldIds });
   };
 
+  const typeSelectValue = KNOWN_CONDITION_TYPES.includes(condition.type)
+    ? condition.type
+    : "exact_match";
+  const hasUnsupportedType = !KNOWN_CONDITION_TYPES.includes(condition.type);
+
   return (
     <div className="border border-[var(--border)] rounded-lg p-4 bg-white">
       <div className="flex items-center justify-between mb-3">
@@ -252,7 +372,7 @@ function ConditionRow({
           Match Type
         </label>
         <select
-          value={condition.type}
+          value={typeSelectValue}
           onChange={(e) => handleTypeChange(e.target.value)}
           className="w-full p-2 border border-[var(--border)] rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[var(--cta-blue)]"
         >
@@ -262,6 +382,14 @@ function ConditionRow({
             </option>
           ))}
         </select>
+        {hasUnsupportedType && (
+          <p className="text-xs text-amber-700 mt-1">
+            Stored type{" "}
+            <span className="font-mono">{String(condition.type)}</span> is not
+            supported in the form. Choose a type above to replace it, or edit in
+            Raw JSON.
+          </p>
+        )}
       </div>
 
       {/* Type-specific fields */}
@@ -439,6 +567,43 @@ function ConditionRow({
               />
               <span className="text-sm text-[var(--text-muted)]">%</span>
             </div>
+          </div>
+        </>
+      )}
+
+      {condition.type === "value_equals" && (
+        <>
+          <div className="mb-3">
+            <label className="block text-xs font-medium text-[var(--text-muted)] mb-1">
+              Field
+            </label>
+            <FieldAutocomplete
+              value={condition.field || ""}
+              fieldId={condition.field_id}
+              entity={entity}
+              onSelect={(name, id) =>
+                onUpdate(index, { ...condition, field: name, field_id: id })
+              }
+              onChange={(val) => {
+                onUpdate(index, {
+                  ...condition,
+                  field: val,
+                  field_id: undefined,
+                });
+              }}
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-[var(--text-muted)] mb-1">
+              Expected value (both records must match)
+            </label>
+            <input
+              type="text"
+              value={condition.value ?? ""}
+              onChange={(e) => updateField("value", e.target.value)}
+              placeholder="e.g., Unsure"
+              className="w-full p-2 border border-[var(--border)] rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[var(--cta-blue)]"
+            />
           </div>
         </>
       )}

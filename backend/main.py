@@ -6,21 +6,30 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Set
 from fastapi import FastAPI, HTTPException, Request, status, Depends, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, ValidationError
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 
 # Load environment variables from backend/.env
 from dotenv import load_dotenv
 backend_dir = Path(__file__).parent
 load_dotenv(backend_dir / ".env")
 
+from .config.models import SchemaConfig, SchemaMetadata
 from .config.schema_loader import load_schema_config
-from .middleware.auth import verify_api_key_or_bearer_token, verify_bearer_token, verify_cloud_scheduler_auth, verify_firebase_token
+from .middleware.auth import (
+    assert_firestore_admin_user,
+    firebase_admin_auth_or_raise,
+    firebase_token_firestore_project_id,
+    verify_api_key_or_bearer_token,
+    verify_bearer_token,
+    verify_cloud_scheduler_auth,
+    verify_firebase_token,
+)
 from .services.integrity_runner import IntegrityRunner
 
 from .services.airtable_schema_service import schema_service
@@ -31,8 +40,15 @@ from .services.rules_service import RulesService
 from .services.ai_rule_parser import AIRuleParser
 from .services.issue_chat_service import IssueChatService
 from .utils.errors import IntegrityRunError
+from .health_status import build_health_payload
 
 logger = logging.getLogger(__name__)
+
+
+def require_app_admin(user: dict = Depends(verify_firebase_token)) -> dict:
+    assert_firestore_admin_user(user)
+    return user
+
 
 app = FastAPI()
 
@@ -68,27 +84,51 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
         return response
 
 
+class HealthPublicCORSMiddleware(BaseHTTPMiddleware):
+    """Allow unauthenticated monitoring probes to read /health from any origin."""
+
+    async def dispatch(self, request: Request, call_next):
+        if request.url.path == "/health":
+            if request.method == "OPTIONS":
+                return Response(
+                    status_code=200,
+                    headers={
+                        "Access-Control-Allow-Origin": "*",
+                        "Access-Control-Allow-Methods": "GET, OPTIONS",
+                        "Access-Control-Allow-Headers": "*",
+                    },
+                )
+            response = await call_next(request)
+            response.headers["Access-Control-Allow-Origin"] = "*"
+            return response
+        return await call_next(request)
+
+
 app.add_middleware(RequestIDMiddleware)
+app.add_middleware(HealthPublicCORSMiddleware)
 
-# Load schema config with error handling
-try:
-    schema_config = load_schema_config()
-    logger.info("Schema config loaded successfully")
-except Exception as e:
-    logger.error(f"Failed to load schema config: {e}", exc_info=True)
-    # Create a minimal schema config to allow app to start
-    from .config.models import SchemaConfig
-    schema_config = SchemaConfig(entities={})
-    logger.warning("Using empty schema config due to load failure")
-
-# Initialize IntegrityRunner with error handling
+# IntegrityRunner loads schema from Firestore; load_schema_config() without a client is always empty.
+runner: IntegrityRunner | None = None
+schema_config: SchemaConfig | None = None
 try:
     runner = IntegrityRunner()
-    logger.info("IntegrityRunner initialized successfully")
+    schema_config = runner._schema_config
+    logger.info(
+        "IntegrityRunner initialized; schema config loaded from Firestore",
+        extra={"entity_count": len(schema_config.entities)},
+    )
 except Exception as e:
     logger.error(f"Failed to initialize IntegrityRunner: {e}", exc_info=True)
-    # Set runner to None - endpoints that need it will handle the error
     runner = None
+    try:
+        schema_config = load_schema_config()
+    except Exception as e2:
+        logger.error(f"Failed to load fallback schema config: {e2}", exc_info=True)
+        schema_config = SchemaConfig(
+            metadata=SchemaMetadata(source="error", generated="runtime"),
+            entities={},
+            duplicates={},
+        )
     logger.warning("IntegrityRunner not available - some endpoints may fail")
 
 # Global dictionary to track running scans: {run_id: threading.Event}
@@ -139,12 +179,9 @@ async def shutdown_event():
 
 @app.get("/health")
 def health():
-    """Health check endpoint - should always respond even if other services fail."""
-    return {
-        "status": "ok",
-        "runner_available": runner is not None,
-        "schema_loaded": schema_config is not None,
-    }
+    """Health check for external monitoring: JSON status, checks, and 200/503."""
+    body, code = build_health_payload(runner=runner, schema_config=schema_config)
+    return JSONResponse(content=body, status_code=code)
 
 
 @app.get("/auth/dev-token")
@@ -1058,6 +1095,10 @@ def airtable_schema_fields(entity: str, search: Optional[str] = None):
             "attendance": "Attendance",
             "truth": "Truth",
             "payments": "Contractor/Vendor Invoices",
+            "invoices": "Contractor/Vendor Invoices",
+            "absent": "Absent",
+            "student_truth": "Student Truth",
+            "transfers": "Transfers",
         }
         
         table_name = entity_to_table.get(entity.lower(), entity.title())
@@ -1390,6 +1431,29 @@ def delete_integrity_issue(issue_id: str, request: Request):
         )
 
 
+def _firestore_issue_entity_variants(entity: str) -> List[str]:
+    """Return entity strings to try when querying issues (singular vs plural in Firestore)."""
+    raw = (entity or "").strip()
+    if not raw:
+        return []
+    lower = raw.lower()
+    singular_to_plural: Dict[str, str] = {
+        "student": "students",
+        "parent": "parents",
+        "contractor": "contractors",
+        "class": "classes",
+        "invoice": "invoices",
+        "transfer": "transfers",
+    }
+    plural_to_singular = {v: k for k, v in singular_to_plural.items()}
+    variants = {raw}
+    if lower in singular_to_plural:
+        variants.add(singular_to_plural[lower])
+    if lower in plural_to_singular:
+        variants.add(plural_to_singular[lower])
+    return list(variants)
+
+
 class ResolveIssuesRequest(BaseModel):
     record_ids: List[str]
     entity: str
@@ -1437,15 +1501,20 @@ def resolve_issues_for_records(
 
         for record_id in body.record_ids:
             try:
-                query = issues_ref.where("record_id", "==", record_id).where(
-                    "entity", "==", body.entity
-                )
-                if body.rule_ids:
-                    query = query.where("rule_id", "in", body.rule_ids)
+                deleted_doc_ids: Set[str] = set()
+                for ent in _firestore_issue_entity_variants(body.entity):
+                    query = issues_ref.where("record_id", "==", record_id).where(
+                        "entity", "==", ent
+                    )
+                    if body.rule_ids:
+                        query = query.where("rule_id", "in", body.rule_ids)
 
-                for doc in query.stream():
-                    doc.reference.delete()
-                    resolved_count += 1
+                    for doc in query.stream():
+                        if doc.id in deleted_doc_ids:
+                            continue
+                        deleted_doc_ids.add(doc.id)
+                        doc.reference.delete()
+                        resolved_count += 1
             except Exception as exc:
                 errors.append({"record_id": record_id, "error": str(exc)})
 
@@ -1470,6 +1539,84 @@ def resolve_issues_for_records(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error": "Failed to resolve issues", "message": str(exc)},
         )
+
+
+class DismissDuplicateRequest(BaseModel):
+    """Request body for dismissing a duplicate pair."""
+    entity: str
+    record_ids: List[str]
+    rule_id: Optional[str] = None
+
+
+@app.post("/integrity/issues/dismiss")
+def dismiss_duplicate(
+    body: DismissDuplicateRequest,
+    request: Request,
+    user: dict = Depends(verify_firebase_token),
+):
+    """Dismiss a duplicate pair so it is not re-flagged on future scans."""
+    uid = user.get("uid", "unknown")
+    request_id = getattr(request.state, "request_id", "unknown")
+
+    if len(body.record_ids) < 2:
+        raise HTTPException(status_code=400, detail="At least two record IDs are required")
+
+    sorted_ids = sorted(body.record_ids)
+
+    try:
+        from .clients.firestore import FirestoreClient
+        from .config.config_loader import load_runtime_config
+
+        config = load_runtime_config()
+        firestore_client = FirestoreClient(config.firestore)
+
+        dismissal_id = firestore_client.record_dismissal({
+            "entity": body.entity,
+            "record_ids": sorted_ids,
+            "rule_id": body.rule_id,
+            "dismissed_by": uid,
+        })
+
+        # Also resolve (delete) the corresponding open issues
+        client = firestore_client._get_client()
+        issues_ref = client.collection(config.firestore.issues_collection)
+        resolved_count = 0
+        for record_id in body.record_ids:
+            deleted_doc_ids: Set[str] = set()
+            for ent in _firestore_issue_entity_variants(body.entity):
+                query = (
+                    issues_ref.where("record_id", "==", record_id)
+                    .where("entity", "==", ent)
+                    .where("issue_type", "==", "duplicate")
+                )
+                for doc in query.stream():
+                    if doc.id in deleted_doc_ids:
+                        continue
+                    deleted_doc_ids.add(doc.id)
+                    doc.reference.delete()
+                    resolved_count += 1
+
+        logger.info(
+            "Duplicate dismissed",
+            extra={
+                "dismissal_id": dismissal_id,
+                "entity": body.entity,
+                "record_ids": sorted_ids,
+                "resolved_count": resolved_count,
+                "user_uid": uid,
+                "request_id": request_id,
+            },
+        )
+
+        return {
+            "dismissal_id": dismissal_id,
+            "resolved_count": resolved_count,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Failed to dismiss duplicate", extra={"error": str(exc)}, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to dismiss duplicate: {exc}")
 
 
 @app.get("/integrity/issues/bulk/count", dependencies=[Depends(verify_firebase_token)])
@@ -2036,6 +2183,46 @@ def _safe_update(table, record_id: str, fields: Dict[str, Any], entity: str, max
     return table.update(record_id, remaining, typecast=True)
 
 
+def _safe_create(table, fields: Dict[str, Any], entity: str, max_retries: int = 10) -> Dict:
+    """Create an Airtable record, automatically retrying if field errors occur.
+
+    Same retry strategy as _safe_update — catches 422 errors for computed or
+    invalid fields, strips them, and retries.
+    """
+    remaining = dict(fields)
+    stripped = []
+
+    for attempt in range(max_retries):
+        try:
+            return table.create(remaining, typecast=True)
+        except Exception as exc:
+            error_str = str(exc)
+            bad_field = None
+            for pattern in _AIRTABLE_FIELD_ERROR_PATTERNS:
+                match = pattern.search(error_str)
+                if match:
+                    bad_field = match.group(1)
+                    break
+            if bad_field and attempt < max_retries - 1:
+                stripped.append(bad_field)
+                remaining.pop(bad_field, None)
+                logger.warning(
+                    "Airtable rejected field during create, retrying without it",
+                    extra={
+                        "entity": entity,
+                        "rejected_field": bad_field,
+                        "attempt": attempt + 1,
+                        "remaining_fields": len(remaining),
+                    },
+                )
+                if not remaining:
+                    raise
+                continue
+            raise
+
+    return table.create(remaining, typecast=True)
+
+
 class RecordsByIdsRequest(BaseModel):
     """Request body for fetching records by IDs."""
     entity: str
@@ -2412,6 +2599,65 @@ def delete_airtable_record(
         )
 
 
+def _repoint_linked_records(
+    entity: str,
+    secondary_id: str,
+    primary_id: str,
+) -> list:
+    """Find records in other tables that link to secondary_id and re-point them to primary_id.
+
+    Scans the Airtable schema for multipleRecordLinks fields on other tables
+    that reference the entity's table. For each, queries for records containing
+    the secondary ID and updates them to reference the primary instead.
+
+    Returns a list of dicts describing each re-pointed record.
+    """
+    schema_data = schema_service.load()
+    base_id, entity_table_id = _resolve_entity_to_table(entity)
+
+    repointed = []
+    for table_def in schema_data.get("tables", []):
+        if table_def["id"] == entity_table_id:
+            continue
+        for field_def in table_def.get("fields", []):
+            if field_def.get("type") != "multipleRecordLinks":
+                continue
+            linked_table_id = field_def.get("options", {}).get("linkedTableId")
+            if linked_table_id != entity_table_id:
+                continue
+            field_name = field_def["name"]
+            try:
+                other_table = _get_airtable_table(base_id, table_def["id"])
+                formula = f"FIND('{secondary_id}', ARRAYJOIN({{{field_name}}})) > 0"
+                matching = list(other_table.all(formula=formula))
+                for rec in matching:
+                    current_links = rec["fields"].get(field_name, [])
+                    if not isinstance(current_links, list):
+                        continue
+                    new_links = [lid for lid in current_links if lid != secondary_id]
+                    if primary_id not in new_links:
+                        new_links.append(primary_id)
+                    if set(new_links) != set(current_links):
+                        other_table.update(rec["id"], {field_name: new_links}, typecast=True)
+                        repointed.append({
+                            "table": table_def["name"],
+                            "table_id": table_def["id"],
+                            "field": field_name,
+                            "record_id": rec["id"],
+                        })
+                    time.sleep(0.2)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to repoint linked records in table",
+                    extra={
+                        "table": table_def["name"],
+                        "field": field_name,
+                        "error": str(exc),
+                    },
+                )
+    return repointed
+
+
 @app.post("/airtable/records/{entity}/merge")
 def merge_airtable_records(
     entity: str,
@@ -2450,9 +2696,107 @@ def merge_airtable_records(
         base_id, table_id = _resolve_entity_to_table(entity)
         table = _get_airtable_table(base_id, table_id)
 
+        # Step 0: Fetch full snapshots of all records before any changes
+        try:
+            primary_snapshot = table.get(body.primary_record_id)
+        except Exception as snap_exc:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Primary record {body.primary_record_id} not found: {snap_exc}",
+            )
+
+        secondary_snapshots = {}
+        for sec_id in body.secondary_record_ids:
+            try:
+                secondary_snapshots[sec_id] = table.get(sec_id)
+            except Exception as snap_exc:
+                logger.warning(
+                    "Could not fetch secondary record snapshot",
+                    extra={"record_id": sec_id, "error": str(snap_exc)},
+                )
+                secondary_snapshots[sec_id] = {"id": sec_id, "fields": {}, "error": str(snap_exc)}
+
+        # Step 0b: Persist merge snapshot to Firestore (safety net for undo)
+        merge_history_id = None
+        try:
+            from .clients.firestore import FirestoreClient
+            from .config.config_loader import load_runtime_config
+
+            config = load_runtime_config()
+            merge_firestore = FirestoreClient(config.firestore)
+
+            merge_history_data = {
+                "entity": entity,
+                "primary_record_id": body.primary_record_id,
+                "secondary_record_ids": body.secondary_record_ids,
+                "primary_snapshot": {
+                    "id": primary_snapshot.get("id"),
+                    "fields": primary_snapshot.get("fields", {}),
+                    "createdTime": primary_snapshot.get("createdTime"),
+                },
+                "secondary_snapshots": {
+                    sid: {
+                        "id": snap.get("id", sid),
+                        "fields": snap.get("fields", {}),
+                        "createdTime": snap.get("createdTime"),
+                    }
+                    for sid, snap in secondary_snapshots.items()
+                },
+                "merged_fields": body.merged_fields,
+                "repointed_records": [],
+                "performed_by": uid,
+                "performed_at": datetime.now(timezone.utc),
+                "status": "in_progress",
+                "undo_at": None,
+                "undo_by": None,
+            }
+            merge_history_id = merge_firestore.record_merge_history(merge_history_data)
+        except Exception as hist_exc:
+            logger.error(
+                "Failed to save merge snapshot -- aborting merge for data safety",
+                extra={"error": str(hist_exc), "request_id": request_id},
+                exc_info=True,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=f"Could not save pre-merge snapshot. Merge aborted for data safety: {hist_exc}",
+            )
+
         # Step 1: Update primary record with merged fields (strip computed fields)
         safe_fields = _strip_computed_fields(body.merged_fields, entity)
         updated = _safe_update(table, body.primary_record_id, safe_fields, entity)
+
+        # Step 1.5: Re-point linked records from secondary to primary
+        all_repointed = []
+        for secondary_id in body.secondary_record_ids:
+            try:
+                repointed = _repoint_linked_records(entity, secondary_id, body.primary_record_id)
+                all_repointed.extend(repointed)
+                if repointed:
+                    logger.info(
+                        "Re-pointed linked records",
+                        extra={
+                            "entity": entity,
+                            "secondary_id": secondary_id,
+                            "primary_id": body.primary_record_id,
+                            "repointed_count": len(repointed),
+                            "request_id": request_id,
+                        },
+                    )
+            except Exception as rp_exc:
+                logger.warning(
+                    "Failed to re-point some linked records (continuing with merge)",
+                    extra={"secondary_id": secondary_id, "error": str(rp_exc)},
+                )
+
+        # Update merge history with re-pointed records
+        if merge_history_id and merge_firestore and all_repointed:
+            try:
+                merge_firestore.update_merge_history(merge_history_id, {
+                    "repointed_records": all_repointed,
+                })
+            except Exception:
+                pass
 
         # Step 2: Delete secondary records one by one
         delete_results = []
@@ -2472,6 +2816,20 @@ def merge_airtable_records(
                 )
                 delete_errors.append({"id": secondary_id, "error": str(del_exc)})
 
+        # Step 3: Update merge history with final status
+        final_status = "completed" if len(delete_errors) == 0 else "partial_failure"
+        if merge_history_id and merge_firestore:
+            try:
+                merge_firestore.update_merge_history(merge_history_id, {
+                    "status": final_status,
+                    "delete_errors": delete_errors if delete_errors else [],
+                })
+            except Exception as upd_exc:
+                logger.warning(
+                    "Failed to update merge history status",
+                    extra={"doc_id": merge_history_id, "error": str(upd_exc)},
+                )
+
         response = {
             "primary_record": {
                 "id": updated.get("id"),
@@ -2481,6 +2839,7 @@ def merge_airtable_records(
             "deleted": delete_results,
             "errors": delete_errors,
             "success": len(delete_errors) == 0,
+            "merge_history_id": merge_history_id,
         }
 
         logger.info(
@@ -2492,6 +2851,7 @@ def merge_airtable_records(
                 "error_count": len(delete_errors),
                 "user_uid": uid,
                 "request_id": request_id,
+                "merge_history_id": merge_history_id,
             },
         )
 
@@ -2508,6 +2868,159 @@ def merge_airtable_records(
             status_code=500,
             detail=f"Failed to merge records: {str(exc)}",
         )
+
+
+def _get_primary_field_name(entity: str) -> Optional[str]:
+    """Get the primary field name for an entity from the Airtable schema."""
+    try:
+        _, table_id = _resolve_entity_to_table(entity)
+        schema_data = schema_service.load()
+        for t in schema_data.get("tables", []):
+            if t.get("id") == table_id:
+                primary_field_id = t.get("primaryFieldId")
+                for f in t.get("fields", []):
+                    if f.get("id") == primary_field_id:
+                        return f.get("name")
+                break
+    except Exception:
+        pass
+    return None
+
+
+def _extract_display_name(snapshot: Dict[str, Any], primary_field: Optional[str]) -> Optional[str]:
+    """Extract a display name from a record snapshot using the primary field."""
+    fields = snapshot.get("fields", {})
+    if primary_field and primary_field in fields:
+        val = fields[primary_field]
+        if isinstance(val, list):
+            return str(val[0]) if val else None
+        return str(val) if val else None
+    for candidate in ("Full Name", "Name", "Student Name", "Parent Name"):
+        if candidate in fields and fields[candidate]:
+            val = fields[candidate]
+            return str(val[0]) if isinstance(val, list) else str(val)
+    return None
+
+
+@app.get("/merge-history")
+def get_merge_history(
+    request: Request,
+    entity: Optional[str] = Query(default=None),
+    limit: int = Query(default=50, le=200),
+    user: dict = Depends(verify_firebase_token),
+):
+    """Return recent merge history documents, ordered by performed_at descending."""
+    try:
+        from .clients.firestore import FirestoreClient
+        from .config.config_loader import load_runtime_config
+
+        config = load_runtime_config()
+        firestore_client = FirestoreClient(config.firestore)
+        history = firestore_client.get_merge_history(entity=entity, limit=limit)
+
+        primary_field_cache: Dict[str, Optional[str]] = {}
+
+        for entry in history:
+            for key in ("performed_at", "undo_at"):
+                val = entry.get(key)
+                if val and hasattr(val, "isoformat"):
+                    entry[key] = val.isoformat()
+
+            ent = entry.get("entity", "")
+            if ent not in primary_field_cache:
+                primary_field_cache[ent] = _get_primary_field_name(ent)
+            pf = primary_field_cache[ent]
+
+            primary_snap = entry.get("primary_snapshot", {})
+            entry["display_name"] = _extract_display_name(primary_snap, pf)
+
+            # Strip bulky snapshot data from response
+            entry.pop("primary_snapshot", None)
+            entry.pop("secondary_snapshots", None)
+            entry.pop("merged_fields", None)
+
+        return {"merge_history": history}
+    except Exception as exc:
+        logger.error("Failed to fetch merge history", extra={"error": str(exc)}, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to fetch merge history: {exc}")
+
+
+@app.post("/merge-history/{merge_id}/undo")
+def undo_merge(
+    merge_id: str,
+    request: Request,
+    user: dict = Depends(verify_firebase_token),
+):
+    """Undo a completed merge: revert primary and recreate secondary."""
+    uid = user.get("uid", "unknown")
+    request_id = getattr(request.state, "request_id", "unknown")
+
+    try:
+        from .clients.firestore import FirestoreClient
+        from .config.config_loader import load_runtime_config
+
+        config = load_runtime_config()
+        firestore_client = FirestoreClient(config.firestore)
+        doc = firestore_client.get_merge_history_doc(merge_id)
+
+        if not doc:
+            raise HTTPException(status_code=404, detail="Merge history entry not found")
+        if doc.get("status") != "completed":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot undo merge with status '{doc.get('status')}'. Only completed merges can be undone.",
+            )
+
+        entity = doc["entity"]
+        base_id, table_id = _resolve_entity_to_table(entity)
+        table = _get_airtable_table(base_id, table_id)
+
+        # Revert primary record to pre-merge snapshot
+        primary_snapshot = doc.get("primary_snapshot", {})
+        primary_fields = primary_snapshot.get("fields", {})
+        safe_primary = _strip_computed_fields(primary_fields, entity)
+        _safe_update(table, doc["primary_record_id"], safe_primary, entity)
+
+        # Recreate secondary records from snapshots
+        new_secondary_ids = {}
+        secondary_snapshots = doc.get("secondary_snapshots", {})
+        for old_sec_id, snap in secondary_snapshots.items():
+            sec_fields = snap.get("fields", {})
+            safe_sec = _strip_computed_fields(sec_fields, entity)
+            if safe_sec:
+                created = _safe_create(table, safe_sec, entity)
+                new_secondary_ids[old_sec_id] = created.get("id")
+
+        # Update merge history status
+        firestore_client.update_merge_history(merge_id, {
+            "status": "undone",
+            "undo_at": datetime.now(timezone.utc),
+            "undo_by": uid,
+            "new_secondary_ids": new_secondary_ids,
+        })
+
+        logger.info(
+            "Merge undone",
+            extra={
+                "merge_id": merge_id,
+                "entity": entity,
+                "primary": doc["primary_record_id"],
+                "new_secondaries": new_secondary_ids,
+                "user_uid": uid,
+                "request_id": request_id,
+            },
+        )
+
+        return {
+            "success": True,
+            "primary_record_id": doc["primary_record_id"],
+            "new_secondary_ids": new_secondary_ids,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Failed to undo merge", extra={"merge_id": merge_id, "error": str(exc)}, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to undo merge: {exc}")
 
 
 # Rules Management API Endpoints
@@ -3313,4 +3826,274 @@ def delete_api_key(key_id: str, request: Request, user: dict = Depends(verify_fi
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error": "Failed to delete API key", "message": str(exc)},
+        )
+
+
+# ── Firestore app users (admin) ─────────────────────────────────────────────────
+
+
+def _admin_users_fs_client(admin_user: dict):
+    from .clients.firestore import FirestoreClient
+    from .config.config_loader import load_runtime_config
+
+    config = load_runtime_config()
+    pid = firebase_token_firestore_project_id(admin_user)
+    return FirestoreClient(config.firestore, project_id=pid)._get_client()
+
+
+def _count_firestore_admins(client) -> int:
+    return sum(1 for _ in client.collection("users").where("isAdmin", "==", True).stream())
+
+
+def _serialize_app_user_doc(doc_id: str, data: dict) -> dict:
+    row: Dict[str, Any] = {
+        "id": doc_id,
+        "email": data.get("email"),
+        "isAdmin": bool(data.get("isAdmin")),
+    }
+    for key in ("createdAt", "updatedAt", "created_at", "updated_at"):
+        if key not in data or data[key] is None:
+            continue
+        ts = data[key]
+        try:
+            row[key] = ts.isoformat()
+        except (AttributeError, TypeError):
+            row[key] = str(ts)
+    return row
+
+
+def _sync_admin_custom_claim(uid: str, is_admin: bool) -> None:
+    auth_mod = firebase_admin_auth_or_raise()
+    if is_admin:
+        auth_mod.set_custom_user_claims(uid, {"isAdmin": True})
+    else:
+        auth_mod.set_custom_user_claims(uid, {})
+
+
+class CreateAppUserRequest(BaseModel):
+    email: str
+    isAdmin: bool = False
+
+
+class UpdateAppUserRequest(BaseModel):
+    isAdmin: Optional[bool] = None
+    email: Optional[str] = None
+
+
+@app.get("/admin/users")
+def list_app_users(
+    request: Request,
+    admin_user: dict = Depends(require_app_admin),
+):
+    """List all documents in the Firestore ``users`` collection (admin only)."""
+    request_id = getattr(request.state, "request_id", "unknown")
+    try:
+        client = _admin_users_fs_client(admin_user)
+        users_out: List[dict] = []
+        for doc in client.collection("users").stream():
+            data = doc.to_dict() or {}
+            users_out.append(_serialize_app_user_doc(doc.id, data))
+        users_out.sort(key=lambda u: (u.get("email") or "").lower())
+        logger.info(
+            "Listed app users",
+            extra={"request_id": request_id, "count": len(users_out), "admin_uid": admin_user.get("uid")},
+        )
+        return {"users": users_out}
+    except Exception as exc:
+        logger.error(
+            "Failed to list app users",
+            extra={"error": str(exc), "request_id": request_id},
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Failed to list users", "message": str(exc)},
+        )
+
+
+@app.post("/admin/users")
+def create_app_user(
+    request: Request,
+    body: CreateAppUserRequest,
+    admin_user: dict = Depends(require_app_admin),
+):
+    """Ensure a Firebase Auth user exists for the email and upsert Firestore ``users/{uid}``."""
+    request_id = getattr(request.state, "request_id", "unknown")
+    email = body.email.strip()
+    if not email or "@" not in email:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Valid email is required")
+
+    try:
+        auth_mod = firebase_admin_auth_or_raise()
+        try:
+            fb_user = auth_mod.get_user_by_email(email)
+            uid = fb_user.uid
+        except auth_mod.UserNotFoundError:
+            fb_user = auth_mod.create_user(email=email)
+            uid = fb_user.uid
+            logger.info("Created Firebase Auth user", extra={"email": email, "uid": uid})
+
+        client = _admin_users_fs_client(admin_user)
+        ref = client.collection("users").document(uid)
+        ref.set(
+            {
+                "email": email,
+                "isAdmin": body.isAdmin,
+            },
+            merge=True,
+        )
+        _sync_admin_custom_claim(uid, body.isAdmin)
+
+        doc = ref.get()
+        data = doc.to_dict() or {}
+        logger.info(
+            "Upserted app user",
+            extra={"request_id": request_id, "uid": uid, "is_admin": body.isAdmin, "by": admin_user.get("uid")},
+        )
+        return {"user": _serialize_app_user_doc(uid, data)}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(
+            "Failed to create app user",
+            extra={"error": str(exc), "request_id": request_id},
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Failed to create user", "message": str(exc)},
+        )
+
+
+@app.patch("/admin/users/{uid}")
+def update_app_user(
+    request: Request,
+    uid: str,
+    body: UpdateAppUserRequest,
+    admin_user: dict = Depends(require_app_admin),
+):
+    """Update Firestore fields and sync ``isAdmin`` to Firebase Auth custom claims."""
+    request_id = getattr(request.state, "request_id", "unknown")
+    if body.isAdmin is None and body.email is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Provide isAdmin and/or email",
+        )
+
+    try:
+        client = _admin_users_fs_client(admin_user)
+        ref = client.collection("users").document(uid)
+        doc = ref.get()
+        if not doc.exists:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+        data = doc.to_dict() or {}
+        was_admin = bool(data.get("isAdmin"))
+
+        if body.isAdmin is False and was_admin:
+            if _count_firestore_admins(client) <= 1:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Cannot remove the last admin",
+                )
+
+        updates: Dict[str, Any] = {}
+        if body.email is not None:
+            em = body.email.strip()
+            if not em or "@" not in em:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Valid email is required")
+            updates["email"] = em
+
+        if body.isAdmin is not None:
+            updates["isAdmin"] = body.isAdmin
+
+        if updates:
+            ref.set(updates, merge=True)
+
+        if body.isAdmin is not None:
+            _sync_admin_custom_claim(uid, body.isAdmin)
+
+        if updates.get("email"):
+            try:
+                auth_mod = firebase_admin_auth_or_raise()
+                auth_mod.update_user(uid, email=updates["email"])
+            except Exception as exc:
+                logger.warning(
+                    "Firestore updated but Firebase Auth email update failed",
+                    extra={"uid": uid, "error": str(exc)},
+                )
+
+        doc = ref.get()
+        data = doc.to_dict() or {}
+        logger.info(
+            "Updated app user",
+            extra={"request_id": request_id, "uid": uid, "updates": list(updates.keys()), "by": admin_user.get("uid")},
+        )
+        return {"user": _serialize_app_user_doc(uid, data)}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(
+            "Failed to update app user",
+            extra={"error": str(exc), "request_id": request_id, "uid": uid},
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Failed to update user", "message": str(exc)},
+        )
+
+
+@app.delete("/admin/users/{uid}")
+def delete_app_user(
+    request: Request,
+    uid: str,
+    admin_user: dict = Depends(require_app_admin),
+):
+    """Delete Firestore ``users/{uid}`` and the Firebase Auth account."""
+    request_id = getattr(request.state, "request_id", "unknown")
+    actor_uid = admin_user.get("uid")
+    if uid == actor_uid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You cannot delete your own account",
+        )
+
+    try:
+        client = _admin_users_fs_client(admin_user)
+        ref = client.collection("users").document(uid)
+        doc = ref.get()
+        if not doc.exists:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+        data = doc.to_dict() or {}
+        if bool(data.get("isAdmin")) and _count_firestore_admins(client) <= 1:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot delete the last admin",
+            )
+
+        ref.delete()
+        auth_mod = firebase_admin_auth_or_raise()
+        try:
+            auth_mod.delete_user(uid)
+        except auth_mod.UserNotFoundError:
+            pass
+
+        logger.info(
+            "Deleted app user",
+            extra={"request_id": request_id, "uid": uid, "by": actor_uid},
+        )
+        return {"status": "success", "id": uid}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(
+            "Failed to delete app user",
+            extra={"error": str(exc), "request_id": request_id, "uid": uid},
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Failed to delete user", "message": str(exc)},
         )

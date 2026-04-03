@@ -4,7 +4,6 @@ import type { IssueFilters, Issue } from "../hooks/useFirestoreIssues";
 import { useFirestoreIssues, fetchAllIssues } from "../hooks/useFirestoreIssues";
 import { useIssueCounts } from "../hooks/useIssueCounts";
 import { useIssueActions } from "../hooks/useIssueActions";
-import { useAuth } from "../hooks/useAuth";
 import { getAirtableLinksWithFallback } from "../utils/airtable";
 import { useAirtableSchema } from "../contexts/AirtableSchemaContext";
 import { useRecordDisplayNames } from "../hooks/useRecordDisplayNames";
@@ -148,52 +147,22 @@ export function IssueList({
     );
   }, [issues, search, recordDisplayNames]);
 
-  const {
-    markResolved,
-    deleteIssue,
-    loading: actionLoading,
-  } = useIssueActions();
-  const { isAdmin } = useAuth();
-  const [resolvingId, setResolvingId] = useState<string | null>(null);
+  const { deleteIssue } = useIssueActions();
   const [deletingId, setDeletingId] = useState<string | null>(null);
-  const [confirmModal, setConfirmModal] = useState<{
+  const [deleteConfirm, setDeleteConfirm] = useState<{
     isOpen: boolean;
     issueId: string | null;
-    action: "resolve" | "delete" | null;
-  }>({
-    isOpen: false,
-    issueId: null,
-    action: null,
-  });
-
-  const initiateResolve = (issueId: string) => {
-    setConfirmModal({ isOpen: true, issueId, action: "resolve" });
-  };
+  }>({ isOpen: false, issueId: null });
 
   const initiateDelete = (issueId: string) => {
-    setConfirmModal({ isOpen: true, issueId, action: "delete" });
-  };
-
-  const handleConfirmResolve = async () => {
-    const issueId = confirmModal.issueId;
-    if (!issueId) return;
-
-    setConfirmModal({ isOpen: false, issueId: null, action: null });
-    setResolvingId(issueId);
-    try {
-      await markResolved(issueId);
-    } catch (err) {
-      alert(err instanceof Error ? err.message : "Failed to resolve issue");
-    } finally {
-      setResolvingId(null);
-    }
+    setDeleteConfirm({ isOpen: true, issueId });
   };
 
   const handleConfirmDelete = async () => {
-    const issueId = confirmModal.issueId;
+    const issueId = deleteConfirm.issueId;
     if (!issueId) return;
 
-    setConfirmModal({ isOpen: false, issueId: null, action: null });
+    setDeleteConfirm({ isOpen: false, issueId: null });
     setDeletingId(issueId);
     try {
       await deleteIssue(issueId);
@@ -290,6 +259,7 @@ export function IssueList({
           <option value="open">Open</option>
           <option value="closed">Closed</option>
           <option value="resolved">Resolved</option>
+          <option value="auto_resolved">Auto-resolved</option>
         </select>
         <select
           value={filters.type || ""}
@@ -589,36 +559,47 @@ export function IssueList({
                           onClick={(e) => e.stopPropagation()}
                         >
                           <button
-                            onClick={() => navigate(`/issue/${issue.id}`)}
-                              className="text-xs text-[var(--cta-blue)] hover:underline"
-                            >
-                              Open
-                          </button>
-                          {isAdmin && (
-                            <>
-                            <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  initiateResolve(issue.id);
-                                }}
-                              disabled={
-                                actionLoading && resolvingId === issue.id
+                            type="button"
+                            onClick={() => {
+                              const params = new URLSearchParams({
+                                entity: issue.entity,
+                                record_id: issue.record_id,
+                              });
+                              if (issue.issue_type === "duplicate" && issue.related_records?.length) {
+                                params.set("view", "merge");
+                                issue.related_records.forEach((rid) => params.append("related_record", rid));
+                              } else {
+                                params.set("view", "edit");
                               }
-                              className="text-xs text-[var(--text-muted)] hover:text-[var(--text-main)] disabled:opacity-50"
-                            >
-                              {actionLoading && resolvingId === issue.id
-                                ? "..."
-                                : "Resolve"}
-                            </button>
-                              <button
-                                onClick={() => initiateDelete(issue.id)}
-                                disabled={deletingId === issue.id}
-                                className="text-xs text-red-600 hover:text-red-700 disabled:opacity-50"
-                              >
-                                {deletingId === issue.id ? "..." : "Delete"}
-                              </button>
-                            </>
-                          )}
+                              params.set("from", "list");
+                              navigate(`/issues/fix?${params.toString()}`);
+                            }}
+                            className="rounded-md bg-[var(--brand)] px-2.5 py-1 text-xs font-medium text-white hover:opacity-90 transition-colors"
+                          >
+                            Fix
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              navigate(`/issue/${issue.id}`);
+                            }}
+                            className="text-xs text-[var(--cta-blue)] hover:underline"
+                          >
+                            Details
+                          </button>
+                          <button
+                            type="button"
+                            title="Permanently remove this issue record"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              initiateDelete(issue.id);
+                            }}
+                            disabled={deletingId === issue.id}
+                            className="text-xs text-red-600/80 hover:text-red-700 disabled:opacity-50"
+                          >
+                            {deletingId === issue.id ? "..." : "Delete"}
+                          </button>
                         </div>
                       </td>
                     </tr>
@@ -631,24 +612,13 @@ export function IssueList({
       )}
 
       <ConfirmModal
-        isOpen={confirmModal.isOpen && confirmModal.action === "resolve"}
-        title="Resolve Issue"
-        message="Are you sure you want to mark this issue as resolved? This will update the status in Firestore."
-        confirmLabel="Resolve"
-        onConfirm={handleConfirmResolve}
-        onCancel={() =>
-          setConfirmModal({ isOpen: false, issueId: null, action: null })
-        }
-      />
-      <ConfirmModal
-        isOpen={confirmModal.isOpen && confirmModal.action === "delete"}
-        title="Delete Issue"
-        message="Are you sure you want to delete this issue? This action cannot be undone and will permanently remove the issue from Firebase."
-        confirmLabel="Delete"
+        isOpen={deleteConfirm.isOpen}
+        title="Delete issue record"
+        message="This permanently removes the issue from the database. Use only for bad scan data or mistakes. Open issues are normally cleared when the next scan no longer finds them."
+        confirmLabel="Delete permanently"
+        isDestructive
         onConfirm={handleConfirmDelete}
-        onCancel={() =>
-          setConfirmModal({ isOpen: false, issueId: null, action: null })
-        }
+        onCancel={() => setDeleteConfirm({ isOpen: false, issueId: null })}
       />
 
       <IssueChatPanel

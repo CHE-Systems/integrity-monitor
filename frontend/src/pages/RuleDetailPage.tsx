@@ -130,9 +130,21 @@ export function RuleDetailPage() {
         rule.conditions.forEach((cond: any) => {
           lines.push(`  - type: ${cond.type}`);
           if (cond.field) lines.push(`    field: ${cond.field}`);
-          if (cond.fields)
+          if (cond.field_id) lines.push(`    field_id: ${cond.field_id}`);
+          if (cond.fields?.length)
             lines.push(`    fields: [${cond.fields.join(", ")}]`);
-          if (cond.similarity) lines.push(`    similarity: ${cond.similarity}`);
+          if (cond.field_ids?.length)
+            lines.push(
+              `    field_ids: [${cond.field_ids.join(", ")}]`
+            );
+          if (cond.similarity !== undefined && cond.similarity !== null)
+            lines.push(`    similarity: ${cond.similarity}`);
+          if (cond.tolerance_days !== undefined && cond.tolerance_days !== null)
+            lines.push(`    tolerance_days: ${cond.tolerance_days}`);
+          if (cond.overlap_ratio !== undefined && cond.overlap_ratio !== null)
+            lines.push(`    overlap_ratio: ${cond.overlap_ratio}`);
+          if (cond.value !== undefined && cond.value !== null)
+            lines.push(`    value: ${cond.value}`);
         });
       }
     } else if (category === "relationships") {

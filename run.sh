@@ -102,6 +102,9 @@ cd "$PROJECT_ROOT"
 # Start uvicorn with proper output redirection
 # Use --reload-dir instead of --reload-exclude to only watch backend directory
 # This is much faster in Google Drive folders
+# Force GCP project to match this repo (.firebaserc) - prevents token verification failures
+# when developer's gcloud config points to a different project
+export GCP_PROJECT_ID="data-integrity-monitor"
 PYTHONPATH="$PROJECT_ROOT" nohup uvicorn backend.main:app \
     --reload \
     --reload-dir "$PROJECT_ROOT/backend" \
@@ -124,7 +127,8 @@ for i in {1..45}; do
         exit 1
     fi
     # Check if server is responding
-    if curl -s -f --max-time 2 http://localhost:$BACKEND_PORT/health > /dev/null 2>&1; then
+    # Do not use curl -f: /health may return 503 when dependencies fail; server is still up.
+    if curl -s --max-time 2 http://localhost:$BACKEND_PORT/health > /dev/null 2>&1; then
         BACKEND_READY=true
         break
     fi

@@ -46,6 +46,7 @@ export function useIssueCounts() {
           openExcludingInfoResult,
           closedResult,
           resolvedResult,
+          autoResolvedResult,
           criticalResult,
           warningResult,
           infoResult,
@@ -66,6 +67,9 @@ export function useIssueCounts() {
           ),
           getCountFromServer(
             query(issuesRef, where("status", "==", "resolved"))
+          ),
+          getCountFromServer(
+            query(issuesRef, where("status", "==", "auto_resolved"))
           ),
           getCountFromServer(
             query(
@@ -96,7 +100,7 @@ export function useIssueCounts() {
             open: openResult.data().count,
             openExcludingInfo: openExcludingInfoResult.data().count,
             closed:
-              closedResult.data().count + resolvedResult.data().count,
+              closedResult.data().count + resolvedResult.data().count + autoResolvedResult.data().count,
             resolved: resolvedResult.data().count,
             critical: criticalResult.data().count,
             warning: warningResult.data().count,

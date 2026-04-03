@@ -183,6 +183,50 @@ export function useRemediateActions() {
     [getAuthHeaders]
   );
 
+  const dismissDuplicate = useCallback(
+    async (
+      entity: string,
+      recordIds: string[],
+      ruleId?: string
+    ): Promise<{ dismissal_id: string; resolved_count: number }> => {
+      setLoading(true);
+      setError(null);
+      try {
+        const headers = await getAuthHeaders();
+        const response = await fetch(
+          `${API_BASE}/integrity/issues/dismiss`,
+          {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              entity,
+              record_ids: recordIds,
+              rule_id: ruleId || null,
+            }),
+          }
+        );
+        if (!response.ok) {
+          const err = await response
+            .json()
+            .catch(() => ({ detail: "Dismiss failed" }));
+          throw new Error(
+            typeof err.detail === "string" ? err.detail : "Dismiss failed"
+          );
+        }
+        const data = await response.json();
+        setLoading(false);
+        return data;
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : "Dismiss failed";
+        setError(message);
+        setLoading(false);
+        throw err;
+      }
+    },
+    [getAuthHeaders]
+  );
+
   return {
     loading,
     error,
@@ -190,6 +234,7 @@ export function useRemediateActions() {
     deleteRecord,
     mergeRecords,
     resolveIssues,
+    dismissDuplicate,
     clearError: () => setError(null),
   };
 }

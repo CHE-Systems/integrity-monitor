@@ -51,6 +51,8 @@ class DuplicateCondition(BaseModel):
     type: str
     field: Optional[str] = None
     fields: Optional[List[str]] = None
+    field_id: Optional[str] = None
+    field_ids: Optional[List[str]] = None
     tolerance_days: Optional[int] = None
     similarity: Optional[float] = None
     overlap_ratio: Optional[float] = None

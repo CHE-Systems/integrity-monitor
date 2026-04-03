@@ -13,7 +13,6 @@ import type { Issue } from "../hooks/useFirestoreIssues";
 import { getAirtableLinksWithFallback } from "../utils/airtable";
 import { formatRuleId } from "../utils/ruleFormatter";
 import { useIssueActions } from "../hooks/useIssueActions";
-import { useAuth } from "../hooks/useAuth";
 import { useAirtableSchema } from "../contexts/AirtableSchemaContext";
 import { useAirtableRecords } from "../hooks/useAirtableRecords";
 import ConfirmModal from "../components/ConfirmModal";
@@ -28,23 +27,11 @@ export function IssueDetailPage() {
   const [error, setError] = useState<string | null>(null);
   const [relatedIssues, setRelatedIssues] = useState<Issue[]>([]);
   const [loadingRelated, setLoadingRelated] = useState(false);
-  const {
-    markResolved,
-    deleteIssue,
-    loading: actionLoading,
-  } = useIssueActions();
-  const { isAdmin } = useAuth();
+  const { deleteIssue } = useIssueActions();
   const { schema } = useAirtableSchema();
-  const [resolvingId, setResolvingId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [metadataCollapsed, setMetadataCollapsed] = useState(true);
-  const [confirmModal, setConfirmModal] = useState<{
-    isOpen: boolean;
-    action: "resolve" | "delete" | null;
-  }>({
-    isOpen: false,
-    action: null,
-  });
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
 
   useEffect(() => {
     if (!issueId) {
@@ -263,23 +250,9 @@ export function IssueDetailPage() {
     }
   };
 
-  const handleResolve = async () => {
-    if (!issue) return;
-    setConfirmModal({ isOpen: false, action: null });
-    setResolvingId(issue.id);
-    try {
-      await markResolved(issue.id);
-      navigate(-1);
-    } catch (err) {
-      alert(err instanceof Error ? err.message : "Failed to resolve issue");
-    } finally {
-      setResolvingId(null);
-    }
-  };
-
   const handleDelete = async () => {
     if (!issue) return;
-    setConfirmModal({ isOpen: false, action: null });
+    setDeleteConfirmOpen(false);
     setDeletingId(issue.id);
     try {
       await deleteIssue(issue.id);
@@ -329,50 +302,36 @@ export function IssueDetailPage() {
         >
           ← Back
         </button>
-        <div className="flex gap-2">
-          {issue.run_id && (
-            <button
-              onClick={() => {
-                const params = new URLSearchParams({
-                  run_id: issue.run_id!,
-                  entity: issue.entity,
-                  record_id: issue.record_id,
-                });
-                if (issue.issue_type === "duplicate" && issue.related_records?.length) {
-                  params.set("view", "merge");
-                  issue.related_records.forEach((rid) => params.append("related_record", rid));
-                } else {
-                  params.set("view", "edit");
-                }
-                navigate(`/remediate?${params.toString()}`);
-              }}
-              className="px-4 py-2 text-sm font-medium text-[var(--brand)] border border-[var(--brand)] hover:bg-[var(--brand)]/10 rounded-lg transition-colors"
-            >
-              Remediate
-            </button>
-          )}
-          {isAdmin && (
-            <>
-              <button
-                onClick={() =>
-                  setConfirmModal({ isOpen: true, action: "resolve" })
-                }
-                disabled={actionLoading && resolvingId === issue.id}
-                className="px-4 py-2 text-sm font-medium text-[var(--text-main)] bg-[var(--bg-mid)] hover:bg-[var(--bg-mid)]/80 rounded-lg disabled:opacity-50"
-              >
-                {actionLoading && resolvingId === issue.id ? "..." : "Resolve"}
-              </button>
-              <button
-                onClick={() =>
-                  setConfirmModal({ isOpen: true, action: "delete" })
-                }
-                disabled={deletingId === issue.id}
-                className="px-4 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg disabled:opacity-50"
-              >
-                {deletingId === issue.id ? "..." : "Delete"}
-              </button>
-            </>
-          )}
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              const params = new URLSearchParams({
+                entity: issue.entity,
+                record_id: issue.record_id,
+                from: "list",
+              });
+              if (issue.issue_type === "duplicate" && issue.related_records?.length) {
+                params.set("view", "merge");
+                issue.related_records.forEach((rid) => params.append("related_record", rid));
+              } else {
+                params.set("view", "edit");
+              }
+              navigate(`/issues/fix?${params.toString()}`);
+            }}
+            className="px-4 py-2 text-sm font-medium text-[var(--brand)] border border-[var(--brand)] hover:bg-[var(--brand)]/10 rounded-lg transition-colors"
+          >
+            Fix
+          </button>
+          <button
+            type="button"
+            title="Permanently remove this issue record"
+            onClick={() => setDeleteConfirmOpen(true)}
+            disabled={deletingId === issue.id}
+            className="px-4 py-2 text-sm font-medium text-red-700 border border-red-200 bg-red-50 hover:bg-red-100 rounded-lg disabled:opacity-50"
+          >
+            {deletingId === issue.id ? "..." : "Delete"}
+          </button>
         </div>
       </div>
 
@@ -498,7 +457,9 @@ export function IssueDetailPage() {
                     : "bg-green-100 text-green-800"
                 }`}
               >
-                {issue.status || "open"}
+                {issue.status === "auto_resolved"
+                  ? "Auto-resolved"
+                  : issue.status || "open"}
               </span>
             </div>
 
@@ -822,21 +783,13 @@ export function IssueDetailPage() {
       )}
 
       <ConfirmModal
-        isOpen={confirmModal.isOpen && confirmModal.action === "resolve"}
-        title="Resolve Issue"
-        message="Are you sure you want to mark this issue as resolved? This will update the status in Firestore."
-        confirmLabel="Resolve"
-        onConfirm={handleResolve}
-        onCancel={() => setConfirmModal({ isOpen: false, action: null })}
-      />
-      <ConfirmModal
-        isOpen={confirmModal.isOpen && confirmModal.action === "delete"}
-        title="Delete Issue"
-        message="Are you sure you want to delete this issue? This action cannot be undone and will permanently remove the issue from Firebase."
-        confirmLabel="Delete"
+        isOpen={deleteConfirmOpen}
+        title="Delete issue record"
+        message="This permanently removes the issue from the database. Use only for bad scan data or mistakes. Open issues are normally cleared when the next scan no longer finds them."
+        confirmLabel="Delete permanently"
         isDestructive
         onConfirm={handleDelete}
-        onCancel={() => setConfirmModal({ isOpen: false, action: null })}
+        onCancel={() => setDeleteConfirmOpen(false)}
       />
     </div>
   );

@@ -29,6 +29,13 @@
     ],
     "rewrites": [
       {
+        "source": "/health",
+        "run": {
+          "serviceId": "integrity-runner",
+          "region": "us-central1"
+        }
+      },
+      {
         "source": "**",
         "destination": "/index.html"
       }

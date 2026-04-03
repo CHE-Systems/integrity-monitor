@@ -11,7 +11,7 @@ from ..utils.similarity import jaccard_ratio, jaro_winkler
 # Field mapping from config field names to normalized record attributes
 STUDENT_FIELD_MAP = {
     # Short aliases used in Firestore rule conditions
-    "legal_first_name": "normalized_name",
+    "legal_first_name": "first_name_norm",
     "legal_last_name": "last_name_norm",
     "date_of_birth": "dob",
     "primary_email": "email",

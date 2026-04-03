@@ -401,6 +401,18 @@ export default function App({ children }: AppProps) {
                   >
                     Overview
                   </NavLink>
+                  <NavLink
+                    to="/issues"
+                    className={({ isActive }) =>
+                      `rounded-full px-4 py-1.5 font-medium transition-colors ${
+                        isActive
+                          ? "bg-[var(--brand)] text-white"
+                          : "text-[var(--text-muted)] hover:text-[var(--text-main)]"
+                      }`
+                    }
+                  >
+                    Issues
+                  </NavLink>
                   {isAdmin && (
                     <>
                       <NavLink
@@ -428,7 +440,7 @@ export default function App({ children }: AppProps) {
                         Runs
                       </NavLink>
                       <NavLink
-                        to="/issues"
+                        to="/users"
                         className={({ isActive }) =>
                           `rounded-full px-4 py-1.5 font-medium transition-colors ${
                             isActive
@@ -437,19 +449,7 @@ export default function App({ children }: AppProps) {
                           }`
                         }
                       >
-                        Issues
-                      </NavLink>
-                      <NavLink
-                        to="/remediate"
-                        className={({ isActive }) =>
-                          `rounded-full px-4 py-1.5 font-medium transition-colors ${
-                            isActive
-                              ? "bg-[var(--brand)] text-white"
-                              : "text-[var(--text-muted)] hover:text-[var(--text-main)]"
-                          }`
-                        }
-                      >
-                        Remediate
+                        Users
                       </NavLink>
                     </>
                   )}

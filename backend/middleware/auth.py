@@ -101,6 +101,14 @@ def verify_firebase_token(authorization: Optional[str] = Header(None)) -> dict:
         raise AuthenticationError("Invalid or expired Firebase token")
 
 
+def firebase_token_firestore_project_id(decoded_token: dict) -> Optional[str]:
+    """Firebase ID token ``aud`` is the GCP/Firebase project ID (matches client Firestore)."""
+    aud = decoded_token.get("aud")
+    if isinstance(aud, str) and aud.strip():
+        return aud.strip()
+    return None
+
+
 class AuthenticationError(HTTPException):
     """Custom exception for authentication failures."""
 
@@ -110,6 +118,45 @@ class AuthenticationError(HTTPException):
             detail=detail,
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+
+def assert_firestore_admin_user(decoded_token: dict) -> None:
+    """Require admin: JWT custom claim isAdmin or Firestore users/{uid}.isAdmin."""
+    uid = decoded_token.get("uid")
+    if not uid:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required",
+        )
+    if decoded_token.get("isAdmin") is True:
+        return
+    try:
+        from ..clients.firestore import FirestoreClient
+        from ..config.config_loader import load_runtime_config
+
+        config = load_runtime_config()
+        pid = firebase_token_firestore_project_id(decoded_token)
+        client = FirestoreClient(config.firestore, project_id=pid)._get_client()
+        doc = client.collection("users").document(uid).get()
+        if doc.exists and doc.to_dict().get("isAdmin") is True:
+            return
+    except Exception as exc:
+        logger.warning("Firestore admin check failed", extra={"error": str(exc)})
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Admin access required",
+    )
+
+
+def firebase_admin_auth_or_raise():
+    """Return firebase_admin.auth module, or raise 500 if unavailable."""
+    admin_auth = _get_firebase_admin()
+    if not admin_auth:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Firebase Admin SDK not configured",
+        )
+    return admin_auth
 
 
 def verify_bearer_token(authorization: Optional[str] = Header(None)) -> str:
@@ -187,7 +234,8 @@ def verify_api_key_or_bearer_token(authorization: Optional[str] = Header(None)) 
         from google.cloud import firestore as firestore_lib
 
         key_hash = hashlib.sha256(token.encode()).hexdigest()
-        db = firestore_lib.Client()
+        project_id = os.getenv("GOOGLE_CLOUD_PROJECT") or os.getenv("GCP_PROJECT_ID") or "data-integrity-monitor"
+        db = firestore_lib.Client(project=project_id)
         query = db.collection_group("api_keys").where("key_hash", "==", key_hash).limit(1)
         docs = list(query.stream())
 

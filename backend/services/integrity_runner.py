@@ -856,6 +856,19 @@ class IntegrityRunner:
                         att_issues = []
                         self._firestore_writer.write_log(run_id, "info", "Attendance check skipped (not selected in checks)")
                     
+                    # Track which checks actually ran (for reconciliation scoping)
+                    checks_executed: List[str] = []
+                    if should_run_duplicates:
+                        checks_executed.append("duplicates")
+                    if should_run_links:
+                        checks_executed.append("links")
+                    if should_run_required_fields:
+                        checks_executed.append("required_fields")
+                    if should_run_value_checks:
+                        checks_executed.append("value_checks")
+                    if should_run_attendance and attendance_rules_to_use:
+                        checks_executed.append("attendance")
+
                     # Merge and summarize issues
                     issues = check_results
                     total_issues_before_merge = len(issues)
@@ -910,6 +923,10 @@ class IntegrityRunner:
                 # Fail fast - don't continue with empty results when all checks fail
                 raise IntegrityRunError(run_id, error_message, transient=False) from exc
 
+            # Capture scope for reconciliation (entities that were actually fetched + checks that ran)
+            entities_included = list(entity_counts.keys()) if entity_counts else []
+            checks_executed_list = checks_executed if "checks_executed" in locals() else []
+
             # Always write to Firestore, even on failure
             # Keep status as "running" until all Firestore operations are complete
             try:
@@ -921,6 +938,8 @@ class IntegrityRunner:
                         "status": status,  # Still "running" at this point
                         "started_at": start_time,  # Keep original start time
                         "config_version": config_version,
+                        "entities_included": entities_included,
+                        "checks_executed": checks_executed_list,
                         **metrics,
                     }
                     if failed_checks:
@@ -1059,6 +1078,28 @@ class IntegrityRunner:
                             )
                             # Don't fail the run if feedback analysis fails
                     
+                    # Reconcile open issues: auto-resolve issues no longer found by this scan
+                    reconcile_closed_count = 0
+                    if status in ("healthy", "warning", "critical", "success") and not failed_checks:
+                        try:
+                            from .issue_reconciliation import reconcile_open_issues
+                            merged_for_reconcile = merged if "merged" in locals() else []
+                            with timed("reconcile_issues", metrics):
+                                reconcile_closed_count = reconcile_open_issues(
+                                    firestore_client=self._firestore_client,
+                                    run_id=run_id,
+                                    merged=merged_for_reconcile,
+                                    entities_included=entities_included,
+                                    checks_executed=checks_executed_list,
+                                    log_callback=lambda lvl, msg: self._firestore_writer.write_log(run_id, lvl, msg),
+                                )
+                        except Exception as exc:
+                            logger.warning(
+                                "Issue reconciliation failed",
+                                extra={"run_id": run_id, "error": str(exc)},
+                                exc_info=True,
+                            )
+
                     log_write(logger, run_id, "firestore", 1, metrics.get("duration_write_firestore", 0))
                     
                     # Write final status to Firestore now that all operations are complete
@@ -1068,6 +1109,10 @@ class IntegrityRunner:
                         "status": status,  # Final calculated status
                         "started_at": start_time,
                         "config_version": config_version,
+                        "entities_included": entities_included,
+                        "checks_executed": checks_executed_list,
+                        "reconcile_applied": reconcile_closed_count > 0,
+                        "reconcile_closed_count": reconcile_closed_count,
                         **metrics,
                     }
                     if failed_checks:

@@ -97,19 +97,23 @@ export function useAirtableRecords(
       const fetchedRecords = data.records || {};
       setRecords(fetchedRecords);
 
-      // Phase 2: Resolve linked record names (non-blocking)
+      // Phase 2: Resolve linked record names (non-blocking, with retry)
       if (schema && Object.keys(fetchedRecords).length > 0) {
-        try {
-          const names = await resolveLinkedRecordNames(
-            entity,
-            fetchedRecords,
-            schema,
-            token
-          );
-          setLinkedRecordNames(names);
-        } catch (err) {
-          console.warn("Failed to resolve linked record names:", err);
-          // Non-critical — don't block the main display
+        let resolved = false;
+        for (let attempt = 0; attempt < 2 && !resolved; attempt++) {
+          try {
+            if (attempt > 0) await new Promise((r) => setTimeout(r, 1000));
+            const names = await resolveLinkedRecordNames(
+              entity,
+              fetchedRecords,
+              schema,
+              token
+            );
+            setLinkedRecordNames(names);
+            resolved = true;
+          } catch (err) {
+            console.warn(`Failed to resolve linked record names (attempt ${attempt + 1}):`, err);
+          }
         }
       }
     } catch (err) {
@@ -277,26 +281,21 @@ async function resolveLinkedRecordNames(
 
   if (Object.keys(linkedIdsByTable).length === 0) return {};
 
-  // Build table ID → entity name map
-  const tableIdToName: Record<string, string> = {};
-  for (const table of schema.tables) {
-    // Use the table name as the entity, normalizing spaces to underscores
-    tableIdToName[table.id] = table.name.toLowerCase().replace(/\s+/g, "_");
-  }
-
   // Fetch linked records for each target table (in parallel)
   const names: Record<string, string> = {};
 
   const fetchPromises = Object.entries(linkedIdsByTable).map(
     async ([tableId, ids]) => {
-      const entityName = tableIdToName[tableId];
-      if (!entityName || ids.size === 0) return;
+      if (ids.size === 0) return;
 
       const targetTable = schema.tables.find((t) => t.id === tableId);
       if (!targetTable) return;
 
-      // Only resolve up to 20 linked records per table
-      const idsToFetch = Array.from(ids).slice(0, 20);
+      // Use the exact table name from the schema, normalized to underscores.
+      // This avoids entity-name guessing mismatches.
+      const entityName = targetTable.name.toLowerCase().replace(/\s+/g, "_");
+
+      const idsToFetch = Array.from(ids).slice(0, 50);
 
       try {
         const resp = await fetch(`${API_BASE}/airtable/records/by-ids`, {
@@ -785,20 +784,25 @@ function formatFieldValue(
 
     // Check if this is an array of linked record IDs
     if (typeof value[0] === "string" && value[0].startsWith("rec")) {
-      // If we have resolved names, show them
-      if (linkedRecordNames) {
-        const resolvedNames = value
-          .map((id) =>
-            typeof id === "string" ? linkedRecordNames[id] : undefined
-          )
-          .filter(Boolean) as string[];
-
-        if (resolvedNames.length > 0) {
-          return resolvedNames.join(", ");
+      const resolved: string[] = [];
+      let unresolvedCount = 0;
+      for (const item of value) {
+        if (typeof item !== "string") continue;
+        const name = linkedRecordNames?.[item];
+        if (name) {
+          resolved.push(name);
+        } else {
+          unresolvedCount++;
         }
       }
-      // Fallback: show count
-      return `${value.length} linked record${value.length > 1 ? "s" : ""}`;
+      if (resolved.length > 0) {
+        const display = resolved.join(", ");
+        if (unresolvedCount > 0) {
+          return `${display} + ${unresolvedCount} more`;
+        }
+        return display;
+      }
+      return `${value.length} linked record${value.length !== 1 ? "s" : ""}`;
     }
 
     return value.slice(0, 3).join(", ") + (value.length > 3 ? "..." : "");

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { doc, updateDoc, getDoc } from "firebase/firestore";
+import { doc, updateDoc } from "firebase/firestore";
 import { db, auth } from "../config/firebase";
 import { API_BASE } from "../config/api";
 
@@ -13,12 +13,6 @@ export function useIssueActions() {
     try {
       const user = auth.currentUser;
       if (!user) throw new Error("Not authenticated");
-
-      // Verify admin status to prevent race conditions
-      const userDoc = await getDoc(doc(db, "users", user.uid));
-      if (!userDoc.exists() || !userDoc.data()?.isAdmin) {
-        throw new Error("Unauthorized: Admin access required");
-      }
 
       const issueRef = doc(db, "integrity_issues", issueId);
       await updateDoc(issueRef, {
@@ -101,28 +95,23 @@ export function useIssueActions() {
       const user = auth.currentUser;
       if (!user) throw new Error("Not authenticated");
 
-      const userDoc = await getDoc(doc(db, "users", user.uid));
-      if (!userDoc.exists() || !userDoc.data()?.isAdmin) {
-        throw new Error("Unauthorized: Admin access required");
-      }
-
       const token = await user.getIdToken();
 
       const params = new URLSearchParams();
       params.append("date_range", filters.dateRange);
-      
+
       if (filters.issueTypes && filters.issueTypes.length > 0) {
         filters.issueTypes.forEach((type) => {
           params.append("issue_types", type);
         });
       }
-      
+
       if (filters.entities && filters.entities.length > 0) {
         filters.entities.forEach((entity) => {
           params.append("entities", entity);
         });
       }
-      
+
       if (filters.dateRange === "custom") {
         if (filters.customStartDate) {
           const startDate = new Date(filters.customStartDate);
@@ -171,12 +160,6 @@ export function useIssueActions() {
     try {
       const user = auth.currentUser;
       if (!user) throw new Error("Not authenticated");
-
-      // Verify admin status
-      const userDoc = await getDoc(doc(db, "users", user.uid));
-      if (!userDoc.exists() || !userDoc.data()?.isAdmin) {
-        throw new Error("Unauthorized: Admin access required");
-      }
 
       // Get Firebase ID token for API authentication
       const token = await user.getIdToken();

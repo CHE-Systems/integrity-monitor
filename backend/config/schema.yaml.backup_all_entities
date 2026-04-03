@@ -283,10 +283,13 @@ duplicates:
             field: date_of_birth
             tolerance_days: 1
       - rule_id: dup.student.phone_name
-        description: Phone exact match and last name similarity ≥0.92.
+        description: Phone exact match and first name + last name similarity (both required). Prevents siblings from being flagged.
         conditions:
           - type: exact_match
             field: primary_phone
+          - type: similarity
+            field: legal_first_name
+            similarity: 0.85
           - type: similarity
             field: legal_last_name
             similarity: 0.92

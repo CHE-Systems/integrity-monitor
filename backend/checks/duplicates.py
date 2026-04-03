@@ -23,6 +23,38 @@ POSSIBLE_THRESHOLD = 0.6
 LIKELY_SEVERITY = "warning"
 POSSIBLE_SEVERITY = "info"
 
+_HARDCODED_RULE_DESCRIPTIONS: Dict[str, str] = {
+    "dup.student.name_dob": "Matching name and date of birth",
+    "dup.student.name_only": "Similar name (no date of birth match)",
+    "dup.parent.email": "Matching email address",
+    "dup.parent.phone": "Matching phone number",
+    "dup.parent.name_student": "Similar name and shared student",
+    "dup.parent.address": "Matching address",
+    "dup.contractor.email": "Matching email address",
+    "dup.contractor.phone": "Matching phone number",
+    "dup.contractor.name": "Similar name",
+}
+
+
+def _parse_created_time(record: dict) -> Optional[datetime]:
+    """Parse Airtable createdTime from a record. Returns None if missing or unparseable."""
+    created_time_str = record.get("createdTime")
+    if not created_time_str:
+        return None
+    try:
+        if isinstance(created_time_str, datetime):
+            return created_time_str
+        if isinstance(created_time_str, str):
+            clean_str = created_time_str.replace("Z", "+00:00")
+            try:
+                return datetime.strptime(clean_str.split("+")[0], "%Y-%m-%dT%H:%M:%S.%f")
+            except ValueError:
+                clean_str = created_time_str.replace("Z", "").split(".")[0]
+                return datetime.strptime(clean_str, "%Y-%m-%dT%H:%M:%S")
+    except Exception:
+        pass
+    return None
+
 
 def _serialize_for_firestore(obj: Any) -> Any:
     """Recursively convert non-Firestore-safe types (date, datetime) to strings."""
@@ -44,6 +76,7 @@ class StudentRecord:
     record_id: str
     name: str
     normalized_name: str
+    first_name_norm: str
     last_name_norm: str
     last_name_soundex: str
     campus: str
@@ -110,6 +143,25 @@ class PairMatch:
     evidence: Dict[str, Any]
 
 
+def _load_dismissed_pairs(firestore_writer) -> Dict[str, Set[frozenset]]:
+    """Load all dismissed duplicate pairs from Firestore, grouped by entity."""
+    dismissed: Dict[str, Set[frozenset]] = {}
+    try:
+        if firestore_writer and hasattr(firestore_writer, "_firestore_client"):
+            fc = firestore_writer._firestore_client
+            if fc:
+                client = fc._get_client()
+                for doc in client.collection("integrity_dismissals").stream():
+                    data = doc.to_dict()
+                    entity = data.get("entity", "")
+                    record_ids = data.get("record_ids", [])
+                    if len(record_ids) >= 2:
+                        dismissed.setdefault(entity, set()).add(frozenset(record_ids))
+    except Exception as exc:
+        logger.warning("Could not load dismissed pairs (continuing without filter)", extra={"error": str(exc)})
+    return dismissed
+
+
 def run(
     records: Dict[str, list], 
     schema_config: Optional[SchemaConfig] = None,
@@ -135,6 +187,12 @@ def run(
             except Exception:
                 pass  # Don't fail if logging fails
     
+    # Load dismissed pairs (won't be re-flagged)
+    dismissed_by_entity = _load_dismissed_pairs(firestore_writer)
+    if dismissed_by_entity:
+        total = sum(len(v) for v in dismissed_by_entity.values())
+        console_log("info", f"Loaded {total} dismissed duplicate pairs across {len(dismissed_by_entity)} entities")
+
     dup_config = schema_config.duplicates if schema_config else {}
     
     # Log what we received
@@ -225,7 +283,7 @@ def run(
         console_log("warning", "No contractor duplicate rules found in schema config - dup_def is None or missing")
         logger.warning("No contractor duplicate rules found in schema config - dup_def is None or missing")
     
-    student_issues = _process_students(records.get("students", []), student_dup_def, run_id=run_id, firestore_writer=firestore_writer)
+    student_issues = _process_students(records.get("students", []), student_dup_def, run_id=run_id, firestore_writer=firestore_writer, dismissed_pairs=dismissed_by_entity.get("student"))
     issues.extend(student_issues)
     # Count issues by rule_id
     for issue in student_issues:
@@ -242,7 +300,7 @@ def run(
         }
     )
     
-    parent_issues = _process_parents(records.get("parents", []), parent_dup_def)
+    parent_issues = _process_parents(records.get("parents", []), parent_dup_def, dismissed_pairs=dismissed_by_entity.get("parent"))
     issues.extend(parent_issues)
     for issue in parent_issues:
         if issue.rule_id in all_rule_issues:
@@ -273,7 +331,7 @@ def run(
             "possible_count": possible_count,
         }
     )
-    contractor_issues = _process_contractors(contractor_records, contractor_dup_def, run_id=run_id, firestore_writer=firestore_writer)
+    contractor_issues = _process_contractors(contractor_records, contractor_dup_def, run_id=run_id, firestore_writer=firestore_writer, dismissed_pairs=dismissed_by_entity.get("contractor"))
     issues.extend(contractor_issues)
     for issue in contractor_issues:
         if issue.rule_id in all_rule_issues:
@@ -297,7 +355,7 @@ def run(
 
     student_truth_records = records.get("student_truth", [])
     console_log("info", f"Processing student_truth - records: {len(student_truth_records)}, dup_def_is_none: {student_truth_dup_def is None}")
-    student_truth_issues = _process_student_truths(student_truth_records, student_truth_dup_def, run_id=run_id, firestore_writer=firestore_writer)
+    student_truth_issues = _process_student_truths(student_truth_records, student_truth_dup_def, run_id=run_id, firestore_writer=firestore_writer, dismissed_pairs=dismissed_by_entity.get("student_truth"))
     issues.extend(student_truth_issues)
     for issue in student_truth_issues:
         if issue.rule_id in all_rule_issues:
@@ -452,6 +510,7 @@ def _normalize_students(records: Iterable[dict]) -> Dict[str, StudentRecord]:
         fallback_name = _extract_field(fields, "Student's Full Name", "fldFgTbOOat95IfWW", "name", "full_name")
         full_name = " ".join(filter(None, [first, last])) or (fallback_name or "")
         normalized_name = normalize_name(full_name)
+        first_name_norm = normalize_name(first or (full_name.split()[0] if full_name else ""))
         last_name_norm = normalize_name(last or (full_name.split()[-1] if full_name else ""))
         dob = _parse_dob(_extract_field(
             fields,
@@ -475,6 +534,7 @@ def _normalize_students(records: Iterable[dict]) -> Dict[str, StudentRecord]:
             record_id=record_id,
             name=full_name.strip(),
             normalized_name=normalized_name,
+            first_name_norm=first_name_norm,
             last_name_norm=last_name_norm,
             last_name_soundex=_soundex(last_name_norm),
             campus="",
@@ -671,6 +731,7 @@ def _process_students(
     dup_def: Optional[DuplicateDefinition] = None,
     run_id: Optional[str] = None,
     firestore_writer=None,
+    dismissed_pairs: Optional[Set[frozenset]] = None,
 ) -> List[IssuePayload]:
     def console_log(level: str, message: str):
         if level == "info":
@@ -717,10 +778,12 @@ def _process_students(
         classifier = _classify_student_pair
     pairs = _detect_pairs(normalized, classifier, console_log)
     console_log("info", f"Student duplicate detection found {len(pairs)} pairs from {len(normalized)} records")
-    return _build_group_issues("student", normalized, pairs)
+    created_times = {r.get("id"): t for r in raw_records if (t := _parse_created_time(r))}
+    rule_descs = _extract_rule_descriptions(dup_def)
+    return _build_group_issues("student", normalized, pairs, created_times, dismissed_pairs=dismissed_pairs, rule_descriptions=rule_descs)
 
 
-def _process_parents(raw_records: List[dict], dup_def: Optional[DuplicateDefinition] = None) -> List[IssuePayload]:
+def _process_parents(raw_records: List[dict], dup_def: Optional[DuplicateDefinition] = None, dismissed_pairs: Optional[Set[frozenset]] = None) -> List[IssuePayload]:
     normalized = _normalize_parents(raw_records)
     # Check if dup_def has any rules (not just if it exists)
     has_rules = dup_def and ((dup_def.likely and len(dup_def.likely) > 0) or (dup_def.possible and len(dup_def.possible) > 0))
@@ -731,14 +794,17 @@ def _process_parents(raw_records: List[dict], dup_def: Optional[DuplicateDefinit
             logger.warning("DuplicateDefinition exists for parents but has no rules - falling back to hardcoded logic")
         classifier = _classify_parent_pair
     pairs = _detect_pairs(normalized, classifier)
-    return _build_group_issues("parent", normalized, pairs)
+    created_times = {r.get("id"): t for r in raw_records if (t := _parse_created_time(r))}
+    rule_descs = _extract_rule_descriptions(dup_def)
+    return _build_group_issues("parent", normalized, pairs, created_times, dismissed_pairs=dismissed_pairs, rule_descriptions=rule_descs)
 
 
 def _process_contractors(
     raw_records: List[dict], 
     dup_def: Optional[DuplicateDefinition] = None,
     run_id: Optional[str] = None,
-    firestore_writer = None
+    firestore_writer = None,
+    dismissed_pairs: Optional[Set[frozenset]] = None,
 ) -> List[IssuePayload]:
     def console_log(level: str, message: str):
         """Helper to log to both logger and browser console"""
@@ -762,7 +828,9 @@ def _process_contractors(
     classifier = _classify_contractor_pair
     pairs = _detect_pairs(normalized, classifier, console_log)
     console_log("info", f"Found {len(pairs)} duplicate pairs for contractors")
-    return _build_group_issues("contractor", normalized, pairs)
+    created_times = {r.get("id"): t for r in raw_records if (t := _parse_created_time(r))}
+    rule_descs = _extract_rule_descriptions(dup_def)
+    return _build_group_issues("contractor", normalized, pairs, created_times, dismissed_pairs=dismissed_pairs, rule_descriptions=rule_descs)
 
 
 def _process_student_truths(
@@ -770,6 +838,7 @@ def _process_student_truths(
     dup_def: Optional[DuplicateDefinition] = None,
     run_id: Optional[str] = None,
     firestore_writer=None,
+    dismissed_pairs: Optional[Set[frozenset]] = None,
 ) -> List[IssuePayload]:
     def console_log(level: str, message: str):
         if level == "info":
@@ -804,7 +873,9 @@ def _process_student_truths(
         return []
     pairs = _detect_pairs(normalized, classifier, console_log)
     console_log("info", f"Student Truth duplicate detection found {len(pairs)} pairs from {len(normalized)} records")
-    return _build_group_issues("student_truth", normalized, pairs)
+    created_times = {r.get("id"): t for r in raw_records if (t := _parse_created_time(r))}
+    rule_descs = _extract_rule_descriptions(dup_def)
+    return _build_group_issues("student_truth", normalized, pairs, created_times, dismissed_pairs=dismissed_pairs, rule_descriptions=rule_descs)
 
 
 def _detect_pairs(
@@ -1167,13 +1238,37 @@ def _classify_contractor_pair(a: ContractorRecord, b: ContractorRecord) -> Optio
 # ---------------------------------------------------------------------------
 
 
+def _extract_rule_descriptions(dup_def: Optional[DuplicateDefinition]) -> Dict[str, str]:
+    """Build a rule_id → description map from a DuplicateDefinition."""
+    descs: Dict[str, str] = {}
+    if not dup_def:
+        return descs
+    for rule in dup_def.likely or []:
+        descs[rule.rule_id] = rule.description
+    for rule in dup_def.possible or []:
+        descs[rule.rule_id] = rule.description
+    return descs
+
+
 def _build_group_issues(
     entity: str,
     normalized: Dict[str, Any],
     matches: List[PairMatch],
+    created_times: Optional[Dict[str, datetime]] = None,
+    dismissed_pairs: Optional[Set[frozenset]] = None,
+    rule_descriptions: Optional[Dict[str, str]] = None,
 ) -> List[IssuePayload]:
     if not matches:
         return []
+
+    # Filter out dismissed pairs before grouping
+    if dismissed_pairs:
+        matches = [
+            m for m in matches
+            if frozenset([m.primary_id, m.secondary_id]) not in dismissed_pairs
+        ]
+        if not matches:
+            return []
 
     parent: Dict[str, str] = {}
 
@@ -1207,10 +1302,13 @@ def _build_group_issues(
         group_matches = [m for m in matches if m.primary_id in members and m.secondary_id in members]
         top_match = max(group_matches, key=lambda m: severity_rank.get(m.severity, 0))
         related = [m for m in member_ids]
-        primary_id = _select_primary(entity, members, normalized)
+        primary_id = _select_primary(entity, members, normalized, created_times or {})
         related.remove(primary_id)
         group_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{entity}:{'|'.join(member_ids)}"))
-        description = f"{entity.title()} duplicate group with {len(members)} records (primary {primary_id})."
+        rule_desc = (rule_descriptions or {}).get(top_match.rule_id, "")
+        if not rule_desc:
+            rule_desc = _HARDCODED_RULE_DESCRIPTIONS.get(top_match.rule_id, "")
+        description = rule_desc or top_match.rule_id
         metadata = _serialize_for_firestore({
             "group_id": group_id,
             "members": member_ids,
@@ -1233,25 +1331,28 @@ def _build_group_issues(
     return issues
 
 
-def _select_primary(entity: str, members: Set[str], normalized: Dict[str, Any]) -> str:
-    def completeness(record: Any) -> int:
+def _select_primary(
+    entity: str,
+    members: Set[str],
+    normalized: Dict[str, Any],
+    created_times: Dict[str, datetime],
+) -> str:
+    """Select the original (oldest) record by createdTime. Fallback to completeness then record_id if no createdTime."""
+    def sort_key(record_id: str) -> Tuple[Any, int, str]:
+        created = created_times.get(record_id)
+        if created is not None:
+            return (created, 0, record_id)
+        record = normalized.get(record_id)
         if isinstance(record, StudentRecord):
-            return sum(
-                bool(value)
-                for value in [
-                    record.name,
-                    record.dob,
-                    record.email,
-                    record.phone,
-                ]
-            )
-        if isinstance(record, ParentRecord):
-            return sum(bool(value) for value in [record.email, record.phone, record.students])
-        if isinstance(record, ContractorRecord):
-            # Removed: ein and campuses - no longer used for duplicate detection
-            return sum(bool(value) for value in [record.email, record.phone])
-        if isinstance(record, StudentTruthRecord):
-            return sum(bool(value) for value in [record.student_id, record.name, record.school_year, record.campus, record.dob, record.enrollment_status])
-        return 0
+            completeness = sum(bool(v) for v in [record.name, record.dob, record.email, record.phone])
+        elif isinstance(record, ParentRecord):
+            completeness = sum(bool(v) for v in [record.email, record.phone, record.students])
+        elif isinstance(record, ContractorRecord):
+            completeness = sum(bool(v) for v in [record.email, record.phone])
+        elif isinstance(record, StudentTruthRecord):
+            completeness = sum(bool(v) for v in [record.student_id, record.name, record.school_year, record.campus, record.dob, record.enrollment_status])
+        else:
+            completeness = 0
+        return (datetime.max, -completeness, record_id)
 
-    return max(members, key=lambda record_id: (completeness(normalized[record_id]), record_id))
+    return min(members, key=sort_key)

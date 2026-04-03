@@ -27,9 +27,10 @@ logger = logging.getLogger(__name__)
 class FirestoreClient:
     """Firestore client for writing run metadata and metrics."""
 
-    def __init__(self, config: FirestoreConfig):
+    def __init__(self, config: FirestoreConfig, project_id: Optional[str] = None):
         self._config = config
         self._client: firestore.Client | None = None
+        self._project_id_override = (project_id or "").strip() or None
 
     def _get_client(self) -> firestore.Client:
         """Lazy initialization of Firestore client."""
@@ -44,11 +45,12 @@ class FirestoreClient:
                 from google.oauth2 import service_account
                 
                 # Determine project ID - prefer env vars, fallback to data-integrity-monitor (matches .firebaserc)
-                project_id = (
+                env_project_id = (
                     os.getenv("GOOGLE_CLOUD_PROJECT")
                     or os.getenv("GCP_PROJECT_ID")
                     or "data-integrity-monitor"
                 )
+                target_project = self._project_id_override or env_project_id
                 
                 # Try to initialize with explicit credentials path if set
                 cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
@@ -67,9 +69,14 @@ class FirestoreClient:
                     if os.path.exists(cred_path):
                         # Load credentials explicitly
                         credentials = service_account.Credentials.from_service_account_file(cred_path)
-                        # Use project_id from credentials if available, otherwise use determined project_id
-                        cred_project_id = credentials.project_id if hasattr(credentials, 'project_id') and credentials.project_id else project_id
-                        self._client = firestore.Client(credentials=credentials, project=cred_project_id)
+                        # Use project_id from credentials if available, otherwise use env default
+                        cred_project_id = (
+                            credentials.project_id
+                            if hasattr(credentials, "project_id") and credentials.project_id
+                            else env_project_id
+                        )
+                        db_project = self._project_id_override or cred_project_id
+                        self._client = firestore.Client(credentials=credentials, project=db_project)
                         logger.info(f"Firestore client initialized with credentials from {cred_path}")
                     else:
                         logger.warning(
@@ -80,8 +87,8 @@ class FirestoreClient:
                         )
                         # Try default credentials with explicit project
                         try:
-                            self._client = firestore.Client(project=project_id)
-                            logger.info(f"Firestore client initialized with Application Default Credentials (project: {project_id})")
+                            self._client = firestore.Client(project=target_project)
+                            logger.info(f"Firestore client initialized with Application Default Credentials (project: {target_project})")
                         except DefaultCredentialsError:
                             # Re-raise with more helpful message
                             raise RuntimeError(
@@ -94,8 +101,8 @@ class FirestoreClient:
                 else:
                     # No explicit path, try default credentials with explicit project
                     try:
-                        self._client = firestore.Client(project=project_id)
-                        logger.info(f"Firestore client initialized with Application Default Credentials (project: {project_id})")
+                        self._client = firestore.Client(project=target_project)
+                        logger.info(f"Firestore client initialized with Application Default Credentials (project: {target_project})")
                     except DefaultCredentialsError:
                         # Re-raise with more helpful message
                         raise RuntimeError(
@@ -880,6 +887,176 @@ class FirestoreClient:
             logger.error(
                 "Failed to record KPI sample",
                 extra={"week_id": week_id, "error": str(exc)},
+                exc_info=True,
+            )
+            raise
+
+    def record_merge_history(self, data: Dict[str, Any]) -> str:
+        """Write a merge history document to Firestore merge_history collection.
+
+        Args:
+            data: Merge history data (snapshots, user, entity, etc.)
+
+        Returns:
+            The auto-generated document ID
+        """
+        try:
+            client = self._get_client()
+            collection_ref = client.collection("merge_history")
+
+            merge_data = data.copy()
+            if "performed_at" not in merge_data:
+                merge_data["performed_at"] = datetime.now(timezone.utc)
+
+            _, doc_ref = collection_ref.add(merge_data)
+            logger.info(
+                "Recorded merge history",
+                extra={"collection": "merge_history", "doc_id": doc_ref.id},
+            )
+            return doc_ref.id
+        except Exception as exc:
+            logger.error(
+                "Failed to record merge history",
+                extra={"error": str(exc)},
+                exc_info=True,
+            )
+            raise
+
+    def update_merge_history(self, doc_id: str, data: Dict[str, Any]) -> None:
+        """Update an existing merge history document.
+
+        Args:
+            doc_id: Document ID to update
+            data: Fields to update
+        """
+        try:
+            client = self._get_client()
+            doc_ref = client.collection("merge_history").document(doc_id)
+            doc_ref.set(data, merge=True)
+            logger.info(
+                "Updated merge history",
+                extra={"collection": "merge_history", "doc_id": doc_id},
+            )
+        except Exception as exc:
+            logger.error(
+                "Failed to update merge history",
+                extra={"doc_id": doc_id, "error": str(exc)},
+                exc_info=True,
+            )
+            raise
+
+    def get_merge_history(self, entity: Optional[str] = None, limit: int = 50) -> list:
+        """Fetch recent merge history documents.
+
+        Args:
+            entity: Optional entity filter
+            limit: Maximum number of documents to return
+
+        Returns:
+            List of merge history documents with their IDs
+        """
+        try:
+            client = self._get_client()
+            collection_ref = client.collection("merge_history")
+            query = collection_ref.order_by("performed_at", direction=firestore.Query.DESCENDING)
+            if entity:
+                query = query.where("entity", "==", entity)
+            query = query.limit(limit)
+
+            results = []
+            for doc in query.stream():
+                doc_data = doc.to_dict()
+                doc_data["id"] = doc.id
+                results.append(doc_data)
+            return results
+        except Exception as exc:
+            logger.error(
+                "Failed to fetch merge history",
+                extra={"error": str(exc)},
+                exc_info=True,
+            )
+            raise
+
+    def get_merge_history_doc(self, doc_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch a single merge history document by ID.
+
+        Args:
+            doc_id: Document ID
+
+        Returns:
+            Document data with ID, or None if not found
+        """
+        try:
+            client = self._get_client()
+            doc_ref = client.collection("merge_history").document(doc_id)
+            doc = doc_ref.get()
+            if not doc.exists:
+                return None
+            doc_data = doc.to_dict()
+            doc_data["id"] = doc.id
+            return doc_data
+        except Exception as exc:
+            logger.error(
+                "Failed to fetch merge history document",
+                extra={"doc_id": doc_id, "error": str(exc)},
+                exc_info=True,
+            )
+            raise
+
+    def record_dismissal(self, data: Dict[str, Any]) -> str:
+        """Write a duplicate dismissal to Firestore integrity_dismissals collection.
+
+        Args:
+            data: Dismissal data (entity, record_ids, dismissed_by, etc.)
+
+        Returns:
+            The auto-generated document ID
+        """
+        try:
+            client = self._get_client()
+            collection_ref = client.collection("integrity_dismissals")
+
+            dismissal_data = data.copy()
+            if "dismissed_at" not in dismissal_data:
+                dismissal_data["dismissed_at"] = datetime.now(timezone.utc)
+
+            _, doc_ref = collection_ref.add(dismissal_data)
+            logger.info(
+                "Recorded dismissal",
+                extra={"collection": "integrity_dismissals", "doc_id": doc_ref.id},
+            )
+            return doc_ref.id
+        except Exception as exc:
+            logger.error(
+                "Failed to record dismissal",
+                extra={"error": str(exc)},
+                exc_info=True,
+            )
+            raise
+
+    def get_dismissals(self, entity: str) -> list:
+        """Fetch all dismissals for an entity.
+
+        Args:
+            entity: Entity name (e.g. 'students')
+
+        Returns:
+            List of dismissal documents
+        """
+        try:
+            client = self._get_client()
+            collection_ref = client.collection("integrity_dismissals")
+            query = collection_ref.where("entity", "==", entity)
+            results = []
+            for doc in query.stream():
+                doc_data = doc.to_dict()
+                doc_data["id"] = doc.id
+                results.append(doc_data)
+            return results
+        except Exception as exc:
+            logger.error(
+                "Failed to fetch dismissals",
+                extra={"entity": entity, "error": str(exc)},
                 exc_info=True,
             )
             raise

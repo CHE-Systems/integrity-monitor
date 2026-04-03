@@ -75,6 +75,20 @@
       "queryScope": "COLLECTION",
       "fields": [
         {
+          "fieldPath": "status",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "entity",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "integrity_issues",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
           "fieldPath": "run_id",
           "order": "ASCENDING"
         },

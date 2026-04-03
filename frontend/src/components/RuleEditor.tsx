@@ -2,7 +2,16 @@ import React, { useState, useEffect } from "react";
 import { useAuth } from "../hooks/useAuth";
 import { API_BASE } from "../config/api";
 import { ACTIVE_ENTITIES, ENTITY_TABLE_MAPPING } from "../config/entities";
-import { ConditionBuilder, cleanConditionsForSave, type Condition } from "./ConditionBuilder";
+import {
+  ConditionBuilder,
+  cleanConditionsForSave,
+  normalizeConditionsForForm,
+  type Condition,
+} from "./ConditionBuilder";
+import {
+  isProbablyAirtableFieldId,
+  normalizeRequiredFieldRuleShape,
+} from "../utils/airtableFieldIds";
 
 interface RuleEditorProps {
   isOpen: boolean;
@@ -78,19 +87,40 @@ export function RuleEditor({
   }, [selectedEntity, currentEntity]);
 
   useEffect(() => {
+    let category = initialCategory || "duplicates";
+    let dataForFieldTerm: Record<string, any> | null = null;
+
     if (initialRule) {
-      setRuleData(initialRule);
+      let data: Record<string, any> = { ...initialRule };
+      if (
+        category === "duplicates" &&
+        Array.isArray(data.conditions) &&
+        data.conditions.length > 0
+      ) {
+        data = {
+          ...data,
+          conditions: normalizeConditionsForForm(
+            data.conditions as Condition[]
+          ),
+        };
+      }
+      if (
+        category === "required_fields" ||
+        category === "value_checks"
+      ) {
+        data = normalizeRequiredFieldRuleShape(data) as Record<string, any>;
+      }
+      dataForFieldTerm = data;
+      setRuleData(data);
       setConditionsJson(
-        initialRule.conditions
-          ? JSON.stringify(initialRule.conditions, null, 2)
-          : ""
+        data.conditions ? JSON.stringify(data.conditions, null, 2) : ""
       );
       setThresholdsJson(
         initialRule.thresholds
           ? JSON.stringify(initialRule.thresholds, null, 2)
           : ""
       );
-      setRawJson(JSON.stringify(initialRule, null, 2));
+      setRawJson(JSON.stringify(data, null, 2));
     } else {
       setRuleData({});
       setConditionsJson("");
@@ -101,13 +131,18 @@ export function RuleEditor({
     setSelectedEntity(entity);
 
     // If attendance_rules is selected but entity is not attendance, reset to duplicates
-    let category = initialCategory || "duplicates";
     if (category === "attendance_rules" && entity !== "attendance") {
       category = "duplicates";
     }
     setSelectedCategory(category);
     setErrors({});
     setEditMode("form"); // Reset to form mode when opening
+
+    if (category === "value_checks" && dataForFieldTerm?.field) {
+      setFieldSearchTerm(String(dataForFieldTerm.field));
+    } else {
+      setFieldSearchTerm("");
+    }
   }, [initialRule, initialCategory, initialEntity, currentEntity, isOpen]);
 
   // Lookup fields when search term changes (for required fields)
@@ -150,6 +185,107 @@ export function RuleEditor({
     return () => clearTimeout(debounceTimer);
   }, [selectedEntity, fieldSearchTerm, getToken]);
 
+  /** Resolve fld… stored in `field` into display name + `field_id` using schema snapshot. */
+  useEffect(() => {
+    if (!isOpen) return;
+    if (
+      selectedCategory !== "required_fields" &&
+      selectedCategory !== "value_checks"
+    ) {
+      return;
+    }
+
+    const f = String(ruleData.field ?? "").trim();
+    const fid = String(ruleData.field_id ?? "").trim();
+    const needsResolution =
+      isProbablyAirtableFieldId(f) ||
+      (f === "" && isProbablyAirtableFieldId(fid));
+    if (!needsResolution) return;
+
+    const id = isProbablyAirtableFieldId(fid)
+      ? fid
+      : isProbablyAirtableFieldId(f)
+        ? f
+        : "";
+    if (!id) return;
+
+    const entityForSchema =
+      selectedCategory === "value_checks" && ruleData.source_entity
+        ? String(ruleData.source_entity)
+        : selectedEntity;
+    if (!entityForSchema) return;
+
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const token = await getToken();
+        if (!token || cancelled) return;
+        const res = await fetch(
+          `${API_BASE}/airtable/schema/fields/${encodeURIComponent(
+            entityForSchema
+          )}`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        if (!res.ok || cancelled) return;
+        const payload = await res.json();
+        const match = (payload.fields || []).find(
+          (row: { id?: string }) => row.id === id
+        );
+        if (!match || cancelled) return;
+
+        setRuleData((prev) => {
+          const pf = String(prev.field ?? "").trim();
+          const pfid = String(prev.field_id ?? "").trim();
+          const stillNeeds =
+            isProbablyAirtableFieldId(pf) ||
+            (pf === "" && isProbablyAirtableFieldId(pfid));
+          if (!stillNeeds) return prev;
+          const prevTarget = isProbablyAirtableFieldId(pfid)
+            ? pfid
+            : isProbablyAirtableFieldId(pf)
+              ? pf
+              : "";
+          if (prevTarget !== id) return prev;
+
+          const next: Record<string, any> = {
+            ...prev,
+            field: match.name,
+            field_id: match.id,
+          };
+          const fn = String(prev.field_name ?? "").trim();
+          if (
+            !fn ||
+            isProbablyAirtableFieldId(fn) ||
+            fn === pf ||
+            fn === id
+          ) {
+            next.field_name = match.name;
+          }
+          return next;
+        });
+
+        if (selectedCategory === "value_checks") {
+          setFieldSearchTerm(match.name);
+        }
+      } catch {
+        /* schema missing or network */
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    isOpen,
+    selectedCategory,
+    selectedEntity,
+    ruleData.field,
+    ruleData.field_id,
+    ruleData.source_entity,
+    getToken,
+  ]);
+
   if (!isOpen) return null;
 
   const validate = (): boolean => {
@@ -188,6 +324,14 @@ export function RuleEditor({
           if (!cond.field && (!cond.fields || cond.fields.length === 0)) {
             newErrors.conditions = "Each condition must have at least one field";
             break;
+          }
+          if (cond.type === "value_equals") {
+            const v = cond.value;
+            if (v === undefined || v === null || String(v).trim() === "") {
+              newErrors.conditions =
+                "Value Equals conditions need an expected value";
+              break;
+            }
           }
         }
       }
@@ -424,10 +568,16 @@ export function RuleEditor({
   );
 
   const handleFieldSelect = (fieldId: string, fieldName: string) => {
+    const prevName = String(ruleData.field_name ?? "").trim();
+    const prevField = String(ruleData.field ?? "").trim();
     updateField("field", fieldName);
     updateField("field_id", fieldId);
-    // Auto-populate field_name for rule label, but allow editing
-    if (!ruleData.field_name) {
+    if (
+      !prevName ||
+      isProbablyAirtableFieldId(prevName) ||
+      prevName === prevField ||
+      prevName === fieldId
+    ) {
       updateField("field_name", fieldName);
     }
     setFieldSearchTerm("");
@@ -622,7 +772,7 @@ export function RuleEditor({
         </label>
         <input
           type="text"
-          value={fieldSearchTerm}
+          value={fieldSearchTerm || ruleData.field || ""}
           onChange={(e) => {
             const value = e.target.value;
             setFieldSearchTerm(value);
@@ -764,9 +914,42 @@ export function RuleEditor({
         {/* Edit Mode Tabs */}
         <div className="flex gap-2 mb-4 border-b border-[var(--border)]">
           <button
+            type="button"
             onClick={() => {
-              // Sync ruleData to rawJson before switching
-              if (editMode === "form") {
+              if (editMode === "json") {
+                try {
+                  const parsed = JSON.parse(rawJson) as Record<string, unknown>;
+                  if (
+                    selectedCategory === "duplicates" &&
+                    Array.isArray(parsed.conditions)
+                  ) {
+                    parsed.conditions = normalizeConditionsForForm(
+                      parsed.conditions as Condition[]
+                    );
+                  }
+                  if (
+                    selectedCategory === "required_fields" ||
+                    selectedCategory === "value_checks"
+                  ) {
+                    Object.assign(
+                      parsed,
+                      normalizeRequiredFieldRuleShape(
+                        parsed as Record<string, unknown>
+                      )
+                    );
+                  }
+                  setRuleData(parsed as Record<string, any>);
+                  setRawJson(JSON.stringify(parsed, null, 2));
+                  if (
+                    selectedCategory === "value_checks" &&
+                    typeof parsed.field === "string"
+                  ) {
+                    setFieldSearchTerm(parsed.field);
+                  }
+                } catch {
+                  /* invalid JSON — keep last ruleData */
+                }
+              } else {
                 setRawJson(JSON.stringify(ruleData, null, 2));
               }
               setEditMode("form");
@@ -780,8 +963,8 @@ export function RuleEditor({
             Form Editor
           </button>
           <button
+            type="button"
             onClick={() => {
-              // Sync ruleData to rawJson before switching
               setRawJson(JSON.stringify(ruleData, null, 2));
               setEditMode("json");
             }}
@@ -809,8 +992,15 @@ export function RuleEditor({
                   setRawJson(value);
                   // Try to parse and sync to ruleData for live preview
                   try {
-                    const parsed = JSON.parse(value);
-                    setRuleData(parsed);
+                    const parsed = JSON.parse(value) as Record<string, any>;
+                    const next =
+                      selectedCategory === "required_fields" ||
+                      selectedCategory === "value_checks"
+                        ? (normalizeRequiredFieldRuleShape(
+                            parsed as Record<string, unknown>
+                          ) as Record<string, any>)
+                        : parsed;
+                    setRuleData(next);
                     // Clear JSON error if it exists
                     if (errors.rawJson) {
                       setErrors((prev) => {

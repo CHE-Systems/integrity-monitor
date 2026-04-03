@@ -19,7 +19,10 @@ import { RulesPage } from "./pages/RulesPage";
 import { RuleDetailPage } from "./pages/RuleDetailPage";
 import { HttpCatError } from "./components/HttpCatError";
 import { ApiKeysPage } from "./pages/ApiKeysPage";
-import { RemediatePage } from "./pages/RemediatePage";
+import { CategoryQueuePage } from "./pages/CategoryQueuePage";
+import { RemediationPage } from "./pages/RemediationPage";
+import { MergeHistoryPage } from "./pages/MergeHistoryPage";
+import { UsersPage } from "./pages/UsersPage";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
@@ -92,7 +95,7 @@ createRoot(document.getElementById("root")!).render(
           <Route
             path="/issues"
             element={
-              <AuthGuard requireAdmin={true}>
+              <AuthGuard requireAdmin={false}>
                 <App>
                   <IssuesPage />
                 </App>
@@ -102,7 +105,7 @@ createRoot(document.getElementById("root")!).render(
           <Route
             path="/issue/:issueId"
             element={
-              <AuthGuard requireAdmin={true}>
+              <AuthGuard requireAdmin={false}>
                 <App>
                   <IssueDetailPage />
                 </App>
@@ -140,14 +143,38 @@ createRoot(document.getElementById("root")!).render(
             }
           />
           <Route
-            path="/remediate"
+            path="/issues/queue"
             element={
-              <AuthGuard requireAdmin={true}>
+              <AuthGuard requireAdmin={false}>
                 <App>
-                  <RemediatePage />
+                  <CategoryQueuePage />
                 </App>
               </AuthGuard>
             }
+          />
+          <Route
+            path="/issues/fix"
+            element={
+              <AuthGuard requireAdmin={false}>
+                <App>
+                  <RemediationPage />
+                </App>
+              </AuthGuard>
+            }
+          />
+          <Route
+            path="/issues/history"
+            element={
+              <AuthGuard requireAdmin={false}>
+                <App>
+                  <MergeHistoryPage />
+                </App>
+              </AuthGuard>
+            }
+          />
+          <Route
+            path="/remediate"
+            element={<Navigate to="/issues" replace />}
           />
           <Route
             path="/api-keys"
@@ -155,6 +182,16 @@ createRoot(document.getElementById("root")!).render(
               <AuthGuard requireAdmin={true}>
                 <App>
                   <ApiKeysPage />
+                </App>
+              </AuthGuard>
+            }
+          />
+          <Route
+            path="/users"
+            element={
+              <AuthGuard requireAdmin={true}>
+                <App>
+                  <UsersPage />
                 </App>
               </AuthGuard>
             }
